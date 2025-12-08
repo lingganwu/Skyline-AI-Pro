@@ -136,8 +136,21 @@ class Skyline_Admin {
                     <div class="sky-menu-item" onclick="SkyTab('speed')">🚀 性能体检</div>
                     <div class="sky-menu-item" onclick="SkyTab('log')">📜 系统日志</div>
                     
-                    <div style="padding:25px;"><button type="submit" name="sky_save" class="sky-btn">保存所有配置</button></div>
-                </div>
+                   <div style="padding:25px 25px 15px;"><button type="submit" name="sky_save" class="sky-btn">保存所有配置</button></div>
+                    
+                    <div style="margin:0 20px 25px; padding:15px; background:rgba(255,255,255,0.6); border-radius:12px; border:1px solid rgba(99,102,241,0.2); text-align:center;">
+                        <div style="font-size:10px; color:#94a3b8; font-weight:800; text-transform:uppercase; letter-spacing:1px; margin-bottom:8px;">POWERED BY</div>
+                        <a href="https://www.lgwu.net" target="_blank" style="display:block; text-decoration:none; transition:.2s;">
+                            <div style="font-weight:800; font-size:15px; color:#334155; display:flex; align-items:center; justify-content:center; gap:8px;">
+                                <img src="https://www.lgwu.net/wp-content/uploads/2023/10/favicon.png" style="width:20px; height:20px; object-fit:contain; display:block;"> <span>灵感屋</span>
+                            </div>
+                            <div style="font-size:11px; color:#6366f1; margin-top:2px;">www.lgwu.net</div>
+                        </a>
+                        <div style="margin-top:8px; font-size:11px; color:#64748b; line-height:1.4;">
+                            专注景观设计与工程<br>获取更多灵感资源
+                        </div>
+                    </div>
+                    </div>
 
                 <div class="sky-main">
                     <div id="pane-dash" class="sky-pane active">
