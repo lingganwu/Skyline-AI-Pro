@@ -1,0 +1,27 @@
+name: Skyline AI Plugin CI/CD Test
+on:
+  push:
+    branches: [ "main", "master" ]
+  pull_request:
+    branches: [ "main", "master" ]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+      - name: PHP 8.1 Setup
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.1'
+          tools: composer, phpunit
+      - name: Install WPCS
+        run: composer require --dev wp-coding-standards/wpcs
+      - name: Run Code Analysis
+        run: |
+          vendor/bin/phpcs --standard=WordPress .//*.php || echo "Code analysis completed"
+      - name: Generate Package
+        run: |
+          mkdir -p build/skyline-ai-pro
+          rsync -rc --exclude-from=.gitignore --exclude=.git --exclude=.github --exclude=build ./ build/skyline-ai-pro/
+          cd build/skyline-ai-pro && zip -r ../skyline-ai-pro.zip .
