@@ -24,6 +24,7 @@ class Skyline_Core {
         add_action('wp_ajax_sky_gen_img', [$this, 'handle_gen_img']);
         add_action('wp_ajax_sky_test_api', [$this, 'handle_api_test']);
         add_action('wp_ajax_sky_clear_logs', [$this, 'handle_clear_logs']);
+        add_action('wp_enqueue_scripts', [$this, 'enqueue_waifu_assets']);
         add_action('wp_footer', [$this, 'render_waifu']);
     }
 
@@ -280,28 +281,27 @@ class Skyline_Core {
         }
     }
 
+    
+    public function enqueue_waifu_assets() {
+        if(!$this->get_opt('robot_enable')) return;
+        if($this->get_opt('robot_only_logged') && !is_user_logged_in()) return;
+
+        wp_enqueue_style('skyline-waifu-css', plugins_url('assets/css/waifu.css', SKY_PATH));
+        wp_enqueue_script('skyline-waifu-js', plugins_url('assets/js/waifu.js', SKY_PATH), [], SKY_VERSION, true);
+        
+        wp_localize_script('skyline-waifu-js', 'skyline_vars', [
+            'nonce' => wp_create_nonce('sky_chat_nonce'),
+            'ajax_url' => admin_url('admin-ajax.php')
+        ]);
+    }
+
+
     public function render_waifu() {
         if(!$this->get_opt('robot_enable')) return;
         if($this->get_opt('robot_only_logged') && !is_user_logged_in()) return;
         $img = $this->get_opt('robot_img') ?: 'https://api.iconify.design/fluent-emoji:robot.svg';
         ?>
-        <style>
-        #sky-waifu { position:fixed; bottom:30px; left:30px; width:70px; height:70px; cursor:pointer; z-index:9990; transition:transform .3s; animation:skyFloat 4s infinite ease-in-out; }
-        #sky-waifu img { width:100%; height:100%; filter:drop-shadow(0 5px 15px rgba(0,0,0,0.2)); }
-        #sky-waifu:hover { transform:scale(1.1) rotate(10deg); }
-        @keyframes skyFloat{0%,100%{transform:translateY(0)}50%{transform:translateY(-10px)}}
-        #sky-waifu-tips { position:absolute; bottom:80px; left:0; width:180px; background:#fff; color:#333; padding:10px; border-radius:10px; box-shadow:0 5px 15px rgba(0,0,0,0.1); font-size:13px; line-height:1.4; opacity:0; transform:translateY(10px); transition:all 0.4s; pointer-events:none; }
-        #sky-waifu-tips.show { opacity:1; transform:translateY(0); pointer-events:auto; }
-        #sky-chat-box { position:fixed; bottom:110px; left:30px; width:340px; height:480px; background:#fff; border-radius:12px; box-shadow:0 10px 30px rgba(0,0,0,0.15); z-index:10000; display:none; flex-direction:column; overflow:hidden; font-family:sans-serif; border:1px solid #e2e8f0; }
-        .sky-head { padding:15px; background:linear-gradient(135deg, #6366f1, #a855f7); color:#fff; font-weight:bold; display:flex; justify-content:space-between; }
-        #sky-chat-msgs { flex:1; padding:15px; overflow-y:auto; background:#f8fafc; }
-        .sky-msg { padding:8px 12px; border-radius:8px; margin-bottom:10px; font-size:14px; max-width:85%; word-wrap:break-word; line-height:1.5; }
-        .sky-msg.ai { background:#fff; border:1px solid #e2e8f0; align-self:flex-start; color:#334155; }
-        .sky-msg.user { background:#6366f1; color:#fff; margin-left:auto; }
-        .sky-foot { padding:12px; border-top:1px solid #eee; display:flex; gap:8px; background:#fff; }
-        #sky-chat-in { flex:1; border:1px solid #cbd5e1; padding:8px 12px; border-radius:20px; outline:none; font-size:14px; }
-        #sky-chat-in:focus { border-color:#6366f1; }
-        </style>
+        
         <div id="sky-waifu" onclick="toggleSkyChat()">
             <img src="<?php echo esc_url($img); ?>">
             <div id="sky-waifu-tips" class="show">👋 嗨！我是智能助手，有问题随时点我哦~</div>
@@ -314,20 +314,7 @@ class Skyline_Core {
                 <button onclick="skySend()" style="background:#6366f1;color:#fff;border:none;border-radius:50%;width:32px;height:32px;cursor:pointer;">➤</button>
             </div>
         </div>
-        <script>
-        setTimeout(function(){ var t = document.getElementById('sky-waifu-tips'); if(t) { t.classList.remove('show'); setTimeout(()=>t.style.display='none', 400); } }, 120000);
-        function toggleSkyChat(){ var b = document.getElementById('sky-chat-box'); var t = document.getElementById('sky-waifu-tips'); if(t) t.style.display='none'; b.style.display = (b.style.display==='flex')?'none':'flex'; if(b.style.display==='flex') document.getElementById('sky-chat-in').focus(); }
-        function skySend(){
-            var i=document.getElementById('sky-chat-in'),m=i.value.trim(),b=document.getElementById('sky-chat-msgs'); if(!m)return;
-            b.innerHTML+='<div class="sky-msg user">'+m.replace(/</g,"&lt;")+'</div>';i.value='';b.scrollTop=b.scrollHeight;
-            var fd=new FormData();fd.append('action','sky_chat_front');fd.append('msg',m);fd.append('_ajax_nonce','<?php echo wp_create_nonce("sky_chat_nonce");?>');
-            var ld = document.createElement('div'); ld.className='sky-msg ai'; ld.id='sky-loading'; ld.innerText='思考中...'; b.appendChild(ld); b.scrollTop=b.scrollHeight;
-            fetch('<?php echo admin_url('admin-ajax.php');?>',{method:'POST',body:fd}).then(r=>r.json()).then(d=>{
-                document.getElementById('sky-loading').remove();
-                b.innerHTML+='<div class="sky-msg ai">'+(d.success?d.data:'Error: '+d.data).replace(/\n/g,'<br>')+'</div>';b.scrollTop=b.scrollHeight;
-            }).catch(()=>{ document.getElementById('sky-loading').innerText='网络错误'; });
-        }
-        </script>
+        
         <?php
     }
 }
