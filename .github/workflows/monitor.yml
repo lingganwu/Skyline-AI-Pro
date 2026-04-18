@@ -1,0 +1,26 @@
+name: Auto-retry Failed CI
+on:
+  workflow_dispatch: {}
+  schedule:
+    - cron: '0 * * * *'
+jobs:
+  retry_failed:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check for failed runs
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const runs = await github.rest.actions.listWorkflowRunsForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: context.workflow,
+              status: 'completed',
+              per_page: 5
+            });
+            const failed = runs.data.workflow_runs.find(r => r.conclusion==='failure' || r.conclusion==='cancelled');
+            if(failed) {
+              console.log('Will rerun', failed.id);
+              await github.rest.actions.reRunWorkflow{{'='}}({{owner: context.repo.owner, repo: context.repo.repo, run_id: failed.id}});
+            }
+            ''
