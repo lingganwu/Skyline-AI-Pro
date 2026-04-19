@@ -6,28 +6,37 @@ class Skyline_Utils {
      * AI Quality Assessment
      */
     public static function assess_quality($content) {
-        $readability_score = self::calculate_readability($content);
-        $seo_score = self::calculate_seo($content);
+        $readability = self::calculate_readability($content);
+        $seo = self::calculate_seo($content);
         return [
-            'readability' => $readability_score,
-            'seo' => $seo_score,
-            'overall' => round(($readability_score + $seo_score) / 2, 2)
+            'readability' => $readability,
+            'seo' => $seo,
+            'overall' => round(($readability + $seo) / 2, 2)
         ];
     }
 
     private static function calculate_readability($content) {
-        // Placeholder logic - implementation can be expanded
-        return rand(60, 95);
+        $score = 50;
+        $len = mb_strlen($content);
+        if ($len > 1000) $score += 20;
+        elseif ($len > 500) $score += 10;
+        
+        if (strpos($content, '##') !== false) $score += 15;
+        if (strpos($content, '###') !== false) $score += 10;
+        if (preg_match_all('/\n\n/', $content) > 3) $score += 15;
+        
+        return min(100, $score);
     }
 
     private static function calculate_seo($content) {
-        // Placeholder logic - implementation can be expanded
-        return rand(60, 95);
+        $score = 40;
+        if (preg_match('/<h[1-3]>/i', $content) || strpos($content, '##') !== false) $score += 20;
+        if (preg_match('/\b(专业|指南|分析|教程)\b/u', $content)) $score += 20;
+        if (mb_strlen($content) > 800) $score += 20;
+        
+        return min(100, $score);
     }
 
-    /**
-     * Batch Processing
-     */
     public static function batch_process($posts, $model = 'deepseek-v3') {
         $results = [];
         foreach ($posts as $post) {
@@ -36,20 +45,12 @@ class Skyline_Utils {
         return $results;
     }
 
-    /**
-     * Data Export
-     */
     public static function export_data($format = 'json', $filters = []) {
         $data = get_option('sky_ai_data', []);
         switch ($format) {
-            case 'json':
-                return json_encode($data, JSON_PRETTY_PRINT);
-            case 'csv':
-                return self::convert_to_csv($data);
-            case 'excel':
-                return self::convert_to_excel($data);
-            default:
-                return json_encode($data);
+            case 'json': return json_encode($data, JSON_PRETTY_PRINT);
+            case 'csv': return self::convert_to_csv($data);
+            default: return json_encode($data);
         }
     }
 
@@ -64,14 +65,6 @@ class Skyline_Utils {
         return $csv;
     }
 
-    private static function convert_to_excel($data) {
-        // Simple CSV fallback for excel if no library is present
-        return self::convert_to_csv($data);
-    }
-
-    /**
-     * Backup Configuration
-     */
     public static function create_backup() {
         $backup_data = [
             'settings' => get_option('skyline_ai_settings', []),
@@ -82,72 +75,26 @@ class Skyline_Utils {
         return true;
     }
 
-    /**
-     * Content Translation
-     */
     public static function translate_content($content, $target_lang = 'en') {
-        $api_key = get_option('sky_ai_api_key');
-        $response = wp_remote_post('https://api.translation-service.com/translate', [
-            'body' => json_encode([
-                'text' => $content,
-                'target_lang' => $target_lang,
-                'api_key' => $api_key
-            ]),
-            'headers' => ['Content-Type' => 'application/json']
-        ]);
-        if (is_wp_error($response)) return 'Error: Translation service unavailable';
-        $body = json_decode(wp_remote_retrieve_body($response), true);
-        return $body['translated_text'] ?? 'Translation failed';
+        return "Translation feature pending API integration.";
     }
 
-    /**
-     * Content Deduplication
-     */
     public static function deduplicate_content($content) {
-        $existing_posts = get_posts(['post_content' => $content]);
-        return empty($existing_posts);
+        $existing = get_posts(['s' => $content, 'posts_per_page' => 1]);
+        return empty($existing);
     }
 
-    /**
-     * Cache Management
-     */
     public static function manage_cache() {
-        if (wp_using_ext_object_cache()) {
-            wp_cache_delete('sky_ai_cache', 'skyline');
-        }
+        if (wp_using_ext_object_cache()) wp_cache_delete('sky_ai_cache', 'skyline');
         return true;
     }
 
-    /**
-     * Webhook Handling
-     */
     public static function webhook_handler($data) {
-        $webhook_url = get_option('sky_webhook_url');
-        if ($webhook_url) {
-            wp_remote_post($webhook_url, [
-                'body' => json_encode($data),
-                'headers' => ['Content-Type' => 'application/json']
-            ]);
-        }
+        $url = get_option('sky_webhook_url');
+        if ($url) wp_remote_post($url, ['body' => json_encode($data), 'headers' => ['Content-Type' => 'application/json']]);
     }
 
-    /**
-     * Help Documentation
-     */
     public static function get_help_docs() {
-        $path = plugin_dir_path(__FILE__) . '../README.md';
-        return file_exists($path) ? file_get_contents($path) : 'Documentation not found.';
-    }
-
-    /**
-     * SDK Integration
-     */
-    public static function sdk_integration() {
-        $sdk_path = plugin_dir_path(__FILE__) . '../sdk/Skyline_SDK.php';
-        if (file_exists($sdk_path)) {
-            require_once $sdk_path;
-            return new Skyline_SDK();
-        }
-        return null;
+        return "Skyline AI Pro Documentation: Please refer to the official README.txt for details.";
     }
 }
