@@ -809,4 +809,17 @@ class Skyline_Content {
             <?php
         }, 'post', 'side', 'high');
     }
+
+    /**
+     * Analyze content quality and return a score and suggestions.
+     */
+    public function check_content_quality($text) {
+        $prompt = "You are a professional content editor. Analyze the following text for SEO, readability, and coherence. Return a JSON object with 'score' (0-100) and 'suggestions' (a brief list of improvements in Chinese).\n\nText:\n" . $text;
+        
+        // Use the existing core API call mechanism
+        $core = new Skyline_Core();
+        $response = $core->call_api($prompt);
+        
+        return json_decode($response, true) ?: ['score' => 'N/A', 'suggestions' => 'Analysis failed.'];
+    }
 }
