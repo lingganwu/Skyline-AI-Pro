@@ -2,121 +2,130 @@
 :root { 
     --sky-primary: #6366f1; 
     --sky-primary-dark: #4f46e5; 
-    --sky-bg: #f8fafc; 
-    --sky-sidebar: #ffffff; 
+    --sky-accent: #a855f7;
+    --sky-bg: #fdfdff; 
+    --sky-sidebar: rgba(255, 255, 255, 0.9); 
     --sky-text-main: #0f172a; 
     --sky-text-muted: #64748b;
-    --sky-border: #e2e8f0; 
-    --sky-card-shadow: 0 20px 25px -5px rgba(0,0,0,0.05), 0 10px 10px -5px rgba(0,0,0,0.02);
-    --sky-glass: rgba(255, 255, 255, 0.8);
+    --sky-border: rgba(226, 232, 240, 0.8); 
+    --sky-glass: rgba(255, 255, 255, 0.7);
+    --sky-shadow: 0 20px 25px -5px rgba(0,0,0,0.05), 0 10px 10px -5px rgba(0,0,0,0.02);
 }
 
-/* OVERLAY ARCHITECTURE: Break out of WP Admin */
+/* BASE WRAPPER - With Mesh Gradient Background */
 .sky-wrapper { 
-    position: fixed !important; 
-    top: 32px !important; 
-    left: 0 !important; 
-    right: 0 !important; 
-    bottom: 0 !important; 
-    z-index: 99999 !important; 
-    display: flex !important; 
-    background: var(--sky-bg) !important; 
-    font-family: "Inter", -apple-system, sans-serif !important;
-    margin: 0 !important;
-    padding: 0 !important;
+    position: fixed !important; top: 32px !important; left: 0 !important; right: 0 !important; bottom: 0 !important; 
+    z-index: 99999 !important; display: flex !important; 
+    background: radial-gradient(circle at 0% 0%, #f5f3ff 0%, #f8fafc 50%, #eff6ff 100%) !important; 
+    font-family: "Inter", -apple-system, sans-serif !important; margin: 0 !important; padding: 0 !important;
 }
 
-/* SIDEBAR - True Independent Column */
+/* SIDEBAR - Glassmorphism */
 .sky-sidebar { 
     width: 280px !important; 
     background: var(--sky-sidebar) !important; 
+    backdrop-filter: blur(20px) !important;
     border-right: 1px solid var(--sky-border) !important; 
-    display: flex !important; 
-    flex-direction: column !important; 
-    height: 100% !important; 
-    box-shadow: 4px 0 15px rgba(0,0,0,0.03) !important;
+    display: flex !important; flex-direction: column !important; 
+    height: 100% !important; box-shadow: 10px 0 30px rgba(0,0,0,0.02) !important;
 }
-.sky-brand { padding: 35px 25px !important; display: flex !important; align-items: center !important; gap: 15px !important; }
+.sky-brand { padding: 40px 25px !important; display: flex !important; align-items: center !important; gap: 15px !important; }
 .sky-brand-logo { 
-    width: 38px !important; height: 38px !important; 
-    background: linear-gradient(135deg, var(--sky-primary), var(--sky-primary-dark)) !important; 
-    border-radius: 10px !important; display: flex !important; align-items: center !important; justify-content: center !important; 
-    color: #fff !important; font-weight: 800 !important; font-size: 20px !important; 
+    width: 40px !important; height: 40px !important; 
+    background: linear-gradient(135deg, var(--sky-primary), var(--sky-accent)) !important; 
+    border-radius: 12px !important; display: flex !important; align-items: center !important; justify-content: center !important; 
+    color: #fff !important; font-weight: 800 !important; font-size: 22px !important; 
+    box-shadow: 0 8px 20px rgba(99, 102, 241, 0.4) !important; 
 }
-.sky-brand-text { font-size: 20px !important; font-weight: 800 !important; color: var(--sky-text-main) !important; }
-.sky-brand-ver { font-size: 12px !important; color: var(--sky-text-muted) !important; display: block !important; }
+.sky-brand-text { font-size: 22px !important; font-weight: 800 !important; color: var(--sky-text-main) !important; letter-spacing: -0.5px !important; }
+.sky-brand-ver { font-size: 12px !important; color: var(--sky-text-muted) !important; display: block !important; font-weight: 500 !important; }
 
-.sky-nav { flex: 1 !important; padding: 15px !important; display: flex !important; flex-direction: column !important; gap: 6px !important; }
+.sky-nav { flex: 1 !important; padding: 20px 15px !important; display: flex !important; flex-direction: column !important; gap: 8px !important; }
 .sky-nav-item { 
     display: flex !important; align-items: center !important; gap: 12px !important; 
     padding: 14px 18px !important; color: var(--sky-text-muted) !important; 
-    text-decoration: none !important; border-radius: 12px !important; 
-    font-weight: 600 !important; transition: all 0.3s !important; cursor: pointer !important;
+    text-decoration: none !important; border-radius: 14px !important; 
+    font-weight: 600 !important; transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1) !important; 
+    cursor: pointer !important;
 }
-.sky-nav-item:hover { background: #f1f5f9 !important; color: var(--sky-primary) !important; }
+.sky-nav-item:hover { background: rgba(99, 102, 241, 0.08) !important; color: var(--sky-primary) !important; transform: translateX(4px) !important; }
 .sky-nav-item.active { 
-    background: #eef2ff !important; color: var(--sky-primary) !important; 
+    background: linear-gradient(90deg, rgba(99, 102, 241, 0.15) 0%, rgba(255,255,255,0) 100%) !important; 
+    color: var(--sky-primary) !important; 
     border-left: 4px solid var(--sky-primary) !important; 
+    box-shadow: 0 4px 12px rgba(99, 102, 241, 0.1) !important; 
 }
 
-.sky-sidebar-footer { padding: 25px !important; border-top: 1px solid var(--sky-border) !important; background: #fafbfc !important; }
+.sky-sidebar-footer { padding: 30px 25px !important; border-top: 1px solid var(--sky-border) !important; background: rgba(248, 250, 252, 0.5) !important; }
 .sky-save-btn { 
     width: 100% !important; background: linear-gradient(135deg, var(--sky-primary), var(--sky-primary-dark)) !important; 
-    color: #fff !important; padding: 14px !important; border-radius: 12px !important; 
+    color: #fff !important; padding: 16px !important; border-radius: 14px !important; 
     font-weight: 700 !important; border: none !important; cursor: pointer !important; 
+    transition: all 0.3s !important; box-shadow: 0 10px 25px rgba(99, 102, 241, 0.3) !important; 
 }
+.sky-save-btn:hover { transform: translateY(-3px) !important; box-shadow: 0 15px 30px rgba(99, 102, 241, 0.4) !important; filter: brightness(1.1); }
 
-/* MAIN CONTENT - Fill remaining space */
-.sky-main { 
-    flex: 1 !important; 
-    padding: 40px !important; 
-    overflow-y: auto !important; 
-    transition: all 0.3s !important; 
-}
-.sky-welcome { margin-bottom: 35px !important; }
-.sky-welcome h2 { font-size: 28px !important; font-weight: 800 !important; color: var(--sky-text-main) !important; }
+/* MAIN CONTENT */
+.sky-main { flex: 1 !important; padding: 50px !important; overflow-y: auto !important; transition: all 0.3s !important; }
+.sky-welcome { margin-bottom: 40px !important; }
+.sky-welcome h2 { font-size: 32px !important; font-weight: 800 !important; color: var(--sky-text-main) !important; letter-spacing: -1px !important; }
 
+/* CARDS - High-End Glassmorphism */
 .sky-card { 
-    background: var(--sky-glass) !important; backdrop-filter: blur(10px) !important; 
-    border: 1px solid var(--sky-border) !important; border-radius: 24px !important; 
-    padding: 30px !important; box-shadow: var(--sky-card-shadow) !important; 
-    margin-bottom: 30px !important; 
+    background: var(--sky-glass) !important; backdrop-filter: blur(20px) !important; 
+    border: 1px solid rgba(255, 255, 255, 0.6) !important; border-radius: 28px !important; 
+    padding: 35px !important; box-shadow: var(--sky-card-shadow) !important; 
+    margin-bottom: 30px !important; transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1) !important;
 }
-.sky-card-title { font-size: 18px !important; font-weight: 700 !important; color: var(--sky-text-main) !important; margin-bottom: 25px !important; display: flex !important; align-items: center !important; gap: 12px !important; }
+.sky-card:hover { transform: translateY(-8px) !important; box-shadow: 0 30px 60px -12px rgba(0,0,0,0.1) !important; border-color: rgba(99, 102, 241, 0.3) !important; }
+.sky-card-title { font-size: 20px !important; font-weight: 700 !important; color: var(--sky-text-main) !important; margin-bottom: 30px !important; display: flex !important; align-items: center !important; gap: 15px !important; }
 
-.sky-stats-grid { display: grid !important; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)) !important; gap: 20px !important; }
+.sky-stats-grid { display: grid !important; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)) !important; gap: 25px !important; }
 .sky-stat-card { 
     background: #fff !important; border: 1px solid var(--sky-border) !important; 
-    padding: 25px !important; border-radius: 20px !important; text-align: center !important; 
+    padding: 30px !important; border-radius: 24px !important; text-align: center !important; 
+    transition: all 0.3s !important; position: relative !important; overflow: hidden !important; 
 }
-.sky-stat-val { display: block !important; font-size: 32px !important; font-weight: 800 !important; color: var(--sky-primary) !important; }
+.sky-stat-card:hover { transform: scale(1.05) !important; border-color: var(--sky-primary) !important; }
+.sky-stat-val { display: block !important; font-size: 36px !important; font-weight: 800 !important; color: var(--sky-primary) !important; margin-bottom: 8px !important; }
 
-.sky-settings-grid { display: grid !important; grid-template-columns: repeat(auto-fit, minmax(450px, 1fr)) !important; gap: 25px !important; }
+.sky-settings-grid { display: grid !important; grid-template-columns: repeat(auto-fit, minmax(480px, 1fr)) !important; gap: 30px !important; }
 .sky-setting-block { 
     background: #fff !important; border: 1px solid var(--sky-border) !important; 
-    border-radius: 20px !important; padding: 25px !important; 
+    border-radius: 24px !important; padding: 30px !important; 
+    box-shadow: 0 4px 6px rgba(0,0,0,0.02) !important; transition: all 0.3s !important; 
 }
+.sky-setting-block:hover { border-color: var(--sky-primary) !important; box-shadow: 0 20px 40px rgba(0,0,0,0.05) !important; }
 .sky-setting-header { 
-    font-weight: 700 !important; font-size: 16px !important; color: var(--sky-text-main) !important; 
-    margin-bottom: 20px !important; padding-bottom: 12px !important; 
-    border-bottom: 2px solid #f1f5f9 !important; display: flex !important; align-items: center !important; gap: 10px !important; 
+    font-weight: 700 !important; font-size: 18px !important; color: var(--sky-text-main) !important; 
+    margin-bottom: 25px !important; padding-bottom: 15px !important; 
+    border-bottom: 2px solid #f1f5f9 !important; display: flex !important; align-items: center !important; gap: 12px !important; 
 }
 
 .sky-field-row { 
     display: flex !important; align-items: center !important; justify-content: space-between !important; 
-    padding: 12px 0 !important; border-bottom: 1px solid #f8fafc !important; 
+    padding: 16px 0 !important; border-bottom: 1px solid #f8fafc !important; 
+    transition: all 0.2s !important; 
 }
-.sky-field-label { font-weight: 600 !important; color: var(--sky-text-main) !important; font-size: 14px !important; }
+.sky-field-row:hover { padding-left: 10px !important; background: rgba(99, 102, 241, 0.02) !important; }
+.sky-field-label { font-weight: 600 !important; color: var(--sky-text-main) !important; font-size: 15px !important; }
 
-.sky-switch { position: relative !important; display: inline-block !important; width: 46px !important; height: 24px !important; }
+.sky-switch { position: relative !important; display: inline-block !important; width: 50px !important; height: 26px !important; }
 .sky-switch input { opacity: 0 !important; width: 0 !important; height: 0 !important; }
 .sky-slider { 
     position: absolute !important; cursor: pointer !important; top: 0 !important; left: 0 !important; right: 0 !important; bottom: 0 !important; 
-    background-color: #cbd5e1 !important; transition: all 0.3s !important; border-radius: 24px !important; 
+    background-color: #cbd5e1 !important; transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1) !important; border-radius: 26px !important; 
 }
 .sky-slider:before { 
-    position: absolute !important; content: "" !important; height: 18px !important; width: 18px !important; left: 3px !important; bottom: 3px !important; 
-    background-color: white !important; transition: all 0.3s !important; border-radius: 50% !important; 
+    position: absolute !important; content: "" !important; height: 20px !important; width: 20px !important; left: 3px !important; bottom: 3px !important; 
+    background-color: white !important; transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1) !important; border-radius: 50% !important; 
+    box-shadow: 0 2px 4px rgba(0,0,0,0.2) !important;
 }
-input:checked + .sky-slider { background: var(--sky-primary) !important; }
-input:checked + .sky-slider:before { transform: translateX(22px) !important; }
+input:checked + .sky-slider { background: linear-gradient(90deg, var(--sky-primary), var(--sky-accent)) !important; }
+input:checked + .sky-slider:before { transform: translateX(24px) !important; }
+
+.sky-field-input input, .sky-field-input textarea, .sky-field-input select { 
+    width: 280px !important; padding: 10px 14px !important; border: 1px solid var(--sky-border) !important; 
+    border-radius: 10px !important; font-size: 14px !important; transition: all 0.2s !important; background: #fcfcfd !important;
+}
+.sky-field-input input:focus { border-color: var(--sky-primary) !important; outline: none !important; box-shadow: 0 0 0 4px rgba(99, 102, 241, 0.1) !important; background: #fff !important; }
