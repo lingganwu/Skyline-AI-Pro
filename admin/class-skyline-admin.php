@@ -80,7 +80,7 @@ class Skyline_Admin {
         $nav_items = [
             'dashboard' => ['label' => '数据看板', 'icon' => '📊'],
             'ai'        => ['label' => '智能核心', 'icon' => '🤖'],
-            'spider'    => ['label' => '采集设置', 'icon' => '🕸️'],
+            'spider'    => ['label' => '内容同步', 'icon' => '🕸️'],
             'oss'       => ['label' => '云端存储', 'icon' => '☁️'],
             'seo'       => ['label' => '搜索优化', 'icon' => '🚀'],
             'speed'     => ['label' => '性能体检', 'icon' => '⚡'],
