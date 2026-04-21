@@ -5,6 +5,7 @@ class Skyline_Core {
     private static $instance = null;
     private $options = null;
     private $stat_cache = [];
+    private $log_file;
 
     public static function instance() {
         if (self::$instance === null) {
@@ -14,7 +15,13 @@ class Skyline_Core {
         return self::$instance;
     }
 
-    public function __construct() {}
+    public function __construct() {
+        $this->log_file = plugin_dir_path(__FILE__) . '../logs/skyline_ai.log';
+        if (!file_exists(dirname($this->log_file))) {
+            wp_mkdir_p(dirname($this->log_file));
+            file_put_contents(dirname($this->log_file) . '/.htaccess', 'Deny from all');
+        }
+    }
 
     public function setup() {
         $this->load_modules();
@@ -24,6 +31,8 @@ class Skyline_Core {
         add_action('wp_ajax_sky_ai_task', [$this, 'handle_ai_task']);
         add_action('wp_ajax_sky_gen_img', [$this, 'handle_gen_img']);
         add_action('wp_ajax_sky_test_api', [$this, 'handle_api_test']);
+        add_action('wp_ajax_sky_test_redis', [$this, 'handle_test_redis']);
+        add_action('wp_ajax_sky_test_oss', [$this, 'handle_test_oss']);
         add_action('wp_ajax_sky_clear_logs', [$this, 'handle_clear_logs']);
         add_action('wp_ajax_sky_save_prompt', [$this, 'handle_save_prompt']);
         add_action('wp_ajax_sky_get_prompts', [$this, 'handle_get_prompts']);
@@ -104,12 +113,9 @@ class Skyline_Core {
     }
 
     public function log($msg, $type = 'info', $context = 'System') {
-        $logs = get_option('skyline_ai_logs', []);
-        if(!is_array($logs)) $logs = [];
-        $entry = ['time' => current_time('m-d H:i:s'), 'type' => $type, 'ctx' => $context, 'msg' => $msg];
-        array_unshift($logs, $entry);
-        if(count($logs) > 200) array_splice($logs, 200);
-        update_option('skyline_ai_logs', $logs, 'no');
+        $timestamp = current_time('Y-m-d H:i:s');
+        $log_entry = sprintf("[%s] [%s] [%s] %s\n", $timestamp, strtoupper($type), $context, $msg);
+        @file_put_contents($this->log_file, $log_entry, FILE_APPEND);
     }
 
     public function stat_inc($key, $val=1) {
@@ -149,7 +155,6 @@ class Skyline_Core {
         
         if(is_wp_error($r)) {
             $err = $r->get_error_message();
-            // Retry on network timeout or transient errors
             if ($retry_count < 2) {
                 sleep(1 * ($retry_count + 1));
                 return $this->call_api($messages, $temp, $retry_count + 1);
@@ -163,7 +168,6 @@ class Skyline_Core {
 
         if ($code !== 200) {
             $errMsg = $d['error']['message'] ?? 'Unknown API Error';
-            // Retry on 5xx errors
             if ($code >= 500 && $retry_count < 2) {
                 sleep(1 * ($retry_count + 1));
                 return $this->call_api($messages, $temp, $retry_count + 1);
@@ -177,14 +181,48 @@ class Skyline_Core {
     public function handle_api_test() {
         check_ajax_referer('sky_ai_test_nonce'); 
         if(!current_user_can('manage_options')) wp_send_json_error('Unauthorized');
-        
-        // Test with a very small prompt to save tokens
         $res = $this->call_api([['role'=>'user', 'content'=>'Ping']]);
-        
         if (strpos($res, 'Error:') === 0) {
             wp_send_json_error($res);
         }
         wp_send_json_success(['reply'=>$res]);
+    }
+
+    public function handle_test_redis() {
+        check_ajax_referer('sky_ai_test_nonce'); 
+        if(!current_user_can('manage_options')) wp_send_json_error('Unauthorized');
+        
+        if (!$this->get_opt('redis_enable')) wp_send_json_error('Redis is disabled in settings');
+        
+        try {
+            $redis = new Redis();
+            $connected = $redis->connect($this->get_opt('redis_host'), (int)$this->get_opt('redis_port'), 2);
+            if (!$connected) throw new Exception('Could not connect to Redis server');
+            
+            if ($this->get_opt('redis_auth')) {
+                if (!$redis->auth($this->get_opt('redis_auth'))) throw new Exception('Redis authentication failed');
+            }
+            
+            $redis->ping();
+            wp_send_json_success('Redis connection verified');
+        } catch(Throwable $e) {
+            wp_send_json_error($e->getMessage());
+        }
+    }
+
+    public function handle_test_oss() {
+        check_ajax_referer('sky_ai_test_nonce'); 
+        if(!current_user_can('manage_options')) wp_send_json_error('Unauthorized');
+        
+        if (!$this->get_opt('oss_enable')) wp_send_json_error('OSS is disabled in settings');
+        
+        // Basic check: can we reach the endpoint?
+        $endpoint = $this->get_opt('oss_endpoint');
+        $response = wp_remote_get($endpoint, ['timeout' => 5]);
+        if (is_wp_error($response)) {
+            wp_send_json_error('Cannot reach OSS endpoint: ' . $response->get_error_message());
+        }
+        wp_send_json_success('OSS endpoint reachable');
     }
 
     public function handle_chat_front() {
@@ -243,8 +281,12 @@ class Skyline_Core {
 
     public function handle_clear_logs() {
         check_ajax_referer('sky_clear_logs_nonce');
-        update_option('skyline_ai_logs', []);
-        wp_send_json_success('Cleared');
+        if (file_exists($this->log_file)) {
+            file_put_contents($this->log_file, '');
+            wp_send_json_success('Logs cleared from file');
+        } else {
+            wp_send_json_error('Log file not found');
+        }
     }
 
     public function enqueue_waifu_assets() {
