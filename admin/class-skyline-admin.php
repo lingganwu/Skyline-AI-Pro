@@ -23,19 +23,50 @@ class Skyline_Admin {
     }
 
     public function handle_settings() {
-        if (isset($_POST['skyline_save_settings']) && check_admin_referer('skyline_save_action', 'skyline_nonce')) {
-            $settings = $_POST['skyline_settings'] ?? [];
-            $sanitized = [];
-            foreach ($settings as $key => $value) {
-                if (is_array($value)) {
-                    $sanitized[$key] = array_map('sanitize_text_field', $value);
-                } else {
-                    $sanitized[$key] = sanitize_text_field($value);
+        // 1. Security: Nonce check
+        if (!isset($_POST['skyline_save_settings']) || !check_admin_referer('skyline_save_action', 'skyline_nonce')) {
+            return;
+        }
+
+        // 2. Compliance: Explicit capability check
+        if (!current_user_can('manage_options')) {
+            wp_die(__('You do not have sufficient permissions to access this page.', 'skyline-ai-pro'));
+        }
+
+        $settings = $_POST['skyline_settings'] ?? [];
+        $schema = $this->core->get_config_schema();
+        $sanitized = [];
+
+        foreach ($settings as $key => $value) {
+            if (!isset($schema[$key])) continue;
+
+            $type = $schema[$key]['type'] ?? 'text';
+            
+            if (is_array($value)) {
+                $sanitized[$key] = array_map('sanitize_text_field', $value);
+            } else {
+                // 3. Compliance: Type-specific sanitization
+                switch ($type) {
+                    case 'url':
+                        $sanitized[$key] = esc_url_raw($value);
+                        break;
+                    case 'textarea':
+                        $sanitized[$key] = sanitize_textarea_field($value);
+                        break;
+                    case 'number':
+                        $sanitized[$key] = absint($value);
+                        break;
+                    case 'bool':
+                        $sanitized[$key] = (bool)$value;
+                        break;
+                    default:
+                        $sanitized[$key] = sanitize_text_field($value);
+                        break;
                 }
             }
-            update_option('skyline_ai_settings', $sanitized);
-            add_settings_error('skyline_messages', 'skyline_msg', '配置已全量同步，保存成功！', 'updated');
         }
+        update_option('skyline_ai_settings', $sanitized);
+        add_settings_error('skyline_messages', 'skyline_msg', '配置已全量同步，保存成功！', 'updated');
     }
 
     private function get_current_tab() {
@@ -64,7 +95,6 @@ class Skyline_Admin {
             }
             .sky-wrapper { display: flex; min-height: 100vh; background: var(--sky-bg); font-family: "Inter", -apple-system, sans-serif; margin-left: -20px; }
             
-            /* SIDEBAR */
             .sky-sidebar { width: 260px; background: var(--sky-sidebar); border-right: 1px solid var(--sky-border); display: flex; flex-direction: column; position: fixed; height: 100vh; z-index: 100; }
             .sky-brand { padding: 30px 20px; display: flex; align-items: center; gap: 12px; }
             .sky-brand-logo { width: 32px; height: 32px; background: var(--sky-primary); border-radius: 8px; display: flex; align-items: center; justify-content: center; color: #fff; font-weight: bold; font-size: 18px; }
@@ -83,12 +113,10 @@ class Skyline_Admin {
             .sky-brand-box .logo { font-weight: 800; color: var(--sky-primary); font-size: 14px; display: block; }
             .sky-brand-box .url { font-size: 11px; color: var(--sky-text-muted); display: block; }
 
-            /* MAIN CONTENT */
             .sky-main { margin-left: 260px; flex: 1; padding: 40px; transition: all 0.3s; }
             .sky-welcome { margin-bottom: 30px; }
             .sky-welcome h2 { font-size: 24px; font-weight: 800; color: var(--sky-text-main); margin: 0; }
             
-            /* CARDS & GRID */
             .sky-card { background: #fff; border: 1px solid var(--sky-border); border-radius: 20px; padding: 30px; box-shadow: var(--sky-card-shadow); margin-bottom: 25px; }
             .sky-card-title { font-size: 18px; font-weight: 700; color: var(--sky-text-main); margin-bottom: 25px; display: flex; align-items: center; gap: 10px; }
             
@@ -104,7 +132,6 @@ class Skyline_Admin {
             .sky-health-val { text-align: right; font-weight: 600; color: var(--sky-text-main); }
             .sky-status-ok { color: #22c55e; font-weight: bold; }
 
-            /* PIXEL-PERFECT SETTINGS FIELD */
             .sky-field-row { 
                 display: flex; align-items: center; justify-content: space-between; 
                 padding: 14px 16px; border-bottom: 1px solid #f1f5f9; 
@@ -114,13 +141,10 @@ class Skyline_Admin {
             .sky-field-row:hover { background: #f8fafc; transform: translateX(4px); }
             .sky-field-info { display: flex; flex-direction: column; justify-content: center; }
             .sky-field-label { font-weight: 600; color: var(--sky-text-main); font-size: 15px; line-height: 1.4; }
-            .sky-field-desc { font-size: 12px; color: var(--sky-text-muted); margin-top: 2px; }
+            .sky-field-desc { font-size: 12px; color: var(--sky-text-muted); }
             .sky-field-control { display: flex; align-items: center; gap: 12px; }
 
-            /* ENHANCED TOGGLE SWITCH */
-            .sky-switch { 
-                position: relative; display: inline-block; width: 44px; height: 22px; 
-            }
+            .sky-switch { position: relative; display: inline-block; width: 44px; height: 22px; }
             .sky-switch input { opacity: 0; width: 0; height: 0; }
             .sky-slider { 
                 position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; 
@@ -143,7 +167,6 @@ class Skyline_Admin {
         </style>
 
         <div class="sky-wrapper">
-            <!-- SIDEBAR -->
             <div class="sky-sidebar">
                 <div class="sky-brand">
                     <div class="sky-brand-logo">S</div>
@@ -152,7 +175,6 @@ class Skyline_Admin {
                         <span class="sky-brand-ver">Enterprise v1.5.0</span>
                     </div>
                 </div>
-                
                 <div class="sky-nav">
                     <?php foreach ($nav_items as $id => $item): ?>
                         <a href="?page=skyline-pro&tab=<?php echo $id; ?>" class="sky-nav-item <?php echo $current_tab === $id ? 'active' : ''; ?>">
@@ -161,7 +183,6 @@ class Skyline_Admin {
                         </a>
                     <?php endforeach; ?>
                 </div>
-                
                 <div class="sky-sidebar-footer">
                     <form method="post" action="">
                         <?php wp_nonce_field('skyline_save_action', 'skyline_nonce'); ?>
@@ -174,21 +195,18 @@ class Skyline_Admin {
                 </div>
             </div>
 
-            <!-- MAIN CONTENT -->
             <div class="sky-main">
                 <div class="sky-welcome">
                     <h2>👋 欢迎回来, 站长</h2>
                 </div>
 
                 <?php if ($current_tab === 'dashboard'): ?>
-                    <!-- DASHBOARD VIEW -->
                     <div class="sky-card">
                         <div class="sky-card-title">✨ 插件能力概览</div>
                         <p style="color: var(--sky-text-muted); line-height: 1.6; font-size: 14px;">
                             Skyline AI Pro 是您的智能运营中台。集成 <b>DeepSeek V3</b> 顶尖模型，实现 AI 写作润色与绘图；通过 <b>Visual Spider</b> 实现无感同步采集，支持智能去水印。配合 <b>Redis 缓存</b>与 <b>OSS 云存储</b>，将您的站点速度推向极致。
                         </p>
                     </div>
-
                     <div class="sky-stats-grid">
                         <div class="sky-stat-card">
                             <span class="sky-stat-val"><?php echo esc_html($this->core->stat_get('api_calls')); ?></span>
@@ -207,12 +225,11 @@ class Skyline_Admin {
                             <span class="sky-stat-lbl">平均响应</span>
                         </div>
                     </div>
-
                     <div style="display:grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-top: 30px;">
                         <div class="sky-card">
                             <div class="sky-card-title">🛡️ 系统健康度</div>
                             <table class="sky-health-table">
-                                <tr><td class="sky-health-label">PHP 版本</td><td class="sky-health-val"><?php echo phpversion(); ?></td></tr>
+                                <tr><td class="sky-health-label">PHP 版本</td><td class="sky-health-val"><?php echo esc_html(phpversion()); ?></td></tr>
                                 <tr><td class="sky-health-label">Redis 扩展</td><td class="sky-health-val"><span class="sky-status-ok">✓ 已安装</span></td></tr>
                                 <tr><td class="sky-health-label">CURL 扩展</td><td class="sky-health-val"><span class="sky-status-ok">✓ 已启用</span></td></tr>
                                 <tr><td class="sky-health-label">GD 库 (去水印)</td><td class="sky-health-val"><span class="sky-status-ok">✓ 支持</span></td></tr>
@@ -227,11 +244,9 @@ class Skyline_Admin {
                             </div>
                         </div>
                     </div>
-
                 <?php else: ?>
-                    <!-- SETTINGS VIEW -->
                     <div class="sky-card">
-                        <div class="sky-card-title">⚙️ <?php echo $nav_items[$current_tab]['label'] ?? '设置'; ?></div>
+                        <div class="sky-card-title">⚙️ <?php echo esc_html($nav_items[$current_tab]['label'] ?? '设置'); ?></div>
                         <form method="post" action="">
                             <?php wp_nonce_field('skyline_save_action', 'skyline_nonce'); ?>
                             <?php 
@@ -248,25 +263,25 @@ class Skyline_Admin {
                                     </div>
                                     <div class="sky-field-control">
                                         <?php if ($cfg['type'] === 'password'): ?>
-                                            <div class="sky-field-input"><input type="password" name="skyline_settings[<?php echo $key; ?>]" value="<?php echo esc_attr($val); ?>"></div>
+                                            <div class="sky-field-input"><input type="password" name="skyline_settings[<?php echo esc_attr($key); ?>]" value="<?php echo esc_attr($val); ?>"></div>
                                         <?php elseif ($cfg['type'] === 'textarea'): ?>
-                                            <div class="sky-field-input"><textarea name="skyline_settings[<?php echo $key; ?>]" rows="3"><?php echo esc_textarea($val); ?></textarea></div>
+                                            <div class="sky-field-input"><textarea name="skyline_settings[<?php echo esc_attr($key); ?>]" rows="3"><?php echo esc_textarea($val); ?></textarea></div>
                                         <?php elseif ($cfg['type'] === 'bool'): ?>
                                             <span class="sky-status-badge <?php echo (int)$val ? 'active' : ''; ?>"><?php echo (int)$val ? '已启用' : '已禁用'; ?></span>
                                             <label class="sky-switch">
-                                                <input type="checkbox" name="skyline_settings[<?php echo $key; ?>]" value="1" <?php checked(1, (int)$val); ?>>
+                                                <input type="checkbox" name="skyline_settings[<?php echo esc_attr($key); ?>]" value="1" <?php checked(1, (int)$val); ?>>
                                                 <span class="sky-slider"></span>
                                             </label>
                                         <?php elseif ($cfg['type'] === 'select'): ?>
                                             <div class="sky-field-input">
-                                                <select name="skyline_settings[<?php echo $key; ?>]">
+                                                <select name="skyline_settings[<?php echo esc_attr($key); ?>]">
                                                     <?php foreach ($cfg['options'] as $opt_val => $opt_label): ?>
                                                         <option value="<?php echo esc_attr($opt_val); ?>" <?php selected($val, $opt_val); ?>><?php echo esc_html($opt_label); ?></option>
                                                     <?php endforeach; ?>
                                                 </select>
                                             </div>
                                         <?php else: ?>
-                                            <div class="sky-field-input"><input type="text" name="skyline_settings[<?php echo $key; ?>]" value="<?php echo esc_attr($val); ?>"></div>
+                                            <div class="sky-field-input"><input type="text" name="skyline_settings[<?php echo esc_attr($key); ?>]" value="<?php echo esc_attr($val); ?>"></div>
                                         <?php endif; ?>
                                     </div>
                                 </div>
