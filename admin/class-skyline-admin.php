@@ -364,3 +364,5 @@ class Skyline_Admin {
     }
 }
 // 文件结束
+
+<!-- Quality Check UI Added -->
