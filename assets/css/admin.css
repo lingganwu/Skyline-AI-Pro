@@ -11,28 +11,29 @@
     --sky-glass: rgba(255, 255, 255, 0.8);
 }
 
-/* FORCED LAYOUT: Override WP Admin Wrapper */
+/* OVERLAY ARCHITECTURE: Break out of WP Admin */
 .sky-wrapper { 
+    position: fixed !important; 
+    top: 32px !important; 
+    left: 0 !important; 
+    right: 0 !important; 
+    bottom: 0 !important; 
+    z-index: 99999 !important; 
     display: flex !important; 
-    position: relative !important; 
-    min-height: calc(100vh - 32px) !important; 
     background: var(--sky-bg) !important; 
-    font-family: "Inter", -apple-system, sans-serif !important; 
+    font-family: "Inter", -apple-system, sans-serif !important;
     margin: 0 !important;
     padding: 0 !important;
 }
 
-/* SIDEBAR - Absolute Power */
+/* SIDEBAR - True Independent Column */
 .sky-sidebar { 
     width: 280px !important; 
     background: var(--sky-sidebar) !important; 
     border-right: 1px solid var(--sky-border) !important; 
     display: flex !important; 
     flex-direction: column !important; 
-    position: sticky !important; 
-    top: 0 !important; 
-    height: 100vh !important; 
-    z-index: 1000 !important; 
+    height: 100% !important; 
     box-shadow: 4px 0 15px rgba(0,0,0,0.03) !important;
 }
 .sky-brand { padding: 35px 25px !important; display: flex !important; align-items: center !important; gap: 15px !important; }
@@ -41,24 +42,21 @@
     background: linear-gradient(135deg, var(--sky-primary), var(--sky-primary-dark)) !important; 
     border-radius: 10px !important; display: flex !important; align-items: center !important; justify-content: center !important; 
     color: #fff !important; font-weight: 800 !important; font-size: 20px !important; 
-    box-shadow: 0 4px 12px rgba(99, 102, 241, 0.4) !important; 
 }
-.sky-brand-text { font-size: 20px !important; font-weight: 800 !important; color: var(--sky-text-main) !important; letter-spacing: -0.5px !important; }
-.sky-brand-ver { font-size: 12px !important; color: var(--sky-text-muted) !important; display: block !important; font-weight: 500 !important; }
+.sky-brand-text { font-size: 20px !important; font-weight: 800 !important; color: var(--sky-text-main) !important; }
+.sky-brand-ver { font-size: 12px !important; color: var(--sky-text-muted) !important; display: block !important; }
 
 .sky-nav { flex: 1 !important; padding: 15px !important; display: flex !important; flex-direction: column !important; gap: 6px !important; }
 .sky-nav-item { 
     display: flex !important; align-items: center !important; gap: 12px !important; 
     padding: 14px 18px !important; color: var(--sky-text-muted) !important; 
     text-decoration: none !important; border-radius: 12px !important; 
-    font-weight: 600 !important; transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1) !important; 
-    cursor: pointer !important;
+    font-weight: 600 !important; transition: all 0.3s !important; cursor: pointer !important;
 }
-.sky-nav-item:hover { background: #f1f5f9 !important; color: var(--sky-primary) !important; transform: translateX(4px) !important; }
+.sky-nav-item:hover { background: #f1f5f9 !important; color: var(--sky-primary) !important; }
 .sky-nav-item.active { 
     background: #eef2ff !important; color: var(--sky-primary) !important; 
     border-left: 4px solid var(--sky-primary) !important; 
-    box-shadow: 0 4px 12px rgba(99, 102, 241, 0.1) !important; 
 }
 
 .sky-sidebar-footer { padding: 25px !important; border-top: 1px solid var(--sky-border) !important; background: #fafbfc !important; }
@@ -66,40 +64,38 @@
     width: 100% !important; background: linear-gradient(135deg, var(--sky-primary), var(--sky-primary-dark)) !important; 
     color: #fff !important; padding: 14px !important; border-radius: 12px !important; 
     font-weight: 700 !important; border: none !important; cursor: pointer !important; 
-    transition: all 0.3s !important; box-shadow: 0 8px 20px rgba(99, 102, 241, 0.3) !important; 
 }
-.sky-save-btn:hover { transform: translateY(-2px) !important; box-shadow: 0 12px 24px rgba(99, 102, 241, 0.4) !important; }
 
-/* MAIN CONTENT - Breaking boundaries */
-.sky-main { flex: 1 !important; padding: 40px !important; transition: all 0.3s !important; min-width: 0 !important; }
+/* MAIN CONTENT - Fill remaining space */
+.sky-main { 
+    flex: 1 !important; 
+    padding: 40px !important; 
+    overflow-y: auto !important; 
+    transition: all 0.3s !important; 
+}
 .sky-welcome { margin-bottom: 35px !important; }
-.sky-welcome h2 { font-size: 28px !important; font-weight: 800 !important; color: var(--sky-text-main) !important; margin: 0 !important; }
+.sky-welcome h2 { font-size: 28px !important; font-weight: 800 !important; color: var(--sky-text-main) !important; }
 
 .sky-card { 
     background: var(--sky-glass) !important; backdrop-filter: blur(10px) !important; 
     border: 1px solid var(--sky-border) !important; border-radius: 24px !important; 
     padding: 30px !important; box-shadow: var(--sky-card-shadow) !important; 
-    margin-bottom: 30px !important; transition: all 0.3s ease !important;
+    margin-bottom: 30px !important; 
 }
-.sky-card:hover { transform: translateY(-5px) !important; box-shadow: 0 25px 50px -12px rgba(0,0,0,0.1) !important; }
 .sky-card-title { font-size: 18px !important; font-weight: 700 !important; color: var(--sky-text-main) !important; margin-bottom: 25px !important; display: flex !important; align-items: center !important; gap: 12px !important; }
 
 .sky-stats-grid { display: grid !important; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)) !important; gap: 20px !important; }
 .sky-stat-card { 
     background: #fff !important; border: 1px solid var(--sky-border) !important; 
     padding: 25px !important; border-radius: 20px !important; text-align: center !important; 
-    transition: all 0.3s !important; position: relative !important; overflow: hidden !important; 
 }
-.sky-stat-card:hover { transform: translateY(-8px) !important; border-color: var(--sky-primary) !important; }
 .sky-stat-val { display: block !important; font-size: 32px !important; font-weight: 800 !important; color: var(--sky-primary) !important; }
 
 .sky-settings-grid { display: grid !important; grid-template-columns: repeat(auto-fit, minmax(450px, 1fr)) !important; gap: 25px !important; }
 .sky-setting-block { 
     background: #fff !important; border: 1px solid var(--sky-border) !important; 
     border-radius: 20px !important; padding: 25px !important; 
-    box-shadow: 0 4px 6px rgba(0,0,0,0.02) !important; transition: all 0.3s !important; 
 }
-.sky-setting-block:hover { border-color: var(--sky-primary) !important; box-shadow: 0 12px 20px rgba(0,0,0,0.05) !important; }
 .sky-setting-header { 
     font-weight: 700 !important; font-size: 16px !important; color: var(--sky-text-main) !important; 
     margin-bottom: 20px !important; padding-bottom: 12px !important; 
@@ -109,21 +105,18 @@
 .sky-field-row { 
     display: flex !important; align-items: center !important; justify-content: space-between !important; 
     padding: 12px 0 !important; border-bottom: 1px solid #f8fafc !important; 
-    transition: all 0.2s !important; 
 }
-.sky-field-row:hover { padding-left: 8px !important; background: #fcfcfd !important; }
 .sky-field-label { font-weight: 600 !important; color: var(--sky-text-main) !important; font-size: 14px !important; }
-.sky-field-desc { font-size: 12px !important; color: var(--sky-text-muted) !important; }
 
 .sky-switch { position: relative !important; display: inline-block !important; width: 46px !important; height: 24px !important; }
 .sky-switch input { opacity: 0 !important; width: 0 !important; height: 0 !important; }
 .sky-slider { 
     position: absolute !important; cursor: pointer !important; top: 0 !important; left: 0 !important; right: 0 !important; bottom: 0 !important; 
-    background-color: #cbd5e1 !important; transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1) !important; border-radius: 24px !important; 
+    background-color: #cbd5e1 !important; transition: all 0.3s !important; border-radius: 24px !important; 
 }
 .sky-slider:before { 
     position: absolute !important; content: "" !important; height: 18px !important; width: 18px !important; left: 3px !important; bottom: 3px !important; 
-    background-color: white !important; transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1) !important; border-radius: 50% !important; 
+    background-color: white !important; transition: all 0.3s !important; border-radius: 50% !important; 
 }
 input:checked + .sky-slider { background: var(--sky-primary) !important; }
 input:checked + .sky-slider:before { transform: translateX(22px) !important; }
