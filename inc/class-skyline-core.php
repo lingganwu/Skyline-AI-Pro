@@ -4,6 +4,7 @@ if (!defined('ABSPATH')) exit;
 class Skyline_Core {
     private static $instance = null;
     private $options = null;
+    private $stat_cache = [];
 
     public static function instance() {
         if (self::$instance === null) {
@@ -80,7 +81,7 @@ class Skyline_Core {
             'redis_auth' => ['group'=>'speed', 'type'=>'password', 'label'=>'Redis Password'],
             'redis_db' => ['group'=>'speed', 'type'=>'number', 'label'=>'Database', 'default'=>0],
             'redis_ttl' => ['group'=>'speed', 'type'=>'number', 'label'=>'TTL (秒)', 'default'=>3600],
-            'redis_exclude' => ['group'=>'speed', 'type'=>'textarea', 'label'=>'排除缓存路径', 'default'=>"/wp-json/\\n/cart/\\n/checkout/"],
+            'redis_exclude' => ['group'=>'speed', 'type'=>'textarea', 'label'=>'排除缓存路径', 'default'=>"/wp-json/\n/cart/\n/checkout/"],
             'redis_serializer' => ['group'=>'speed', 'type'=>'select', 'label'=>'序列化', 'default'=>'php', 'options' => ['php'=>'PHP Default', 'igbinary'=>'Igbinary']],
             'redis_compression' => ['group'=>'speed', 'type'=>'select', 'label'=>'压缩', 'default'=>'none', 'options' => ['none'=>'None', 'zstd'=>'Zstd', 'lzf'=>'LZF']],
             'turbo_disable_emoji' => ['group'=>'speed', 'type'=>'bool', 'label'=>'禁用 Emoji', 'default'=>false],
@@ -96,7 +97,9 @@ class Skyline_Core {
     }
 
     public function get_opt($key, $default = null) {
-        if ($this->options === null) $this->options = get_option('skyline_ai_settings', []);
+        if ($this->options === null) {
+            $this->options = get_option('skyline_ai_settings', []);
+        }
         return isset($this->options[$key]) ? $this->options[$key] : ($this->get_config_schema()[$key]['default'] ?? $default);
     }
 
@@ -114,33 +117,73 @@ class Skyline_Core {
         $current = isset($stats[$key]) ? floatval($stats[$key]) : 0;
         $stats[$key] = $current + floatval($val);
         update_option('skyline_ai_stats', $stats);
+        $this->stat_cache[$key] = $stats[$key];
     }
     
     public function stat_get($key) {
+        if (isset($this->stat_cache[$key])) return $this->stat_cache[$key];
         $stats = get_option('skyline_ai_stats', []);
-        return isset($stats[$key]) ? $stats[$key] : 0;
+        $val = isset($stats[$key]) ? $stats[$key] : 0;
+        $this->stat_cache[$key] = $val;
+        return $val;
     }
 
-    public function call_api($messages, $temp = 0.7) {
+    public function call_api($messages, $temp = 0.7, $retry_count = 0) {
         $k = $this->get_opt('api_key'); 
         if(!$k) return 'Error: API Key missing';
+
         $this->stat_inc('api_calls');
+        
         $args = [
             'headers' => ['Authorization' => 'Bearer '.$k, 'Content-Type' => 'application/json'],
-            'body' => json_encode(['model'=>$this->get_opt('chat_model'), 'messages'=>$messages, 'temperature'=>$temp]),
-            'timeout' => 120, 'sslverify' => true
+            'body' => json_encode([
+                'model' => $this->get_opt('chat_model'), 
+                'messages' => $messages, 
+                'temperature' => $temp
+            ]),
+            'timeout' => 120, 
+            'sslverify' => true
         ];
+
         $r = wp_remote_post($this->get_opt('api_base'), $args);
-        if(is_wp_error($r)) return "Network Error: " . $r->get_error_message();
+        
+        if(is_wp_error($r)) {
+            $err = $r->get_error_message();
+            // Retry on network timeout or transient errors
+            if ($retry_count < 2) {
+                sleep(1 * ($retry_count + 1));
+                return $this->call_api($messages, $temp, $retry_count + 1);
+            }
+            return "Network Error: " . $err;
+        }
+
+        $code = wp_remote_retrieve_response_code($r);
         $body = wp_remote_retrieve_body($r);
         $d = json_decode($body, true);
-        return $d['choices'][0]['message']['content'] ?? 'API Error';
+
+        if ($code !== 200) {
+            $errMsg = $d['error']['message'] ?? 'Unknown API Error';
+            // Retry on 5xx errors
+            if ($code >= 500 && $retry_count < 2) {
+                sleep(1 * ($retry_count + 1));
+                return $this->call_api($messages, $temp, $retry_count + 1);
+            }
+            return "API Error ({$code}): " . $errMsg;
+        }
+
+        return $d['choices'][0]['message']['content'] ?? 'API Error: Empty Response';
     }
 
     public function handle_api_test() {
         check_ajax_referer('sky_ai_test_nonce'); 
         if(!current_user_can('manage_options')) wp_send_json_error('Unauthorized');
+        
+        // Test with a very small prompt to save tokens
         $res = $this->call_api([['role'=>'user', 'content'=>'Ping']]);
+        
+        if (strpos($res, 'Error:') === 0) {
+            wp_send_json_error($res);
+        }
         wp_send_json_success(['reply'=>$res]);
     }
 
