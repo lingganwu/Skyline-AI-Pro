@@ -104,40 +104,40 @@ class Skyline_Admin {
             .sky-health-val { text-align: right; font-weight: 600; color: var(--sky-text-main); }
             .sky-status-ok { color: #22c55e; font-weight: bold; }
 
-            /* MODERN SETTINGS FIELD */
+            /* PIXEL-PERFECT SETTINGS FIELD */
             .sky-field-row { 
                 display: flex; align-items: center; justify-content: space-between; 
-                padding: 18px 12px; border-bottom: 1px solid #f1f5f9; 
-                transition: all 0.2s; border-radius: 12px;
+                padding: 14px 16px; border-bottom: 1px solid #f1f5f9; 
+                transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1); border-radius: 12px;
             }
             .sky-field-row:last-child { border-bottom: none; }
             .sky-field-row:hover { background: #f8fafc; transform: translateX(4px); }
-            .sky-field-info { display: flex; flex-direction: column; gap: 4px; }
-            .sky-field-label { font-weight: 600; color: var(--sky-text-main); font-size: 15px; }
-            .sky-field-desc { font-size: 12px; color: var(--sky-text-muted); }
-            .sky-field-control { display: flex; align-items: center; gap: 15px; }
+            .sky-field-info { display: flex; flex-direction: column; justify-content: center; }
+            .sky-field-label { font-weight: 600; color: var(--sky-text-main); font-size: 15px; line-height: 1.4; }
+            .sky-field-desc { font-size: 12px; color: var(--sky-text-muted); margin-top: 2px; }
+            .sky-field-control { display: flex; align-items: center; gap: 12px; }
 
-            /* CUSTOM TOGGLE SWITCH */
+            /* ENHANCED TOGGLE SWITCH */
             .sky-switch { 
-                position: relative; display: inline-block; width: 46px; height: 24px; 
+                position: relative; display: inline-block; width: 44px; height: 22px; 
             }
             .sky-switch input { opacity: 0; width: 0; height: 0; }
             .sky-slider { 
                 position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; 
-                background-color: #cbd5e1; transition: .3s; border-radius: 24px; 
+                background-color: #cbd5e1; transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1); border-radius: 22px; 
             }
             .sky-slider:before { 
-                position: absolute; content: ""; height: 18px; width: 18px; left: 3px; bottom: 3px; 
-                background-color: white; transition: .3s; border-radius: 50%; box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+                position: absolute; content: ""; height: 18px; width: 18px; left: 2px; bottom: 2px; 
+                background-color: white; transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1); border-radius: 50%; box-shadow: 0 2px 4px rgba(0,0,0,0.2);
             }
             input:checked + .sky-slider { background: var(--sky-primary); }
             input:checked + .sky-slider:before { transform: translateX(22px); }
             
-            .sky-status-badge { font-size: 12px; font-weight: 600; color: var(--sky-text-muted); min-width: 60px; text-align: right; }
+            .sky-status-badge { font-size: 12px; font-weight: 600; color: var(--sky-text-muted); min-width: 50px; text-align: right; transition: all 0.3s; }
             .sky-status-badge.active { color: var(--sky-primary); }
 
             .sky-field-input input, .sky-field-input textarea, .sky-field-input select { 
-                width: 300px; padding: 8px 12px; border: 1px solid var(--sky-border); border-radius: 8px; font-size: 14px; 
+                width: 280px; padding: 8px 12px; border: 1px solid var(--sky-border); border-radius: 8px; font-size: 14px; transition: all 0.2s;
             }
             .sky-field-input input:focus { border-color: var(--sky-primary); outline: none; box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.1); }
         </style>
