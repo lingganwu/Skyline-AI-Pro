@@ -5,7 +5,7 @@ class Skyline_Admin {
     private $core;
 
     public function __construct() {
-        $this->core = new Skyline_Core();
+        $this->core = Skyline_Core::instance();
         add_action('admin_menu', array($this, 'add_menu'));
         add_action('admin_init', array($this, 'handle_settings'));
     }
