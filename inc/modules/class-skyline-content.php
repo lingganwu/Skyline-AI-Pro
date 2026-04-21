@@ -137,7 +137,7 @@ class Skyline_Content {
             update_post_meta($aid, '_sky_source_hash', $img_hash);
             update_post_meta($aid, '_sky_source_url', $url);
             $core->stat_inc('spider_count');
-            $core->log("采集图片成功: $filename", 'info', 'Spider');
+            $core->log("同步图片成功: $filename", 'info', 'Spider');
             $spider_history[$img_hash] = $aid;
             update_post_meta($pid, '_sky_spider_history', $spider_history);
             return ['id' => $aid, 'status' => 'downloaded'];
@@ -400,7 +400,7 @@ class Skyline_Content {
             </style>
 
             <div class="sky-cp-wrap">
-                <button type="button" class="sky-btn-cp primary" id="btn-spider-start" onclick="SkySpider.init()"><i>🕷️</i> 一键采集图片 (可视版)</button>
+                <button type="button" class="sky-btn-cp primary" id="btn-spider-start" onclick="SkySpider.init()"><i>🕷️</i> 一键同步图片 (可视版)</button>
                 <div id="sky-spider-status">
                     <div class="sky-sp-header">
                         <span>进度: <span id="sp-cur">0</span>/<span id="sp-total">0</span></span>
@@ -513,7 +513,7 @@ class Skyline_Content {
 
                             $('#sky-spider-status').slideDown();
                             $('#sky-sp-preview').html(previewHtml);
-                            $('#btn-spider-start').prop('disabled', true).text('采集进行中...');
+                            $('#btn-spider-start').prop('disabled', true).text('同步进行中...');
                             $('#sp-total').text(matches.length);
                             $('#sp-cur').text(0);
                             $('#sky-sp-bar').css('width', '0%');
@@ -521,7 +521,7 @@ class Skyline_Content {
                             
                             this.processQueue(matches, 0);
                         } catch(e) {
-                            alert('采集启动失败: ' + e.message);
+                            alert('同步启动失败: ' + e.message);
                         }
                     },
 
@@ -536,7 +536,7 @@ class Skyline_Content {
                         if (typeof retryCount === 'undefined') retryCount = 0;
                         if (idx >= queue.length) {
                             $('#sp-msg').text('全部完成').css('color', '#10b981');
-                            $('#btn-spider-start').prop('disabled', false).html('<i>🕷️</i> 一键采集图片 (可视版)');
+                            $('#btn-spider-start').prop('disabled', false).html('<i>🕷️</i> 一键同步图片 (可视版)');
                             this.log('🏁 队列结束，编辑器内容已更新', 'ok');
                             // 最终清理：尝试将 data-src 占位符翻转为 src
                             // 注意：此时内容里已经是 localUrl 了，这里做一个兜底检查
