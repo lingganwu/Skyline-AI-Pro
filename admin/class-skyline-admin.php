@@ -36,7 +36,7 @@ class Skyline_Admin {
     }
 
     public function render_ui() {
-        if(!class_exists('Skyline_Core')) { echo 'Core Class Missing'; return; }
+        if(!class_exists('Skyline_Core')) { echo esc_html('Core Class Missing', 'skyline-ai-pro'); return; }
         $core = Skyline_Core::instance();
         $schema = $core->get_config_schema();
         
@@ -53,15 +53,15 @@ class Skyline_Admin {
                 $chk = $val ? 'checked' : '';
                 echo "<div class='sky-toggle-item'><span class='sky-toggle-label'>{$f['label']}</span><label class='sky-switch'><input type='checkbox' name='{$k}' {$chk}><span class='sky-slider'></span></label>{$desc}</div>";
             } elseif($f['type']=='select') {
-                echo "<div class='sky-field'><label class='sky-label'>{$f['label']}</label><select name='{$k}' class='sky-select'>";
+                echo '<div class="sky-field"><label class="sky-label">' . esc_html($f['label'], 'skyline-ai-pro') . '</label><select name="' . esc_attr($k) . '" class="sky-select">';
                 foreach($f['options'] as $ok=>$ov) { $s=selected($val,$ok,false); echo "<option value='{$ok}' {$s}>{$ov}</option>"; }
-                echo "</select>{$desc}</div>";
+                echo '</select>' . wp_kses_post($desc) . '</div>';
             } else {
-                echo "<div class='sky-field'><label class='sky-label'>{$f['label']}</label>";
+                echo '<div class="sky-field"><label class="sky-label">' . esc_html($f['label'], 'skyline-ai-pro') . '</label>';
                 $dv = esc_attr((string)$val);
                 if($f['type']=='textarea') echo "<textarea name='{$k}' class='sky-textarea' rows='3'>".esc_textarea((string)$val)."</textarea>";
                 else echo "<input type='".($f['type']=='password'?'password':'text')."' name='{$k}' value='{$dv}' class='sky-input' placeholder='".($f['placeholder']??'')."'>";
-                echo $desc . "</div>";
+                echo wp_kses_post($desc) . '</div>';
             }
         };
 
@@ -126,7 +126,7 @@ class Skyline_Admin {
                             <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M2 20h20"/><path d="M4 16c1-2 2-6 3-6s2 3 4 3 3-5 5-5 4 8 4 8"/><circle cx="16" cy="6" r="2" fill="currentColor" fill-opacity="0.3"/></svg>
                         </div>
                         <h2 style="margin:0;font-size:18px;background:var(--sky-pri-grad);-webkit-background-clip:text;-webkit-text-fill-color:transparent;">Skyline AI Pro</h2>
-                        <p style="margin:5px 0 0;font-size:11px;color:#94a3b8;font-weight:600;">V<?php echo SKY_VERSION; ?></p>
+                        <p style="margin:5px 0 0;font-size:11px;color:#94a3b8;font-weight:600;">V<?php echo esc_html(SKY_VERSION, 'skyline-ai-pro'); ?></p>
                     </div>
                     
                     <div class="sky-menu-item active" onclick="SkyTab('dash')">📊 数据看板</div>
@@ -164,17 +164,17 @@ class Skyline_Admin {
                         </div>
 
                         <div class="sky-grid">
-                            <div class="sky-stat-box"><span class="sky-stat-num"><?php echo $core->stat_get('api_calls'); ?></span><span class="sky-stat-label">AI 调用次数</span></div>
-                            <div class="sky-stat-box"><span class="sky-stat-num"><?php echo $core->stat_get('spider_count'); ?></span><span class="sky-stat-label">同步图片</span></div>
-                            <div class="sky-stat-box"><span class="sky-stat-num"><?php echo $core->stat_get('oss_count'); ?></span><span class="sky-stat-label">云上传</span></div>
-                            <div class="sky-stat-box"><span class="sky-stat-num"><?php echo round($core->stat_get('saved_kb')/1024, 1); ?> MB</span><span class="sky-stat-label">节省带宽</span></div>
+                            <div class="sky-stat-box"><span class="sky-stat-num"><?php echo esc_html($core->stat_get('api_calls'), 'skyline-ai-pro'); ?></span><span class="sky-stat-label">AI 调用次数</span></div>
+                            <div class="sky-stat-box"><span class="sky-stat-num"><?php echo esc_html($core->stat_get('spider_count'), 'skyline-ai-pro'); ?></span><span class="sky-stat-label">同步图片</span></div>
+                            <div class="sky-stat-box"><span class="sky-stat-num"><?php echo esc_html($core->stat_get('oss_count'), 'skyline-ai-pro'); ?></span><span class="sky-stat-label">云上传</span></div>
+                            <div class="sky-stat-box"><span class="sky-stat-num"><?php echo esc_html(round($core->stat_get('saved_kb'), 1), 'skyline-ai-pro'); ?> MB</span><span class="sky-stat-label">节省带宽</span></div>
                         </div>
                         
                         <div class="sky-grid" style="grid-template-columns: 1fr 1fr;">
                             <div class="sky-info-box" style="margin-bottom:0;">
                                 <h4 style="margin:0 0 15px 0;">🏥 系统健康度</h4>
                                 <div style="display:flex;justify-content:space-between;border-bottom:1px dashed #e2e8f0;padding-bottom:10px;margin-bottom:10px;">
-                                    <span>PHP 版本</span> <b><?php echo PHP_VERSION; ?></b> (建议 ≥7.4)
+                                    <span>PHP 版本</span> <b><?php echo esc_html(PHP_VERSION, 'skyline-ai-pro'); ?></b> (建议 ≥7.4)
                                 </div>
                                 <div style="display:flex;justify-content:space-between;border-bottom:1px dashed #e2e8f0;padding-bottom:10px;margin-bottom:10px;">
                                     <span>Redis 扩展</span> <b><?php echo class_exists('Redis')?'✅ 已安装':'❌ 未安装'; ?></b>
