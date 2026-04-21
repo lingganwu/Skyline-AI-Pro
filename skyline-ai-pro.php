@@ -1,15 +1,15 @@
 <?php
 /*
 Plugin Name: Skyline AI Pro
-Description: 灵感屋(lgwu.net) 专属智能运营中台。集成 DeepSeek V3、可视化无感同步系统、智能去水印、AI 润色与 Redis 智能缓存。[V1.4.1 架构升级版]
-Version: 1.5.0
+Description: 灵感屋(lgwu.net) 专属智能运营中台。集成 DeepSeek V3、可视化无感同步系统、智能去水印、AI 润色与 Redis 智能缓存。[V2.0.0 旗舰级重构]
+Version: 2.0.0
 Author:      LingGanWu
 Text Domain: skyline-ai-pro
 */
 
 if (!defined('ABSPATH')) exit;
 
-define('SKY_VERSION', '1.4.1');
+define('SKY_VERSION', '2.0.0');
 
 // AI Models Configuration
 define('SKY_AI_MODELS', json_encode([
@@ -41,6 +41,10 @@ spl_autoload_register(function ($class) {
 
 add_action('plugins_loaded', function() {
     load_plugin_textdomain('skyline-ai-pro', false, dirname(plugin_basename(__FILE__)) . '/languages/');
+    
+    // Enqueue admin assets
+    wp_enqueue_style('skyline-admin-css', plugins_url('assets/css/admin.css', __FILE__), array(), SKY_VERSION);
+    wp_enqueue_script('skyline-admin-js', plugins_url('assets/js/admin.js', __FILE__), array('jquery'), SKY_VERSION, true);
     
     if (class_exists('Skyline_Core')) Skyline_Core::instance();
 });
