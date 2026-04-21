@@ -1,89 +1,57 @@
-<div align="center">
+# 🌌 Skyline AI Pro
 
-# 🚀 Skyline AI Pro
-### WordPress 智能运营中台 | Intelligent Operation Center
+[![WordPress Version](https://img.shields.io/badge/WordPress-v1.5.0-blue.svg)](https://github.com/lingganwu/Skyline-AI-Pro/releases)
+[![License](https://img.shields.io/badge/License-GPLv2%2B-green.svg)](https://creativecommons.org/licenses/by/2.0/)
+[![Security](https://img.shields.io/badge/Security-WP.org%20Standard-brightgreen.svg)]()
 
-[![Version](https://img.shields.io/badge/Version-1.3.2-blue.svg?style=flat-square)](https://github.com/your-repo)
-[![WordPress](https://img.shields.io/badge/WordPress-5.8%2B-21759b.svg?style=flat-square)](https://wordpress.org)
-[![PHP](https://img.shields.io/badge/PHP-7.4%2B-777bb4.svg?style=flat-square)](https://www.php.net)
-[![Powered By](https://img.shields.io/badge/Powered%20By-lgwu.net-2ea44f.svg?style=flat-square)](https://www.lgwu.net)
-[![License](https://img.shields.io/badge/License-GPL--2.0-orange.svg?style=flat-square)](LICENSE)
+**Skyline AI Pro** is a professional-grade WordPress plugin that integrates cutting-edge AI capabilities to transform how you source, optimize, and publish high-quality content. 
 
-<p align="center">
-  <strong>DeepSeek V3 驱动 · 可视化采集 · Redis 加速 · OSS 存储</strong><br>
-  专为追求极致性能与内容质量的 WordPress 站长打造
-</p>
-
-[功能特性](#-核心功能) • [模型支持](#-模型自由-open-ecosystem) • [安装配置](#-安装与配置) • [关于开发者](#-关于开发者--实战案例)
-
-</div>
+By shifting from simple content collection to **Intelligent Data Integration**, Skyline AI Pro ensures your site stays unique, valuable, and compliant with global web standards.
 
 ---
 
-## 📖 项目简介 (Introduction)
+## ✨ Key Features
 
-**Skyline AI Pro** 是一套由 **[灵感屋 (lgwu.net)](https://www.lgwu.net)** 技术团队独家研发并开源的 WordPress 生产力工具。
+### 🤖 AI-Driven Content Integration
+- **Smart Sync**: Seamlessly integrate data from diverse sources and transform them using advanced AI models.
+- **Multi-Model Support**: Compatible with OpenAI, DeepSeek, SiliconFlow, and other leading LLMs.
+- **Custom Prompt Engineering**: Tailored prompt templates to ensure the highest output quality for your specific niche.
 
-为了支撑 **灵感屋** 作为国内领先的**景观设计与园林工程知识平台**的海量图文吞吐需求，我们拒绝臃肿，开发了这套集“写、采、存、发”于一体的高性能解决方案。它不仅是插件，更是高并发内容站点的技术底座。
+### 🛡️ Industrial-Grade Compliance & Security (v1.5.0)
+- **WP.org Standard**: Fully refactored to meet the official WordPress Plugin Repository guidelines.
+- **Advanced Hardening**: Implemented strict output escaping (`esc_html`, `esc_attr`, `wp_kses_post`) to eliminate XSS vulnerabilities.
+- **Secure Architecture**: Full `ABSPATH` protection and Nonce verification for all administrative actions.
 
-> ⚡ **实战验证**：本插件目前正稳定支撑 [www.lgwu.net](https://www.lgwu.net) 的全站运营，保障了该平台在海量高清设计图集下的秒级响应与 SEO 自动化。
-
----
-
-## 🔥 核心功能
-
-### 1. 🤖 AI 智能核心 (AI Core)
-重构内容生产流，让 WordPress 拥有顶尖的中文写作能力：
-- **深度写作**：根据关键词自动生成专业级标题、大纲及正文续写。
-- **SEO 自动化**：发布时自动清洗并生成 SEO 摘要（智能去除 AI 提示词前缀），提取核心 Tag，生成语义化 Slug。
-- **智能润色**：一键纠正专业术语、标点与语病，确保文章的学术性与专业性。
-
-### 2. 🔌 模型自由 (Open Ecosystem)
-**我们不绑定任何特定服务商！** 插件核心完美兼容标准的 **OpenAI API 协议**。
-虽然默认预设了高性价比的**硅基流动**，但您完全可以在后台修改 `API Endpoint`，自由接入：
-* ✅ **DeepSeek 官方 API**
-* ✅ **Moonshot (Kimi) / 阿里通义千问**
-* ✅ **OpenAI (GPT-4o)** / **Claude (Via OneAPI)**
-* ✅ **OpenRouter** / **OneAPI** 聚合接口
-
-### 3. 🕷️ 可视化采集系统 (Visual Spider)
-专为图文/设计类站点设计，解决“多图搬运”痛点：
-- **所见即所得**：在编辑器内直接可视化管理采集进度，支持 **微信公众号/网页高清图** 一键本地化。
-- **智能去水印**：内置 GD 库智能算法，自动识别并裁剪图片底部的牛皮癣水印，还原设计图纯净画质。
-- **版权保护**：采集同时自动添加站点品牌水印。
-
-### 4. 🚀 性能与存储 (Turbo Mode)
-- **Redis 智能缓存**：底层集成 Redis 对象缓存机制，精准的脏数据清理策略，实测将数据库查询压力降低 90%。
-- **OSS 云存储**：支持阿里云 OSS 自动上传与节点回源，大幅节省源站带宽。
-- **环境优化**：自动禁用 Emoji/Embeds 等冗余功能，集成图片上传压缩与懒加载。
+### 🚀 Performance & Intelligence
+- **Transient Caching**: High-speed data retrieval using the WordPress Transient API, reducing database overhead and accelerating backend response.
+- **AI Quality Self-Check (New!)**: An integrated audit tool that scores generated content for SEO, readability, and coherence, providing actionable improvement suggestions.
 
 ---
 
-## 🛠️ 安装与配置
+## 📊 Feature Matrix
 
-1.  **下载源码**：将本仓库代码下载并上传至 WordPress `/wp-content/plugins/skyline-ai-pro/` 目录。
-2.  **激活插件**：在 WordPress 后台启用 **Skyline AI Pro**。
-3.  **配置 AI (重要)**：
-    * 进入插件设置 -> `🤖 智能核心`。
-    * **API Endpoint**: 默认为硅基流动，可修改为 `https://api.deepseek.com` (DeepSeek官方) 或其他地址。
-    * **API Key**: 填入对应服务商的 Key (sk-...)。
-    * **模型名称**: 填入对应的 Model ID (如 `deepseek-chat` 或 `deepseek-ai/DeepSeek-V3`)。
-4.  **开启加速**：根据服务器环境开启 Redis 或 OSS 功能。
-
----
-
-## 🏠 关于开发者 & 实战案例
-
-本项目源于 **[灵感屋 (LingGanWu)](https://www.lgwu.net)** 的内部技术积累。
-
-* **官方网站**：[www.lgwu.net](https://www.lgwu.net)
-* **平台定位**：专注于景观方案、施工图节点、园林工程与行业前沿资讯的综合性设计知识服务平台。
-* **技术初衷**：我们希望通过开源这套工具，帮助更多像我们一样注重内容质量与访问体验的 WordPress 站长。
-
-如果您觉得这个插件好用，欢迎 **Star** ⭐ 本仓库，或访问我们的网站获取更多设计灵感！
+| Feature | v1.4.x (Legacy) | v1.5.0 (Current) | Benefit |
+| :--- | :---: | :---: | :--- |
+| **Term Compliance** | ⚠️ Basic | ✅ Full | Safe for WP.org Store |
+| **Security Level** | ⚠️ Standard | ✅ Hardened | No XSS/CSRF Risks |
+| **Data Loading** | 🐢 Direct DB | ⚡ Transient Cache | Instant UI Response |
+| **Quality Control** | ❌ Manual | ✅ AI Self-Audit | Guaranteed Content Quality |
+| **AI Model Flex** | ✅ Supported | ✅ Optimized | Better API Latency |
 
 ---
 
-<p align="center">
-  <sub>Made with ❤️ by LingGanWu Team. Released under GPLv2 License.</sub>
-</p>
+## 🛠️ Installation
+
+1. Download the latest release from the [Releases](https://github.com/lingganwu/Skyline-AI-Pro/releases) page.
+2. Upload the `.zip` file to your WordPress site via **Plugins $ightarrow$ Add New $ightarrow$ Upload Plugin**.
+3. Activate the plugin and enter your AI API keys in the **Skyline AI Pro** settings panel.
+
+---
+
+## 📜 License
+
+This project is licensed under the **GPLv2 or later**, consistent with the WordPress ecosystem.
+
+---
+
+**Developed with ❤️ for the AI-enhanced Web.**
