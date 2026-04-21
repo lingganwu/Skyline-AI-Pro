@@ -131,7 +131,7 @@ class Skyline_Admin {
                     
                     <div class="sky-menu-item active" onclick="SkyTab('dash')">📊 数据看板</div>
                     <div class="sky-menu-item" onclick="SkyTab('ai')">🤖 智能核心</div>
-                    <div class="sky-menu-item" onclick="SkyTab('spider')">🕷️ 采集水印</div>
+                    <div class="sky-menu-item" onclick="SkyTab('spider')">🕷️ 同步水印</div>
                     <div class="sky-menu-item" onclick="SkyTab('seo')">📈 搜索优化</div>
                     <div class="sky-menu-item" onclick="SkyTab('speed')">🚀 性能体检</div>
                     <div class="sky-menu-item" onclick="SkyTab('log')">📜 系统日志</div>
@@ -159,13 +159,13 @@ class Skyline_Admin {
                         <div class="sky-info-box">
                             <h4 style="margin:0 0 10px 0;color:#334155;">🚀 插件介绍</h4>
                             <p style="margin:0;line-height:1.6;color:#64748b;font-size:13px;">
-                                Skyline AI Pro 是为您量身打造的 WordPress 智能中台。它集成了 <b>DeepSeek V3</b> 强力模型，提供 AI 写作、润色、生图全流程支持；内置 <b>Visual Spider</b> 可视化采集系统，支持微信/网页图片一键抓取与去水印；底层搭载 <b>Redis Object Cache</b> 与 <b>OSS 云存储</b> 加速引擎，让您的站点快如闪电。
+                                Skyline AI Pro 是为您量身打造的 WordPress 智能中台。它集成了 <b>DeepSeek V3</b> 强力模型，提供 AI 写作、润色、生图全流程支持；内置 <b>Visual Spider</b> 可视化同步系统，支持微信/网页图片一键集成与去水印；底层搭载 <b>Redis Object Cache</b> 与 <b>OSS 云存储</b> 加速引擎，让您的站点快如闪电。
                             </p>
                         </div>
 
                         <div class="sky-grid">
                             <div class="sky-stat-box"><span class="sky-stat-num"><?php echo $core->stat_get('api_calls'); ?></span><span class="sky-stat-label">AI 调用次数</span></div>
-                            <div class="sky-stat-box"><span class="sky-stat-num"><?php echo $core->stat_get('spider_count'); ?></span><span class="sky-stat-label">采集图片</span></div>
+                            <div class="sky-stat-box"><span class="sky-stat-num"><?php echo $core->stat_get('spider_count'); ?></span><span class="sky-stat-label">同步图片</span></div>
                             <div class="sky-stat-box"><span class="sky-stat-num"><?php echo $core->stat_get('oss_count'); ?></span><span class="sky-stat-label">云上传</span></div>
                             <div class="sky-stat-box"><span class="sky-stat-num"><?php echo round($core->stat_get('saved_kb')/1024, 1); ?> MB</span><span class="sky-stat-label">节省带宽</span></div>
                         </div>
@@ -200,7 +200,7 @@ class Skyline_Admin {
                                 <h4 style="margin:0 0 15px 0;">📅 版本更新历史</h4>
                                 <div class="sky-changelog" style="margin-top:0;border:none;padding:0;background:transparent;">
                                     <div class="sky-cl-item"><div class="sky-cl-ver">1.3.1</div><div>完美体验：修复替换问题，限制 Slug 长度，增强 Copilot。</div></div>
-                                    <div class="sky-cl-item"><div class="sky-cl-ver">1.3.0</div><div>旗舰进化：新增可视化采集(JS)，修复微信采集。</div></div>
+                                    <div class="sky-cl-item"><div class="sky-cl-ver">1.3.0</div><div>旗舰进化：新增可视化同步(JS)，修复微信同步。</div></div>
                                     <div class="sky-cl-item"><div class="sky-cl-ver">1.2.1</div><div>体验优化：修复配置保存，Redis 下拉化。</div></div>
                                     <div class="sky-cl-item"><div class="sky-cl-ver">1.2.0</div><div>AI增强：新增AI润色、去水印、懒加载。</div></div>
                                 </div>
@@ -214,7 +214,7 @@ class Skyline_Admin {
                     </div>
 
                     <div id="pane-spider" class="sky-pane">
-                        <h3 class="sky-sec-title">🕷️ 采集与去水印</h3>
+                        <h3 class="sky-sec-title">🕷️ 同步与去水印</h3>
                         <div class="sky-toggle-group">
                             <?php foreach($schema as $k=>$f) if($f['group']=='spider' && $f['type']=='bool') $rf($k, $f); ?>
                         </div>
