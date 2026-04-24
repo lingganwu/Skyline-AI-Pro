@@ -236,8 +236,33 @@ class Skyline_Core {
         if(!current_user_can('edit_posts')) wp_send_json_error('Unauthorized');
         $t = sanitize_key($_POST['task'] ?? '');
         $i = wp_kses_post($_POST['input'] ?? '');
-        $p = 'AI Task: ' . $t . '. Input: ' . $i;
-        wp_send_json_success($this->call_api([['role'=>'user', 'content'=>$p]]));
+        
+        // --- 工业级 Prompt 矩阵：为每个任务定义极其严格的指令 ---
+        $prompts = [
+            'title'    => "你是一位资深的SEO内容专家。请根据以下文章内容，生成5个具有极高点击率、符合SEO原则且能精准概括核心价值的中文标题。要求：\n1. 提供5个不同风格（如：痛点驱动型、权威指南型、反直觉悬念型、结果导向型、极简概括型）。\n2. 严禁输出任何开场白或结束语（如 '为您生成的标题是' 或 '希望您满意'）。\n3. 每行输出一个标题，不要编号，不要引号。\n\n文章内容：\n$i",
+            'outline'   => "请分析以下文章的逻辑结构，并生成一个专业的 Markdown 形式的大纲。要求：层级清晰（# ## ###），涵盖所有核心观点和论据，确保逻辑严密。\n\n文章内容：\n$i",
+            'continue'  => "请阅读以下段落，并根据当前的语境、语气和逻辑，自然地续写接下来的内容。要求：无缝衔接，保持风格一致，直接输出续写部分，不要输出 '续写如下' 等提示词。\n\n内容：\n$i",
+            'expand'    => "请对以下内容进行深度扩写。要求：在不改变原意的前提下，增加细节描述、专业论证或具体案例，使内容更丰满、更有说服力，提升专业感。直接输出扩写后的全文。\n\n内容：\n$i",
+            'rewrite'   => "你是一位顶级的伪原创专家。请在保持原意绝对不变的前提下，彻底重写以下内容。要求：打破原有的句式结构，使用同义词替换，重新组织行文逻辑，确保在通过 AI 检测的同时，可读性极高。直接输出重写后的内容。\n\n内容：\n$i",
+            'polish'    => "请对以下内容进行智能润色。要求：修正所有错别字和病句，提升词汇的专业度，使行文风格符合『现代专业技术文档』的审美（客观、精炼、流畅）。直接输出润色后的内容。\n\n内容：\n$i",
+            'shorten'   => "请在保留所有核心结论和关键事实的前提下，将以下内容进行极简缩写。要求：删掉所有冗余修饰词，使表达像电报一样高效有力。直接输出缩写结果。\n\n内容：\n$i",
+            'trans'     => "请将以下内容进行高质量的中英互译（中文 $\leftrightarrow$ 英文）。要求：翻译自然，符合目标语言的母语表达习惯，准确保留专业术语。直接输出翻译结果。\n\n内容：\n$i",
+            'desc'      => "请为以下文章生成一段 120 字左右的 SEO 元描述（Meta Description）。要求：包含核心关键词，采用『痛点+解决方案』的结构，具有强烈的诱导点击效果。直接输出摘要内容。\n\n内容：\n$i",
+            'tags'      => "请基于以下内容提取 5-8 个核心 SEO 标签。要求：包含 1-2 个行业大类词和 3-6 个具体核心词，用逗号分隔，严禁输出编号、前缀或任何解释文字。\n\n内容：\n$i",
+            'slug_en'   => "Generate a concise, SEO-friendly English URL slug for this content. Requirements: strictly lowercase, use hyphens instead of spaces, max 6 words, NO leading/trailing hyphens. STRICTLY output ONLY the slug text, no explanation.\n\nContent:\n$i",
+        ];
+
+        $prompt = isset($prompts[$t]) ? $prompts[$t] : "AI Task: $t. Input: $i";
+        
+        $res = $this->call_api([['role'=>'user', 'content'=>$prompt]]);
+        
+        // 后处理：进一步确保没有 AI 的废话前缀
+        if (is_string($res)) {
+            $res = preg_replace('/^(为您生成的.*?是|这里是.*?：|以下是.*?：|Sure!|Okay!|Certainly!)\s*/iu', '', $res);
+            $res = trim($res);
+        }
+
+        wp_send_json_success($res);
     }
 
     public function handle_save_prompt() {
