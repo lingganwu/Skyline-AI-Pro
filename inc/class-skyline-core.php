@@ -46,6 +46,7 @@ class Skyline_Core {
         if (class_exists('Skyline_Infra')) {
             try { new Skyline_Infra(); } catch(Throwable $e) { error_log('Skyline Infra Load Error: '.$e->getMessage()); }
         }
+        if (class_exists('Skyline_API_Gateway')) new Skyline_API_Gateway();
         if (is_admin() && class_exists('Skyline_Admin')) new Skyline_Admin();
     }
 
