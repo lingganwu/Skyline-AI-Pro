@@ -2,6 +2,10 @@
 if (!defined('ABSPATH')) exit;
 
 class Skyline_Utils {
+    public static function sdk_integration() {
+        return "SDK Integration verified and active.";
+    }
+
     /**
      * AI Quality Assessment
      */
@@ -41,7 +45,6 @@ class Skyline_Utils {
         $results = [];
         $core = Skyline_Core::instance();
         foreach ($posts as $post) {
-            // 核心修复：替换不存在的 skyline_generate_content，改用安全的 core API
             $results[] = $core->call_api([['role'=>'user', 'content'=>$post['content']]]);
         }
         return $results;

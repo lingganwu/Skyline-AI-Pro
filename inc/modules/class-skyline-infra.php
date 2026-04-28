@@ -28,6 +28,14 @@ class Skyline_Infra {
             $this->redis->connect($opts['redis_host'] ?? '127.0.0.1', (int)($opts['redis_port'] ?? 6379));
             if (!empty($opts['redis_auth'])) $this->redis->auth($opts['redis_auth']);
             if (!empty($opts['redis_db'])) $this->redis->select((int)$opts['redis_db']);
+            
+            // 补充优化：激活高阶性能配置
+            if (isset($opts['redis_serializer']) && $opts['redis_serializer'] === 'igbinary' && defined('Redis::SERIALIZER_IGBINARY')) {
+                $this->redis->setOption(Redis::OPT_SERIALIZER, Redis::SERIALIZER_IGBINARY);
+            }
+            if (isset($opts['redis_compression']) && $opts['redis_compression'] === 'zstd' && defined('Redis::COMPRESSION_ZSTD')) {
+                $this->redis->setOption(Redis::OPT_COMPRESSION, Redis::COMPRESSION_ZSTD);
+            }
         } catch (Exception $e) { $this->redis = null; }
     }
 

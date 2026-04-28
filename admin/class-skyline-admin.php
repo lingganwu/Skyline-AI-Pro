@@ -7,13 +7,13 @@ class Skyline_Admin {
         $this->core = Skyline_Core::instance();
         add_action('admin_menu', array($this, 'add_menu'));
         add_action('admin_init', array($this, 'handle_settings'));
+        add_action('wp_ajax_skyline_health_check', array($this, 'ajax_health_check')); 
     }
 
     public function add_menu() {
         add_menu_page('Skyline AI Pro', 'Skyline AI', 'manage_options', 'skyline-pro', array($this, 'render_main_page'), 'dashicons-welcome-learn-more', 60);
     }
 
-    // ==================== 最终彻底修复版 handle_settings ====================
     public function handle_settings() {
         if (!isset($_POST['skyline_save_settings']) || !check_admin_referer('skyline_save_action', 'skyline_nonce')) return;
         if (!current_user_can('manage_options')) wp_die(__('No permissions', 'skyline-ai-pro'));
@@ -21,18 +21,21 @@ class Skyline_Admin {
         $posted = $_POST['skyline_settings'] ?? [];
         $schema = $this->core->get_config_schema();
         
-        // 先加载现有全部配置，防止其他 Tab 被重置
+        $current_tab = isset($_GET['tab']) ? sanitize_key($_GET['tab']) : 'dashboard';
         $sanitized = get_option('skyline_ai_settings', []);
         if (!is_array($sanitized)) $sanitized = [];
 
-        if (is_array($posted) && is_array($schema)) {
+        if (is_array($schema)) {
             foreach ($schema as $key => $cfg) {
+                $group = $cfg['group'] ?? 'general';
+                if ($group !== $current_tab) continue;
+
                 $type = $cfg['type'] ?? 'text';
 
-                if (isset($posted[$key])) {
-                    if ($type === 'bool') {
-                        $sanitized[$key] = (bool)$posted[$key];
-                    } elseif (is_array($posted[$key])) {
+                if ($type === 'bool') {
+                    $sanitized[$key] = isset($posted[$key]) ? true : false;
+                } elseif (isset($posted[$key])) {
+                    if (is_array($posted[$key])) {
                         $sanitized[$key] = array_map('sanitize_text_field', $posted[$key]);
                     } else {
                         switch ($type) {
@@ -51,19 +54,39 @@ class Skyline_Admin {
                         }
                     }
                 }
-                // 其他 Tab 的字段保持原有值，不做任何修改
             }
         }
 
         update_option('skyline_ai_settings', $sanitized);
 
-        if (is_array($sanitized)) {
-            foreach ($sanitized as $key => $val) {
-                delete_transient('sky_opt_' . md5($key));
+        foreach ($schema as $key => $cfg) {
+            $cache_key = 'sky_opt_' . md5($key);
+            delete_transient($cache_key);
+        }
+        
+        if (class_exists('Skyline_Infra')) {
+            $infra = Skyline_Infra::instance();
+            if (method_exists($infra, 'cache_del')) {
+                foreach ($schema as $key => $cfg) {
+                    $infra->cache_del('sky_opt_' . md5($key));
+                }
             }
         }
 
         add_settings_error('skyline_messages', 'skyline_msg', '配置已同步，保存成功！', 'updated');
+    }
+
+    public function ajax_health_check() {
+        if (!current_user_can('manage_options')) {
+            wp_send_json_error('Unauthorized');
+        }
+        $health = $this->get_system_health();
+        wp_send_json_success([
+            'php' => 'ok',
+            'redis' => $health['redis']['status'],
+            'curl' => $health['curl']['status'],
+            'gd' => $health['gd']['status']
+        ]);
     }
 
     private function get_current_tab() { 
@@ -147,7 +170,9 @@ class Skyline_Admin {
                         $chunks = array_chunk($current_group_items, 6);
                         foreach ($chunks as $index => $chunk): ?>
                             <div class="sky-setting-block">
-                                <div class="sky-setting-header"><?php echo $index === 0 ? '⚙️ ' . $nav_items[$current_tab]['label'] : '➕ 附加配置'; ?></div>
+                                <div class="sky-setting-header">
+                                    <?php echo $index === 0 ? '⚙️ ' . $nav_items[$current_tab]['label'] : '➕ 附加配置'; ?>
+                                </div>
                                 <?php foreach ($chunk as $item): 
                                     $key = $item['key']; 
                                     $cfg = $item['cfg']; 
@@ -184,7 +209,6 @@ class Skyline_Admin {
                         <?php endforeach; ?>
                     </div>
 
-                    <!-- Prompt 模板库 -->
                     <div class="sky-card" style="margin-top:30px;">
                         <div class="sky-card-title">📋 Prompt 模板库</div>
                         <div id="sky-prompt-list"></div>
@@ -217,7 +241,14 @@ class Skyline_Admin {
                         $chunks = array_chunk($current_group_items, 6);
                         foreach ($chunks as $index => $chunk): ?>
                             <div class="sky-setting-block">
-                                <div class="sky-setting-header"><?php echo $index === 0 ? '⚙️ ' . $nav_items[$current_tab]['label'] : '➕ 附加配置'; ?></div>
+                                <div class="sky-setting-header">
+                                    <?php echo $index === 0 ? '⚙️ ' . $nav_items[$current_tab]['label'] : '➕ 附加配置'; ?>
+                                    <?php if ($current_tab === 'oss' && $index === 0): ?>
+                                        <button type="button" class="button button-primary" onclick="testService('sky_test_oss')" style="float:right; margin-top:-4px;">🔌 测试 OSS 连接</button>
+                                    <?php elseif ($current_tab === 'speed' && $index === 0): ?>
+                                        <button type="button" class="button button-primary" onclick="testService('sky_test_redis')" style="float:right; margin-top:-4px;">🔌 测试 Redis 连接</button>
+                                    <?php endif; ?>
+                                </div>
                                 <?php foreach ($chunk as $item): 
                                     $key = $item['key']; 
                                     $cfg = $item['cfg']; 
@@ -260,6 +291,7 @@ class Skyline_Admin {
         
         <script>
         function testService(actionName) {
+            // 保存后再测试更准确
             jQuery.post(ajaxurl, {
                 action: actionName, 
                 _ajax_nonce: '<?php echo wp_create_nonce('sky_ai_test_nonce'); ?>'

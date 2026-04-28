@@ -42,7 +42,6 @@ class Skyline_Content {
         }
     }
 
-    // 核心功能：SEO 安全内链去重（一篇文章一个词只加 1 次链接）
     public function auto_internal_links($content) {
         $core = Skyline_Core::instance();
         if(!$core->get_opt('link_enable') || is_admin()) return $content;
@@ -55,7 +54,6 @@ class Skyline_Content {
             if(count($p) < 2) continue;
             $kw = trim($p[0]); $url = trim($p[1]);
             if(!$kw || !$url) continue;
-            // limit 为 1 保证只替换首次出现
             $content = preg_replace('/(?!(?:[^<]+>|[^>]+<\/a>))'.preg_quote($kw, '/').'/u', '<a href="'.$url.'" title="'.$kw.'" target="_blank" class="sky-link">'.$kw.'</a>', $content, 1);
         }
         return $content;
@@ -134,7 +132,6 @@ class Skyline_Content {
 
         $aid = wp_insert_attachment(['post_mime_type'=>$mime, 'post_title'=>'Spider Img'], $file_path, $pid);
         if (!is_wp_error($aid)) {
-            // 核心功能：完美闭环。这一步 wp_generate_attachment_metadata 直接联动我们注入的 COS 劫持模块，实现图片生成完毕后立刻上云并删除本地。
             $meta = wp_generate_attachment_metadata($aid, $file_path);
             wp_update_attachment_metadata($aid, $meta);
             
@@ -162,8 +159,14 @@ class Skyline_Content {
 
         $site_domain = parse_url(get_site_url(), PHP_URL_HOST);
         $success = 0;
+        
+        $core = Skyline_Core::instance();
+        $max_img = intval($core->get_opt('spider_max_img', 20));
+        $processed_count = 0;
 
         foreach($m[2] as $url_raw) {
+            if ($processed_count >= $max_img) break;
+            
             $url_real = html_entity_decode($url_raw);
             if(strpos($url_real, $site_domain)!==false || strpos($url_real, 'data:image')!==false) continue;
             
@@ -173,6 +176,7 @@ class Skyline_Content {
                 $content = str_replace($url_raw, $local_url, $content);
                 $success++;
             }
+            $processed_count++;
         }
         
         if($success > 0 && $content !== $post->post_content) {

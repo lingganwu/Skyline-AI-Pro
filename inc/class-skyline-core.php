@@ -50,7 +50,6 @@ class Skyline_Core {
         if (is_admin() && class_exists('Skyline_Admin')) new Skyline_Admin();
     }
 
-    // 绝对完整无删减的企业版配置 Schema
     public function get_config_schema() {
         return [
             'api_base' => ['group'=>'ai', 'type'=>'url', 'label'=>'API Endpoint', 'default'=>'https://api.siliconflow.cn/v1/chat/completions'],
@@ -112,7 +111,6 @@ class Skyline_Core {
         ];
     }
 
-    // 核心性能：三级降级缓存引擎
     public function get_opt($key, $default = null) {
         if (isset($this->options[$key])) return $this->options[$key];
 
@@ -161,7 +159,6 @@ class Skyline_Core {
         return $val;
     }
 
-    // 核心性能：API 哈希重用缓存
     public function call_api($messages, $temp = 0.7, $retry_count = 0) {
         $k = $this->get_opt('api_key'); 
         if(!$k) return 'Error: API Key missing';
@@ -350,7 +347,10 @@ class Skyline_Core {
     public function enqueue_waifu_assets() {
         wp_enqueue_style('sky-waifu', SKY_URL . 'assets/css/waifu.css');
         wp_enqueue_script('sky-waifu', SKY_URL . 'assets/js/waifu.js', ['jquery'], SKY_VERSION, true);
-        wp_localize_script('sky-waifu', 'sky_ajax', ['url' => admin_url('admin-ajax.php'), 'nonce' => wp_create_nonce('sky_chat_nonce')]);
+        wp_localize_script('sky-waifu', 'skyline_vars', [
+            'ajax_url' => admin_url('admin-ajax.php'), 
+            'nonce' => wp_create_nonce('sky_chat_nonce')
+        ]);
     }
 
     public function render_waifu() {
