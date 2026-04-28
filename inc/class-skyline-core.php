@@ -18,7 +18,6 @@ class Skyline_Core {
         $cache_key = 'opt_' . md5($key);
         $cached = $this->infra->cache_get($cache_key);
         if ($cached !== null) return $cached;
-        
         $val = get_option('skyline_ai_settings', [])[$key] ?? $default;
         $this->infra->cache_set($cache_key, $val, 86400);
         return $val;
@@ -29,6 +28,24 @@ class Skyline_Core {
         $settings[$key] = $value;
         update_option('skyline_ai_settings', $settings);
         $this->infra->cache_del('opt_' . md5($key));
+    }
+
+    public function log($msg, $type = 'info', $context = 'System') {
+        $timestamp = current_time('Y-m-d H:i:s');
+        $log_entry = sprintf("[%s] [%s] [%s] %s\n", $timestamp, strtoupper($type), $context, $msg);
+        @file_put_contents(plugin_dir_path(__FILE__) . '../logs/skyline_ai.log', $log_entry, FILE_APPEND);
+    }
+
+    public function stat_inc($key, $val = 1) {
+        $stats = get_option('skyline_ai_stats', []);
+        $current = isset($stats[$key]) ? floatval($stats[$key]) : 0;
+        $stats[$key] = $current + floatval($val);
+        update_option('skyline_ai_stats', $stats);
+    }
+
+    public function stat_get($key) {
+        $stats = get_option('skyline_ai_stats', []);
+        return $stats[$key] ?? 0;
     }
 
     public function call_api($prompt, $model = null, $temp = 0.7) {
@@ -42,16 +59,14 @@ class Skyline_Core {
         
         $response = wp_remote_post($api_url, [
             'headers' => ['Authorization' => 'Bearer ' . $api_key, 'Content-Type' => 'application/json'],
-            'body' => json_encode([
-                'model' => $model,
-                'messages' => [['role' => 'user', 'content' => $prompt]],
-                'temperature' => $temp
-            ]),
+            'body' => json_encode(['model' => $model, 'messages' => [['role' => 'user', 'content' => $prompt]], 'temperature' => $temp]),
             'timeout' => 60
         ]);
         
         if (is_wp_error($response)) return 'Error: ' . $response->get_error_message();
         $body = json_decode(wp_remote_retrieve_body($response), true);
+        
+        if (isset($body['error'])) return 'API Error: ' . ($body['error']['message'] ?? 'Unknown error');
         $res = $body['choices'][0]['message']['content'] ?? 'Error: Empty Response';
         
         $this->infra->cache_set($cache_key, $res, 3600);
