@@ -13,7 +13,14 @@ class Skyline_Admin {
 
     public function handle_settings() {
         if (!isset($_POST['save_skyline']) || !check_admin_referer('sky_save', 'sky_nonce')) return;
-        $settings = $_POST['sky_settings'] ?? [];
+        $settings = $_POST['skyline_settings'] ?? [];
+        
+        // Sanitization
+        foreach ($settings as $key => $val) {
+            if (is_array($val)) continue;
+            $settings[$key] = sanitize_text_field($val);
+        }
+        
         update_option('skyline_ai_settings', $settings);
         add_settings_error('sky_msg', 'sky_msg', '配置已保存', 'updated');
     }
