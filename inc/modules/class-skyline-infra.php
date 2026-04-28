@@ -22,7 +22,7 @@ class Skyline_Infra {
             $this->redis->connect($core->get_opt('redis_host', '127.0.0.1'), (int)$core->get_opt('redis_port', 6379));
             if ($auth = $core->get_opt('redis_auth')) $this->redis->auth($auth);
             if ($db = (int)$core->get_opt('redis_db')) $this->redis->select($db);
-        } catch (Exception $e) { $this->redis = null; }
+        } catch (Throwable $e) { $this->redis = null; }
     }
 
     public function cache_get($key, $fallback = null, $ttl = 3600) {
