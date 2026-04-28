@@ -39,13 +39,16 @@ spl_autoload_register(function ($class) {
     }
 });
 
+// 修复：遵守 WP 规范，在正确的钩子加载后台 CSS/JS 资源
+add_action('admin_enqueue_scripts', function($hook) {
+    if (strpos($hook, 'skyline-pro') !== false) {
+        wp_enqueue_style('skyline-admin-css', plugins_url('assets/css/admin.css', __FILE__), array(), SKY_VERSION);
+        wp_enqueue_script('skyline-admin-js', plugins_url('assets/js/admin.js', __FILE__), array('jquery'), SKY_VERSION, true);
+    }
+});
+
 add_action('plugins_loaded', function() {
     load_plugin_textdomain('skyline-ai-pro', false, dirname(plugin_basename(__FILE__)) . '/languages/');
-    
-    // Enqueue admin assets
-    wp_enqueue_style('skyline-admin-css', plugins_url('assets/css/admin.css', __FILE__), array(), SKY_VERSION);
-    wp_enqueue_script('skyline-admin-js', plugins_url('assets/js/admin.js', __FILE__), array('jquery'), SKY_VERSION, true);
-    
     if (class_exists('Skyline_Core')) Skyline_Core::instance();
 });
 
