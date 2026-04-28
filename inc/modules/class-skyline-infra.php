@@ -134,10 +134,7 @@ class Skyline_COS_Mod {
         $file = get_attached_file($pid);
         $client = new Skyline_COS_Client($core->get_opt('oss_ak'), $core->get_opt('oss_sk'), $core->get_opt('oss_bucket'), $core->get_opt('oss_endpoint'));
         
-        // Upload original
         $client->upload(basename($file), $file);
-        
-        // Upload all generated sizes
         if (isset($meta['sizes'])) {
             $upload_dir = dirname($file);
             foreach ($meta['sizes'] as $size) {
@@ -149,7 +146,6 @@ class Skyline_COS_Mod {
         }
         
         if ($core->get_opt('oss_delete_local')) {
-            // Delete original and sizes
             @unlink($file);
             if (isset($meta['sizes'])) {
                 foreach ($meta['sizes'] as $size) {
@@ -172,7 +168,6 @@ class Skyline_COS_Mod {
         $core = Skyline_Core::instance();
         $domain = $core->get_opt('oss_domain');
         if (!$domain) return $image;
-        
         $url = $image[0];
         $image[0] = str_replace(get_site_url(), rtrim($domain, '/'), $url);
         return $image;
@@ -201,13 +196,13 @@ class Skyline_COS_Client {
         $signed = "host;x-cos-content-sha256";
         $hash = "UNSIGNED-PAYLOAD";
         $cr = "PUT\n/{$key}\n\n{$canon}\n{$signed}\n{$hash}";
-        $st = "sha256\n{$dt}\n{$date}/{$this->bucket}/{$this->region()}\n{$cr}";
+        $st = "sha256\n{$dt}\n{$date}/{$this->bucket}/{$this->region}\n{$cr}";
         $skey = $this->sign('aws4_request', $this->key);
-        $skey = $this->sign($this->region(), $skey);
+        $skey = $this->sign($this->region, $skey);
         $skey = $this->sign($date, $skey);
         $skey = $this->sign('cos', $skey);
         $sig = hash_hmac('sha256', $st, $skey);
-        $auth = "AWS4-HMAC-SHA256 Credential={$this->id}/{$date}/{$this->region()}/cos/aws4_request, SignedHeaders={$signed}, Signature={$sig}";
+        $auth = "AWS4-HMAC-SHA256 Credential={$this->id}/{$date}/{$this->region}/cos/aws4_request, SignedHeaders={$signed}, Signature={$sig}";
         $ch = curl_init("https://{$this->bucket}.{$this->endpoint}/{$key}");
         curl_setopt_array($ch, [CURLOPT_CUSTOMREQUEST => 'PUT', CURLOPT_POSTFIELDS => $content, CURLOPT_HTTPHEADER => ["Authorization: {$auth}", "x-cos-content-sha256: UNSIGNED-PAYLOAD"], CURLOPT_RETURNTRANSFER => true]);
         $res = curl_exec($ch); $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
@@ -217,13 +212,13 @@ class Skyline_COS_Client {
     public function delete($key) {
         $dt = gmdate('Ymd\\THis\\Z'); $date = gmdate('Ymd');
         $canon = "host:{$this->bucket}.{$this->endpoint}\n/\n\nhost:{$this->bucket}.{$this->endpoint}\nx-cos-content-sha256:UNSIGNED-PAYLOAD";
-        $st = "sha256\n{$dt}\n{$date}/{$this->bucket}/{$this->region()}\n{$canon}";
+        $st = "sha256\n{$dt}\n{$date}/{$this->bucket}/{$this->region}\n{$canon}";
         $skey = $this->sign('aws4_request', $this->key);
-        $skey = $this->sign($this->region(), $skey);
+        $skey = $this->sign($this->region, $skey);
         $skey = $this->sign($date, $skey);
         $skey = $this->sign('cos', $skey);
         $sig = hash_hmac('sha256', $st, $skey);
-        $auth = "AWS4-HMAC-SHA256 Credential={$this->id}/{$date}/{$this->region()}/cos/aws4_request, SignedHeaders=host;x-cos-content-sha256, Signature={$sig}";
+        $auth = "AWS4-HMAC-SHA256 Credential={$this->id}/{$date}/{$this->region}/cos/aws4_request, SignedHeaders=host;x-cos-content-sha256, Signature={$sig}";
         $ch = curl_init("https://{$this->bucket}.{$this->endpoint}/{$key}");
         curl_setopt_array($ch, [CURLOPT_CUSTOMREQUEST => 'DELETE', CURLOPT_HTTPHEADER => ["Authorization: {$auth}", "x-cos-content-sha256: UNSIGNED-PAYLOAD"], CURLOPT_RETURNTRANSFER => true]);
         curl_exec($ch); curl_close($ch);
