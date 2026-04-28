@@ -41,12 +41,13 @@ spl_autoload_register(function ($class) {
 
 add_action('plugins_loaded', function() {
     load_plugin_textdomain('skyline-ai-pro', false, dirname(plugin_basename(__FILE__)) . '/languages/');
-    
-    // Enqueue admin assets
+    if (class_exists('Skyline_Core')) Skyline_Core::instance();
+});
+
+// Fix: Move enqueue to correct hook to avoid WSoD
+add_action('admin_enqueue_scripts', function() {
     wp_enqueue_style('skyline-admin-css', plugins_url('assets/css/admin.css', __FILE__), array(), SKY_VERSION);
     wp_enqueue_script('skyline-admin-js', plugins_url('assets/js/admin.js', __FILE__), array('jquery'), SKY_VERSION, true);
-    
-    if (class_exists('Skyline_Core')) Skyline_Core::instance();
 });
 
 // 插件列表页添加“设置”链接
@@ -63,7 +64,7 @@ if (!function_exists('skyline_get_opt')) {
     function skyline_stat_get($key) { return Skyline_Core::instance()->stat_get($key); }
 }
 
-// 兼容性辅助函数 - 指向新的 Utils 类
+// 兼容性辅助函数
 if (!function_exists('skyline_ai_assess_quality')) {
     function skyline_ai_assess_quality($content) { return Skyline_Utils::assess_quality($content); }
 }
