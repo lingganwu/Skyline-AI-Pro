@@ -8,13 +8,21 @@ class Skyline_Content {
     }
 
     public function auto_spider($pid, $post) {
+        if (defined('DOING_AUTOSAVE') && DOING_AUTOSAVE) return;
+        if (wp_is_post_revision($pid) || $post->post_status != 'publish') return;
+        
         $core = Skyline_Core::instance();
         if (!$core->get_opt('spider_enable') || !$core->get_opt('spider_auto')) return;
-        if (wp_is_post_revision($pid) || $post->post_status != 'publish') return;
+        
+        if (get_post_meta($pid, '_sky_spider_processing', true)) return;
+        update_post_meta($pid, '_sky_spider_processing', 1);
         
         $content = $post->post_content;
         preg_match_all('/(src|data-src)=[\'"]([^\'"]+)[\'"]/i', $content, $m);
-        if (empty($m[2])) return;
+        if (empty($m[2])) {
+            delete_post_meta($pid, '_sky_spider_processing');
+            return;
+        }
         
         foreach ($m[2] as $url) {
             $res = $this->download_and_cos($url, $pid);
@@ -27,8 +35,10 @@ class Skyline_Content {
             remove_action('save_post', [$this, 'auto_spider'], 20);
             global $wpdb;
             $wpdb->update($wpdb->posts, ['post_content' => $content], ['ID' => $pid]);
+            clean_post_cache($pid);
             add_action('save_post', [$this, 'auto_spider'], 20, 2);
         }
+        delete_post_meta($pid, '_sky_spider_processing');
     }
 
     private function download_and_cos($url, $pid) {
@@ -41,11 +51,6 @@ class Skyline_Content {
         
         wp_update_attachment_metadata($aid, wp_generate_attachment_metadata($aid, $temp_file));
         
-        // Sync all sizes to COS
-        $infra = Skyline_Infra::instance();
-        $core->get_opt('oss_enable', 'no');
-        
-        // Here we use a dedicated helper to ensure it's handled by the COS mod
         $cos_mod = new Skyline_COS_Mod();
         $cos_mod->sync_all_sizes(wp_generate_attachment_metadata($aid, $temp_file), $aid);
         
@@ -54,8 +59,10 @@ class Skyline_Content {
 
     public function auto_internal_links($content) {
         $core = Skyline_Core::instance();
-        if (!$core->get_opt('link_enable')) return $content;
-        $pairs = explode("\n", (string)$core->get_opt('link_pairs', ''));
+        if (!$core->get_opt('link_enable') || is_admin()) return $content;
+        $links_str = $core->get_opt('link_pairs');
+        if (!$links_str) return $content;
+        $pairs = explode("\n", $links_str);
         foreach ($pairs as $pair) {
             $p = explode('|', trim($pair));
             if (count($p) < 2) continue;
