@@ -39,8 +39,10 @@ class Skyline_Utils {
 
     public static function batch_process($posts, $model = 'deepseek-v3') {
         $results = [];
+        $core = Skyline_Core::instance();
         foreach ($posts as $post) {
-            $results[] = skyline_generate_content($post['content'], $model);
+            // 核心修复：替换不存在的 skyline_generate_content，改用安全的 core API
+            $results[] = $core->call_api([['role'=>'user', 'content'=>$post['content']]]);
         }
         return $results;
     }
