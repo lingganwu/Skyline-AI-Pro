@@ -2,288 +2,198 @@
 if (!defined('ABSPATH')) exit;
 
 class Skyline_Infra {
-    public function __construct() {
+    private static $instance = null;
+    private $redis = null;
+
+    public static function instance() {
+        if (self::$instance === null) self::$instance = new self();
+        return self::$instance;
+    }
+
+    private function __construct() {
+        $this->init_redis();
         if (class_exists('Skyline_Redis_Mod')) new Skyline_Redis_Mod();
         if (class_exists('Skyline_Turbo_Mod')) new Skyline_Turbo_Mod();
         if (class_exists('Skyline_OSS_Mod')) new Skyline_OSS_Mod();
     }
+
+    private function init_redis() {
+        if (!class_exists('Redis')) return;
+        $opts = get_option('skyline_ai_settings', []);
+        if (!is_array($opts)) $opts = [];
+        if (empty($opts['redis_enable'])) return;
+
+        try {
+            $this->redis = new Redis();
+            $this->redis->connect($opts['redis_host'] ?? '127.0.0.1', (int)($opts['redis_port'] ?? 6379));
+            if (!empty($opts['redis_auth'])) $this->redis->auth($opts['redis_auth']);
+            if (!empty($opts['redis_db'])) $this->redis->select((int)$opts['redis_db']);
+        } catch (Exception $e) { $this->redis = null; }
+    }
+
+    public function cache_get($key, $fallback = null, $ttl = 3600) {
+        if ($this->redis) {
+            $val = $this->redis->get('sky:' . $key);
+            if ($val !== false) return is_string($val) ? json_decode($val, true) ?? $val : $val;
+        }
+        if (is_callable($fallback)) {
+            $val = $fallback();
+            if ($this->redis) $this->redis->setex('sky:' . $key, $ttl, is_array($val) ? json_encode($val) : $val);
+            return $val;
+        }
+        return null;
+    }
+
+    public function cache_set($key, $val, $ttl = 3600) {
+        if ($this->redis) $this->redis->setex('sky:' . $key, $ttl, is_array($val) ? json_encode($val) : $val);
+    }
+
+    public function cache_del($key) {
+        if ($this->redis) $this->redis->del('sky:' . $key);
+    }
 }
 
-// 1. Redis
 if (!class_exists('Skyline_Redis_Mod')) {
 class Skyline_Redis_Mod {
     public function __construct() {
         add_action('init', [$this, 'page_cache'], 0);
-        add_action('save_post', [$this, 'smart_flush'], 10, 2); 
-        add_action('wp_ajax_sky_redis_test', [$this, 'test_connection']);
-        add_action('wp_ajax_sky_redis_flush', [$this, 'ajax_flush']);
+        add_action('save_post', [$this, 'smart_flush'], 10, 2);
     }
-    
+
     public function page_cache() {
         if (!class_exists('Skyline_Core')) return;
         $core = Skyline_Core::instance();
         
-        if(!$core->get_opt('redis_enable') || is_user_logged_in() || is_admin() || $_SERVER['REQUEST_METHOD']!='GET') return;
+        if(!$core->get_opt('redis_enable') || is_user_logged_in() || is_admin() || $_SERVER['REQUEST_METHOD'] !== 'GET') return;
         
         $uri = $_SERVER['REQUEST_URI'];
-        $exclude_str = (string)$core->get_opt('redis_exclude', '');
-        $excludes = explode("\n", $exclude_str);
+        $excludes = explode("\n", (string)$core->get_opt('redis_exclude', ''));
+        foreach ($excludes as $ex) { if (trim($ex) && strpos($uri, trim($ex)) !== false) return; }
         
-        foreach($excludes as $ex) {
-            $ex = trim($ex);
-            if($ex && strpos($uri, $ex) !== false) return;
-        }
-
-        $redis = $this->connect(); if(!$redis) return;
+        $infra = Skyline_Infra::instance();
+        $cache_uri = preg_replace('/\?.*$/', '', $uri) . (isset($_GET['s']) ? '?s=' . $_GET['s'] : '');
+        $key = 'page_' . md5(home_url($cache_uri));
         
-        // 优化：处理搜索参数，防止搜索结果缓存混淆
-        $cache_uri = preg_replace('/\?.*$/', '', $uri);
-        if (isset($_GET['s'])) {
-            $cache_uri .= '?s=' . $_GET['s'];
-        }
-        $key = 'sky_pc_' . md5(home_url($cache_uri));
+        $cached = $infra->cache_get($key);
+        if ($cached) { header('X-Sky-Redis: HIT'); echo $cached; exit; }
         
-        try {
-            $c = $redis->get($key);
-            if($c) { 
-                header('X-Sky-Redis: HIT'); 
-                echo (string)$c . ''; 
-                exit; 
-            }
-        } catch (Exception $e) { return; }
-        
-        ob_start(function($buf) use ($redis, $key, $core){
-            $buf = (string)$buf;
-            if(strlen($buf)>200 && http_response_code()==200 && !is_404()) {
-                $ttl = intval($core->get_opt('redis_ttl', 3600));
-                $redis->setex($key, $ttl, $buf);
+        ob_start(function($buf) use ($infra, $key, $core) {
+            if (strlen($buf) > 200 && http_response_code() === 200 && !is_404()) {
+                $infra->cache_set($key, $buf, intval($core->get_opt('redis_ttl', 3600)));
             }
             return $buf;
         });
     }
 
-    public function connect() {
-        if(!class_exists('Redis')) return false;
-        static $r = null; if($r) return $r;
-        
-        try {
-            $r = new Redis();
-            $core = Skyline_Core::instance();
-            $host = (string)$core->get_opt('redis_host', '127.0.0.1');
-            $port = intval($core->get_opt('redis_port', 6379));
-            
-            if(!$r->connect($host, $port, 1.0)) return false; 
-            if($auth = $core->get_opt('redis_auth')) $r->auth($auth);
-            if($db = intval($core->get_opt('redis_db'))) $r->select($db);
-            
-            // 优化：应用序列化和压缩配置
-            $ser = $core->get_opt('redis_serializer');
-            if ($ser == 'igbinary' && defined('Redis::SERIALIZER_IGBINARY')) $r->setOption(Redis::OPT_SERIALIZER, Redis::SERIALIZER_IGBINARY);
-            elseif (defined('Redis::SERIALIZER_PHP')) $r->setOption(Redis::OPT_SERIALIZER, Redis::SERIALIZER_PHP);
-
-            $comp = $core->get_opt('redis_compression');
-            if ($comp == 'zstd' && defined('Redis::COMPRESSION_ZSTD')) $r->setOption(Redis::OPT_COMPRESSION, Redis::COMPRESSION_ZSTD);
-            elseif ($comp == 'lzf' && defined('Redis::COMPRESSION_LZF')) $r->setOption(Redis::OPT_COMPRESSION, Redis::COMPRESSION_LZF);
-            
-            return $r;
-        } catch(Exception $e) { return false; }
-    }
-
-    public function smart_flush($post_id, $post) {
-        if(!Skyline_Core::instance()->get_opt('redis_enable')) return;
-        if(wp_is_post_revision($post_id) || $post->post_status != 'publish') return;
-
-        $redis = $this->connect();
-        if(!$redis) return;
-
-        if(Skyline_Core::instance()->get_opt('redis_smart_purge')) {
-            $redis->del('sky_pc_' . md5(home_url('/')));
-            $redis->del('sky_pc_' . md5(get_permalink($post_id)));
-        } else {
-            try { 
-                $redis->setOption(Redis::OPT_SCAN, Redis::SCAN_RETRY);
-                $it = NULL; while($keys = $redis->scan($it, 'sky_pc_*')) if($keys) $redis->del($keys);
-            } catch (Exception $e) {}
-        }
-    }
-
-    public function ajax_flush() { 
-        check_ajax_referer('sky_redis_nonce');
-        if(!current_user_can('manage_options')) wp_send_json_error('权限不足');
-        $this->flush_all();
-        // 新增：日志
-        Skyline_Core::instance()->log('Redis 缓存已手动清空', 'warn', 'Redis');
-        wp_send_json_success('缓存已清空'); 
-    }
-
-    private function flush_all() {
-        $redis = $this->connect();
-        if($redis) {
-            try { 
-                $redis->setOption(Redis::OPT_SCAN, Redis::SCAN_RETRY);
-                $it = NULL; while($keys = $redis->scan($it, 'sky_pc_*')) if($keys) $redis->del($keys);
-            } catch(Exception $e) {}
-        }
-    }
-
-    public function test_connection() {
-        check_ajax_referer('sky_redis_nonce');
-        if(!current_user_can('manage_options')) wp_send_json_error('权限不足');
-        $r = $this->connect();
-        wp_send_json_success($r ? "连接成功 PONG" : "连接失败");
+    public function smart_flush($pid, $post) {
+        if(wp_is_post_revision($pid) || $post->post_status != 'publish') return;
+        $infra = Skyline_Infra::instance();
+        $infra->cache_del('page_' . md5(home_url('/')));
+        $infra->cache_del('page_' . md5(get_permalink($pid)));
     }
 }
 }
 
-// 2. Turbo
 if (!class_exists('Skyline_Turbo_Mod')) {
 class Skyline_Turbo_Mod {
     public function __construct() {
-        if(!class_exists('Skyline_Core')) return;
-        $core = Skyline_Core::instance();
-
-        add_filter('heartbeat_settings', function($s){ $s['interval']=60; return $s; });
-        if($core->get_opt('turbo_disable_emoji')) {
-            remove_action('wp_head', 'print_emoji_detection_script', 7);
-            remove_action('wp_print_styles', 'print_emoji_styles');
-        }
-        if($core->get_opt('turbo_disable_embeds')) wp_deregister_script('wp-embed');
-        if($core->get_opt('turbo_disable_xmlrpc')) add_filter('xmlrpc_enabled', '__return_false');
-        
-        if($core->get_opt('turbo_lazy_load')) {
-            add_filter('the_content', [$this, 'add_lazy_loading']);
-        }
-
-        add_filter('upload_size_limit', [$this, 'limit_size']);
-        add_filter('upload_mimes', [$this, 'allow_types']);
-        add_filter('sanitize_file_name', [$this, 'sanitize_name']);
-        add_filter('wp_generate_attachment_metadata', [$this, 'compress'], 10, 2);
+        // 核心逻辑：保证图片压缩在 COS 同步之前执行
+        add_filter('wp_generate_attachment_metadata', [$this, 'compress'], 5, 2);
     }
-
-    public function add_lazy_loading($content) {
-        return str_replace('<img', '<img loading="lazy"', $content);
-    }
-
-    public function limit_size($size) { return Skyline_Core::instance()->get_opt('turbo_limit_5m') ? 5*1024*1024 : $size; }
-    
-    public function allow_types($mimes) {
-        if(Skyline_Core::instance()->get_opt('turbo_allow_svg')) { $mimes['svg']='image/svg+xml'; $mimes['webp']='image/webp'; }
-        return $mimes;
-    }
-
-    public function sanitize_name($name) {
-        if(Skyline_Core::instance()->get_opt('turbo_sanitize_names')) return date('YmdHis').rand(100,999).'.'.pathinfo($name, PATHINFO_EXTENSION);
-        return $name;
-    }
-
-    /**
-     * 图片压缩核心 (本地高性能版 - 针对 1核/2G 服务器优化)
-     */
     public function compress($metadata, $attachment_id) {
         $core = Skyline_Core::instance();
-        // 1. 检查开关
         if(!$core->get_opt('turbo_enable_image_opt')) return $metadata;
         
-        // 2. 获取文件路径
         $file = get_attached_file($attachment_id);
-        if(!$file || !file_exists($file)) return $metadata;
+        if(!$file || !file_exists($file) || filesize($file) > 10 * 1024 * 1024) return $metadata;
         
-        // 【保护机制】如果图片大于 10MB，直接跳过，保护 CPU (1核机器扛不住太大)
-        if(filesize($file) > 10 * 1024 * 1024) { 
-            $core->log("Turbo: 图片过大(>10MB)跳过压缩，保护服务器资源", 'warn', 'Turbo');
-            return $metadata; 
-        }
-
-        // 3. 检查文件类型 (仅处理 JPG/PNG/WebP)
         $type = get_post_mime_type($attachment_id);
         if(!in_array($type, ['image/jpeg', 'image/png', 'image/webp'])) return $metadata;
 
-        // 4. 调用 WP 内置编辑器 (GD 或 ImageMagick)
         $editor = wp_get_image_editor($file);
-        if(is_wp_error($editor)) {
-            return $metadata;
-        }
+        if(is_wp_error($editor)) return $metadata;
 
-        $quality = (int)$core->get_opt('turbo_quality', 85);
-        $original_size = filesize($file);
-
-        // 【缩放保护】最大宽度限制在 2560px，既保证高清，又省内存
+        $editor->set_quality((int)$core->get_opt('turbo_quality', 85));
         $size = $editor->get_size();
-        if($size && $size['width'] > 2560) {
-            $editor->resize(2560, null, false);
-        }
-
-        // 5. 设置压缩质量并保存
-        $editor->set_quality($quality);
-        $result = $editor->save($file); // 覆盖原文件
-
-        if(!is_wp_error($result)) {
-            clearstatcache();
-            $new_size = filesize($file);
-            
-            // 只有当文件确实变小了才更新统计
-            if($new_size < $original_size) {
-                $saved_kb = ($original_size - $new_size) / 1024;
-                $core->stat_inc('saved_kb', $saved_kb);
-                // 修复：记录压缩日志
-                $core->log("图片压缩成功: 节省 ".round($saved_kb, 1)."KB", 'info', 'Turbo');
-            }
-        } else {
-            $core->log('Turbo Compress Error: ' . $result->get_error_message(), 'error', 'Turbo');
-        }
+        if($size && $size['width'] > 2560) $editor->resize(2560, null, false);
         
+        $editor->save($file);
         unset($editor);
         return $metadata;
     }
 }
 }
 
-// 3. OSS
+// 核心功能：COS 全尺寸上云 + 本地秒删 Zero-Disk + 域名劫持
 if (!class_exists('Skyline_OSS_Mod')) {
 class Skyline_OSS_Mod {
     public function __construct() {
-        add_filter('wp_update_attachment_metadata', [$this, 'upload_all'], 10, 2);
-        add_filter('wp_get_attachment_url', [$this, 'replace_url'], 10, 2);
-        add_action('wp_ajax_sky_oss_test', [$this, 'test_connection']);
+        // 在阶段 99 彻底接管所有的原图和缩略图
+        add_filter('wp_generate_attachment_metadata', [$this, 'upload_all_sizes'], 99, 2);
+        // 接管前台输出的图片链接，无缝替换 CDN
+        add_filter('wp_get_attachment_url', [$this, 'replace_url'], 99, 2);
+        add_filter('wp_get_attachment_image_src', [$this, 'replace_image_src'], 99, 4);
     }
 
-    public function test_connection() {
-        check_ajax_referer('sky_oss_nonce');
-        if(!current_user_can('manage_options')) wp_send_json_error('权限不足');
+    public function upload_all_sizes($metadata, $attachment_id) {
         $core = Skyline_Core::instance();
-        try {
-            $client = new Sky_S3_Client($core->get_opt('oss_ak'), $core->get_opt('oss_sk'), $core->get_opt('oss_bucket'), $core->get_opt('oss_endpoint'), $core->get_opt('oss_ssl_verify', true));
-            if($client->putContent('sky_test.txt', 'OK')) wp_send_json_success("连接成功");
-            else wp_send_json_error("上传失败，请检查配置");
-        } catch (Exception $e) { wp_send_json_error($e->getMessage()); }
-    }
-
-    public function upload_all($data, $pid) {
-        $core = Skyline_Core::instance();
-        if(!$core->get_opt('oss_enable')) return $data;
+        if(!$core->get_opt('oss_enable')) return $metadata;
         
-        $file = get_attached_file($pid);
-        if (!$file || !file_exists($file)) return $data;
+        $file = get_attached_file($attachment_id);
+        if (!$file || !file_exists($file)) return $metadata;
 
-        $key = basename($file);
         try {
             $client = new Sky_S3_Client($core->get_opt('oss_ak'), $core->get_opt('oss_sk'), $core->get_opt('oss_bucket'), $core->get_opt('oss_endpoint'), $core->get_opt('oss_ssl_verify', true));
-            if($client->putFile($key, $file)) {
-                $domain = $core->get_opt('oss_domain') ?: "https://{$core->get_opt('oss_bucket')}.{$core->get_opt('oss_endpoint')}";
-                update_post_meta($pid, 'sky_oss_url', rtrim($domain, '/')."/".$key);
-                $core->stat_inc('oss_count');
-                // 新增：日志
-                $core->log("OSS 上传成功: $key", 'info', 'OSS');
+            $base_dir = dirname($file);
+            $uploads = [];
+            
+            // 上传原图
+            if ($client->putFile(basename($file), $file)) {
+                $uploads[] = $file;
             }
+            
+            // 上传系统自动裁切的所有尺寸缩略图
+            if (isset($metadata['sizes']) && is_array($metadata['sizes'])) {
+                foreach ($metadata['sizes'] as $size => $size_info) {
+                    $size_file = $base_dir . '/' . $size_info['file'];
+                    if (file_exists($size_file) && $client->putFile($size_info['file'], $size_file)) {
+                        $uploads[] = $size_file;
+                    }
+                }
+            }
+
+            // Zero-Disk：只有图片成功上了云，才清理本地，绝对安全
+            if ($core->get_opt('oss_delete_local') && count($uploads) > 0) {
+                foreach ($uploads as $uploaded_file) {
+                    @unlink($uploaded_file);
+                }
+                $core->log("COS 全尺寸同步完成，已清理本地存储: " . basename($file), 'info', 'OSS');
+            }
+            
+            update_post_meta($attachment_id, '_sky_oss_synced', 1);
+
         } catch (Exception $e) {
-             $core->log("OSS Upload Fail: ".$e->getMessage(), 'error', 'OSS');
+             $core->log("COS Upload Fail: ".$e->getMessage(), 'error', 'OSS');
         }
-        return $data;
+        return $metadata;
     }
 
-    public function replace_url($url, $pid) {
-        if (!class_exists('Skyline_Core') || !Skyline_Core::instance()->get_opt('oss_enable')) return $url;
-        return get_post_meta($pid, 'sky_oss_url', true) ?: $url;
+    public function replace_url($url, $post_id) {
+        $core = Skyline_Core::instance();
+        if(!$core->get_opt('oss_enable') || !get_post_meta($post_id, '_sky_oss_synced', true)) return $url;
+        
+        $domain = rtrim($core->get_opt('oss_domain') ?: "https://{$core->get_opt('oss_bucket')}.{$core->get_opt('oss_endpoint')}", '/');
+        return str_replace(rtrim(get_site_url(), '/'), $domain, $url);
+    }
+
+    public function replace_image_src($image, $attachment_id, $size, $icon) {
+        if (!$image) return $image;
+        $core = Skyline_Core::instance();
+        if(!$core->get_opt('oss_enable') || !get_post_meta($attachment_id, '_sky_oss_synced', true)) return $image;
+        
+        $domain = rtrim($core->get_opt('oss_domain') ?: "https://{$core->get_opt('oss_bucket')}.{$core->get_opt('oss_endpoint')}", '/');
+        $image[0] = str_replace(rtrim(get_site_url(), '/'), $domain, $image[0]);
+        return $image;
     }
 }
 }
@@ -291,7 +201,6 @@ class Skyline_OSS_Mod {
 if (!class_exists('Sky_S3_Client')) {
 class Sky_S3_Client {
     private $ak, $sk, $host, $region='us-east-1', $ssl_verify;
-    // 优化：支持 SSL 配置传入
     public function __construct($ak, $sk, $bucket, $endpoint, $ssl_verify = true) {
         $this->ak = (string)$ak; $this->sk = (string)$sk; $this->host = "{$bucket}.{$endpoint}";
         $this->ssl_verify = $ssl_verify;
@@ -308,7 +217,6 @@ class Sky_S3_Client {
         $auth = "AWS4-HMAC-SHA256 Credential={$this->ak}/{$scope}, SignedHeaders=host;x-amz-content-sha256;x-amz-date, Signature={$sig}";
         
         $ch = curl_init("https://{$this->host}/{$key}");
-        // 优化：应用 SSL 验证配置
         curl_setopt_array($ch, [CURLOPT_PUT=>1, CURLOPT_INFILE=>$fp=fopen('php://memory','r+'), CURLOPT_INFILESIZE=>strlen($content), CURLOPT_HTTPHEADER=>["Authorization: {$auth}", "x-amz-date: {$dt}", "x-amz-content-sha256: {$hash}"], CURLOPT_RETURNTRANSFER=>1, CURLOPT_SSL_VERIFYPEER=>$this->ssl_verify]);
         fwrite($fp, $content); rewind($fp); curl_exec($ch); $code = curl_getinfo($ch, CURLINFO_HTTP_CODE); curl_close($ch);
         return ($code >= 200 && $code < 300);
