@@ -130,6 +130,7 @@ class Skyline_Turbo_Mod {
 }
 }
 
+// 核心功能：COS 全尺寸上云 + 本地秒删 Zero-Disk + 域名劫持
 if (!class_exists('Skyline_OSS_Mod')) {
 class Skyline_OSS_Mod {
     public function __construct() {
@@ -150,33 +151,29 @@ class Skyline_OSS_Mod {
             $base_dir = dirname($file);
             $uploads = [];
             
-            // 解决软链接：通过正则强行从真实文件路径中抠出 2026/05/xxx.jpg
-            $normalized_file = wp_normalize_path($file);
-            if (preg_match('/(\d{4}\/\d{2}\/[^\/]+)$/', $normalized_file, $matches)) {
-                $rel_path = $matches[1];
-            } else {
-                $rel_path = basename($normalized_file);
+            $attached_file = get_post_meta($attachment_id, '_wp_attached_file', true);
+            if (empty($attached_file) || strpos($attached_file, '/') === false) {
+                $normalized = wp_normalize_path($file);
+                if (preg_match('/(\d{4}\/\d{2}\/[^\/]+)$/', $normalized, $m)) {
+                    $attached_file = $m[1];
+                } else {
+                    $attached_file = basename($file);
+                }
+                update_post_meta($attachment_id, '_wp_attached_file', $attached_file);
             }
 
-            // 同步修复数据库的错乱路径
-            global $wpdb;
-            $wpdb->update($wpdb->postmeta, ['meta_value' => $rel_path], ['post_id' => $attachment_id, 'meta_key' => '_wp_attached_file']);
-
-            // 拼接出正确的云端目录 (wp-content/uploads/2026/05/xxx.jpg)
             $upload_dir = wp_upload_dir();
             $base_url_path = trim(parse_url($upload_dir['baseurl'], PHP_URL_PATH), '/');
             if (empty($base_url_path)) $base_url_path = 'wp-content/uploads';
-            
-            $object_key = $base_url_path . '/' . ltrim($rel_path, '/');
-            
-            // 上传原图
+
+            $object_key = $base_url_path . '/' . ltrim($attached_file, '/');
+
             if ($client->putFile($object_key, $file)) {
                 $uploads[] = $file;
             }
             
-            // 上传缩略图
             if (isset($metadata['sizes']) && is_array($metadata['sizes'])) {
-                $rel_dir = dirname($rel_path);
+                $rel_dir = dirname($attached_file);
                 if ($rel_dir === '.') $rel_dir = '';
 
                 foreach ($metadata['sizes'] as $size => $size_info) {
@@ -192,15 +189,14 @@ class Skyline_OSS_Mod {
                 }
             }
 
-            // 如果上传成功，执行 Zero-Disk 本地删除
-            if (count($uploads) > 0) {
-                if ($core->get_opt('oss_delete_local')) {
-                    foreach ($uploads as $uploaded_file) {
-                        @unlink($uploaded_file);
-                    }
+            if ($core->get_opt('oss_delete_local') && count($uploads) > 0) {
+                foreach ($uploads as $uploaded_file) {
+                    @unlink($uploaded_file);
                 }
-                update_post_meta($attachment_id, '_sky_oss_synced', 1);
+                $core->log("COS 全尺寸同步完成，已清理本地存储: " . basename($file), 'info', 'OSS');
             }
+            
+            update_post_meta($attachment_id, '_sky_oss_synced', 1);
 
         } catch (Exception $e) {
              $core->log("COS Upload Fail: ".$e->getMessage(), 'error', 'OSS');
@@ -228,28 +224,73 @@ class Skyline_OSS_Mod {
 }
 }
 
-// ⚠️ 极其干净的原版底层，我发誓绝对没有改过这里面的任何一个标点符号！
 if (!class_exists('Sky_S3_Client')) {
 class Sky_S3_Client {
     private $ak, $sk, $host, $region='us-east-1', $ssl_verify;
+
     public function __construct($ak, $sk, $bucket, $endpoint, $ssl_verify = true) {
-        $this->ak = (string)$ak; $this->sk = (string)$sk; $this->host = "{$bucket}.{$endpoint}";
+        $this->ak = (string)$ak; 
+        $this->sk = (string)$sk; 
+        $this->host = "{$bucket}.{$endpoint}";
         $this->ssl_verify = $ssl_verify;
-        if($endpoint && preg_match('/^oss-([a-z0-9-]+)\./', $endpoint, $m)) $this->region = $m[1];
+
+        // === 关键修复：同时支持阿里云 OSS + 腾讯云 COS ===
+        $this->region = 'us-east-1'; // 默认
+        if ($endpoint) {
+            // 阿里云 OSS
+            if (preg_match('/^oss-([a-z0-9-]+)\./i', $endpoint, $m)) {
+                $this->region = $m[1];
+            }
+            // 腾讯云 COS（已为你修复）
+            elseif (preg_match('/cos\.([a-z0-9-]+)\.myqcloud\.com/i', $endpoint, $m)) {
+                $this->region = $m[1];   // 如 ap-beijing、ap-shanghai 等
+            }
+        }
+        // ================================================
     }
-    public function putFile($key, $file) { return file_exists($file) ? $this->putContent($key, file_get_contents($file)) : false; }
+
+    public function putFile($key, $file) { 
+        return file_exists($file) ? $this->putContent($key, file_get_contents($file)) : false; 
+    }
+
     public function putContent($key, $content) {
-        $content = (string)$content; $dt = gmdate('Ymd\THis\Z'); $d = gmdate('Ymd');
+        $content = (string)$content; 
+        $dt = gmdate('Ymd\THis\Z'); 
+        $d = gmdate('Ymd');
         $hash = hash('sha256', $content);
+        
         $canon = "PUT\n/{$key}\n\nhost:{$this->host}\nx-amz-content-sha256:{$hash}\nx-amz-date:{$dt}\n\nhost;x-amz-content-sha256;x-amz-date\n{$hash}";
         $scope = "{$d}/{$this->region}/s3/aws4_request";
-        $kSigning = hash_hmac('sha256', "aws4_request", hash_hmac('sha256', "s3", hash_hmac('sha256', $this->region, hash_hmac('sha256', $d, "AWS4".$this->sk, true), true), true), true);
+        
+        $kSigning = hash_hmac('sha256', "aws4_request", 
+                    hash_hmac('sha256', "s3", 
+                    hash_hmac('sha256', $this->region, 
+                    hash_hmac('sha256', $d, "AWS4".$this->sk, true), true), true), true);
+        
         $sig = hash_hmac('sha256', "AWS4-HMAC-SHA256\n{$dt}\n{$scope}\n".hash('sha256', $canon), $kSigning);
+        
         $auth = "AWS4-HMAC-SHA256 Credential={$this->ak}/{$scope}, SignedHeaders=host;x-amz-content-sha256;x-amz-date, Signature={$sig}";
         
         $ch = curl_init("https://{$this->host}/{$key}");
-        curl_setopt_array($ch, [CURLOPT_PUT=>1, CURLOPT_INFILE=>$fp=fopen('php://memory','r+'), CURLOPT_INFILESIZE=>strlen($content), CURLOPT_HTTPHEADER=>["Authorization: {$auth}", "x-amz-date: {$dt}", "x-amz-content-sha256: {$hash}"], CURLOPT_RETURNTRANSFER=>1, CURLOPT_SSL_VERIFYPEER=>$this->ssl_verify]);
-        fwrite($fp, $content); rewind($fp); curl_exec($ch); $code = curl_getinfo($ch, CURLINFO_HTTP_CODE); curl_close($ch);
+        curl_setopt_array($ch, [
+            CURLOPT_PUT => 1, 
+            CURLOPT_INFILE => $fp = fopen('php://memory','r+'), 
+            CURLOPT_INFILESIZE => strlen($content), 
+            CURLOPT_HTTPHEADER => [
+                "Authorization: {$auth}", 
+                "x-amz-date: {$dt}", 
+                "x-amz-content-sha256: {$hash}"
+            ], 
+            CURLOPT_RETURNTRANSFER => 1, 
+            CURLOPT_SSL_VERIFYPEER => $this->ssl_verify
+        ]);
+        fwrite($fp, $content); 
+        rewind($fp); 
+        curl_exec($ch); 
+        $code = curl_getinfo($ch, CURLINFO_HTTP_CODE); 
+        curl_close($ch);
+        fclose($fp);
+        
         return ($code >= 200 && $code < 300);
     }
 }
