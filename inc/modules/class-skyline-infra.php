@@ -67,8 +67,37 @@ class Skyline_Redis_Mod {
         add_action('save_post', [$this, 'smart_flush'], 10, 2);
     }
 
-    public function page_cache() { /* ... 保持不变 ... */ }
-    public function smart_flush($pid, $post) { /* ... 保持不变 ... */ }
+    public function page_cache() {
+        if (!class_exists('Skyline_Core')) return;
+        $core = Skyline_Core::instance();
+        
+        if(!$core->get_opt('redis_enable') || is_user_logged_in() || is_admin() || $_SERVER['REQUEST_METHOD'] !== 'GET') return;
+        
+        $uri = $_SERVER['REQUEST_URI'];
+        $excludes = explode("\n", (string)$core->get_opt('redis_exclude', ''));
+        foreach ($excludes as $ex) { if (trim($ex) && strpos($uri, trim($ex)) !== false) return; }
+        
+        $infra = Skyline_Infra::instance();
+        $cache_uri = preg_replace('/\?.*$/', '', $uri) . (isset($_GET['s']) ? '?s=' . $_GET['s'] : '');
+        $key = 'page_' . md5(home_url($cache_uri));
+        
+        $cached = $infra->cache_get($key);
+        if ($cached) { header('X-Sky-Redis: HIT'); echo $cached; exit; }
+        
+        ob_start(function($buf) use ($infra, $key, $core) {
+            if (strlen($buf) > 200 && http_response_code() === 200 && !is_404()) {
+                $infra->cache_set($key, $buf, intval($core->get_opt('redis_ttl', 3600)));
+            }
+            return $buf;
+        });
+    }
+
+    public function smart_flush($pid, $post) {
+        if(wp_is_post_revision($pid) || $post->post_status != 'publish') return;
+        $infra = Skyline_Infra::instance();
+        $infra->cache_del('page_' . md5(home_url('/')));
+        $infra->cache_del('page_' . md5(get_permalink($pid)));
+    }
 }
 }
 
@@ -101,7 +130,7 @@ class Skyline_Turbo_Mod {
 }
 }
 
-// ====================== 核心 OSS 模块（已全面优化） ======================
+// ====================== 官方腾讯云 COS 模块 ======================
 if (!class_exists('Skyline_OSS_Mod')) {
 class Skyline_OSS_Mod {
     public function __construct() {
@@ -117,22 +146,21 @@ class Skyline_OSS_Mod {
         $file = get_attached_file($attachment_id);
         if (!$file || !file_exists($file)) return $metadata;
 
-        $core->log("OSS 开始处理附件 #{$attachment_id}: " . basename($file), 'info', 'OSS');
+        $core->log("🚀 [OSS] 开始处理附件 #{$attachment_id}: " . basename($file), 'info', 'OSS');
 
         try {
-            $client = new Sky_S3_Client(
+            $client = new Sky_Official_COS_Client(
                 $core->get_opt('oss_ak'),
                 $core->get_opt('oss_sk'),
                 $core->get_opt('oss_bucket'),
-                $core->get_opt('oss_endpoint'),
-                $core->get_opt('oss_ssl_verify', true)
+                $core->get_opt('oss_endpoint')
             );
 
             $base_dir = dirname($file);
             $uploads = [];
             $upload_success = false;
 
-            // 1. 处理主文件路径
+            // 提取正确的相对路径（保留年/月文件夹）
             $attached_file = get_post_meta($attachment_id, '_wp_attached_file', true);
             if (empty($attached_file) || strpos($attached_file, '/') === false) {
                 $normalized = wp_normalize_path($file);
@@ -154,9 +182,9 @@ class Skyline_OSS_Mod {
             if ($client->putFile($object_key, $file)) {
                 $uploads[] = $file;
                 $upload_success = true;
-                $core->log("✅ 原图上传成功: {$object_key}", 'info', 'OSS');
+                $core->log("✅ [OSS] 原图上传成功: {$object_key}", 'info', 'OSS');
             } else {
-                $core->log("❌ 原图上传失败: {$object_key}", 'error', 'OSS');
+                $core->log("❌ [OSS] 原图上传失败: {$object_key}", 'error', 'OSS');
             }
 
             // 上传所有缩略图
@@ -172,31 +200,28 @@ class Skyline_OSS_Mod {
                         
                         if ($client->putFile($size_object_key, $size_file)) {
                             $uploads[] = $size_file;
-                            $core->log("✅ 缩略图上传成功: {$size_object_key}", 'info', 'OSS');
+                            $core->log("✅ [OSS] 缩略图上传成功: {$size_object_key}", 'info', 'OSS');
                         } else {
-                            $core->log("❌ 缩略图上传失败: {$size_object_key}", 'error', 'OSS');
+                            $core->log("❌ [OSS] 缩略图上传失败: {$size_object_key}", 'error', 'OSS');
                         }
                     }
                 }
             }
 
-            // 只有真正上传成功才标记 synced，并执行 Zero-Disk
             if ($upload_success && count($uploads) > 0) {
                 update_post_meta($attachment_id, '_sky_oss_synced', 1);
-                $core->log("🎉 附件 #{$attachment_id} 全部上传成功，已标记 _sky_oss_synced", 'info', 'OSS');
+                $core->log("🎉 [OSS] 附件 #{$attachment_id} 全部上传成功！", 'info', 'OSS');
 
                 if ($core->get_opt('oss_delete_local')) {
                     foreach ($uploads as $uploaded_file) {
                         @unlink($uploaded_file);
                     }
-                    $core->log("🗑️ Zero-Disk 已清理本地文件", 'info', 'OSS');
+                    $core->log("🗑️ [OSS] Zero-Disk 已清理本地文件", 'info', 'OSS');
                 }
-            } else {
-                $core->log("⚠️ 附件 #{$attachment_id} 上传失败，未标记 synced", 'error', 'OSS');
             }
 
         } catch (Exception $e) {
-            $core->log("💥 OSS Upload Exception: " . $e->getMessage(), 'error', 'OSS');
+            $core->log("💥 [OSS] 官方 SDK 异常: " . $e->getMessage(), 'error', 'OSS');
         }
 
         return $metadata;
@@ -204,9 +229,7 @@ class Skyline_OSS_Mod {
 
     public function replace_url($url, $post_id) {
         $core = Skyline_Core::instance();
-        if (!$core->get_opt('oss_enable') || !get_post_meta($post_id, '_sky_oss_synced', true)) {
-            return $url;
-        }
+        if (!$core->get_opt('oss_enable') || !get_post_meta($post_id, '_sky_oss_synced', true)) return $url;
         
         $domain = rtrim($core->get_opt('oss_domain') ?: "https://{$core->get_opt('oss_bucket')}.{$core->get_opt('oss_endpoint')}", '/');
         return str_replace(rtrim(get_site_url(), '/'), $domain, $url);
@@ -215,9 +238,7 @@ class Skyline_OSS_Mod {
     public function replace_image_src($image, $attachment_id, $size, $icon) {
         if (!$image) return $image;
         $core = Skyline_Core::instance();
-        if (!$core->get_opt('oss_enable') || !get_post_meta($attachment_id, '_sky_oss_synced', true)) {
-            return $image;
-        }
+        if (!$core->get_opt('oss_enable') || !get_post_meta($attachment_id, '_sky_oss_synced', true)) return $image;
         
         $domain = rtrim($core->get_opt('oss_domain') ?: "https://{$core->get_opt('oss_bucket')}.{$core->get_opt('oss_endpoint')}", '/');
         $image[0] = str_replace(rtrim(get_site_url(), '/'), $domain, $image[0]);
@@ -226,85 +247,54 @@ class Skyline_OSS_Mod {
 }
 }
 
-if (!class_exists('Sky_S3_Client')) {
-class Sky_S3_Client {
-    private $ak, $sk, $host, $region = 'us-east-1', $ssl_verify;
+// 👑 官方腾讯云 COS SDK 客户端（稳定版）
+if (!class_exists('Sky_Official_COS_Client')) {
+class Sky_Official_COS_Client {
+    private $client;
+    private $bucket;
 
-    public function __construct($ak, $sk, $bucket, $endpoint, $ssl_verify = true) {
-        $this->ak = (string)$ak;
-        $this->sk = (string)$sk;
-        $this->host = "{$bucket}.{$endpoint}";
-        $this->ssl_verify = $ssl_verify;
+    public function __construct($ak, $sk, $bucket, $endpoint) {
+        $this->bucket = trim($bucket);
 
-        // 腾讯云 + 阿里云 region 识别
-        if ($endpoint) {
-            if (preg_match('/^oss-([a-z0-9-]+)\./i', $endpoint, $m)) {
-                $this->region = $m[1];
-            } elseif (preg_match('/cos\.([a-z0-9-]+)\.myqcloud\.com/i', $endpoint, $m)) {
-                $this->region = $m[1];   // ap-beijing 等
+        // 自动提取 region（如 ap-beijing）
+        $region = 'ap-beijing';
+        if (preg_match('/cos\.([a-z0-9-]+)\.myqcloud/i', $endpoint, $m)) {
+            $region = $m[1];
+        }
+
+        // 加载 Composer 安装的官方 SDK
+        if (!class_exists('\Qcloud\Cos\Client')) {
+            $autoload = dirname(dirname(dirname(__FILE__))) . '/vendor/autoload.php';
+            if (file_exists($autoload)) {
+                require_once $autoload;
+            } else {
+                throw new Exception('腾讯云 SDK 未找到，请确认 composer install 已执行');
             }
         }
+
+        $this->client = new \Qcloud\Cos\Client([
+            'region'      => $region,
+            'schema'      => 'https',
+            'credentials' => [
+                'secretId'  => trim($ak),
+                'secretKey' => trim($sk),
+            ]
+        ]);
     }
 
     public function putFile($key, $file) {
         if (!file_exists($file)) return false;
-        return $this->putContent($key, file_get_contents($file));
-    }
 
-    public function putContent($key, $content) {
-        $content = (string)$content;
-        $dt = gmdate('Ymd\THis\Z');
-        $d = gmdate('Ymd');
-        $hash = hash('sha256', $content);
-
-        $canon = "PUT\n/{$key}\n\nhost:{$this->host}\nx-amz-content-sha256:{$hash}\nx-amz-date:{$dt}\n\nhost;x-amz-content-sha256;x-amz-date\n{$hash}";
-        $scope = "{$d}/{$this->region}/s3/aws4_request";
-
-        $kSigning = hash_hmac('sha256', "aws4_request",
-                    hash_hmac('sha256', "s3",
-                    hash_hmac('sha256', $this->region,
-                    hash_hmac('sha256', $d, "AWS4" . $this->sk, true), true), true), true);
-
-        $sig = hash_hmac('sha256', "AWS4-HMAC-SHA256\n{$dt}\n{$scope}\n" . hash('sha256', $canon), $kSigning);
-
-        $auth = "AWS4-HMAC-SHA256 Credential={$this->ak}/{$scope}, SignedHeaders=host;x-amz-content-sha256;x-amz-date, Signature={$sig}";
-
-        $ch = curl_init("https://{$this->host}/{$key}");
-        $fp = fopen('php://memory', 'r+');
-        fwrite($fp, $content);
-        rewind($fp);
-
-        curl_setopt_array($ch, [
-            CURLOPT_PUT => 1,
-            CURLOPT_INFILE => $fp,
-            CURLOPT_INFILESIZE => strlen($content),
-            CURLOPT_HTTPHEADER => [
-                "Authorization: {$auth}",
-                "x-amz-date: {$dt}",
-                "x-amz-content-sha256: {$hash}"
-            ],
-            CURLOPT_RETURNTRANSFER => 1,
-            CURLOPT_SSL_VERIFYPEER => $this->ssl_verify,
-            CURLOPT_TIMEOUT => 30
-        ]);
-
-        $response = curl_exec($ch);
-        $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-        $curl_error = curl_error($ch);
-        curl_close($ch);
-        fclose($fp);
-
-        $success = ($http_code >= 200 && $http_code < 300);
-
-        // 关键调试日志
-        $core = Skyline_Core::instance();
-        $log_msg = $success 
-            ? "✅ COS PUT 成功 [{$http_code}] Key: {$key}"
-            : "❌ COS PUT 失败 [{$http_code}] Key: {$key} | CurlError: {$curl_error} | Response: " . substr($response, 0, 300);
-        
-        $core->log($log_msg, $success ? 'info' : 'error', 'OSS');
-
-        return $success;
+        try {
+            $this->client->putObject([
+                'Bucket' => $this->bucket,
+                'Key'    => ltrim($key, '/'),
+                'Body'   => fopen($file, 'rb')
+            ]);
+            return true;
+        } catch (\Exception $e) {
+            throw new Exception($e->getMessage());
+        }
     }
 }
 }
