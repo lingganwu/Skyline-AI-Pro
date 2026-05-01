@@ -29,7 +29,6 @@ class Skyline_Infra {
             if (!empty($opts['redis_auth'])) $this->redis->auth($opts['redis_auth']);
             if (!empty($opts['redis_db'])) $this->redis->select((int)$opts['redis_db']);
             
-            // 补充优化：激活高阶性能配置
             if (isset($opts['redis_serializer']) && $opts['redis_serializer'] === 'igbinary' && defined('Redis::SERIALIZER_IGBINARY')) {
                 $this->redis->setOption(Redis::OPT_SERIALIZER, Redis::SERIALIZER_IGBINARY);
             }
@@ -71,7 +70,6 @@ class Skyline_Redis_Mod {
     public function page_cache() {
         if (!class_exists('Skyline_Core')) return;
         $core = Skyline_Core::instance();
-        
         if(!$core->get_opt('redis_enable') || is_user_logged_in() || is_admin() || $_SERVER['REQUEST_METHOD'] !== 'GET') return;
         
         $uri = $_SERVER['REQUEST_URI'];
@@ -105,7 +103,6 @@ class Skyline_Redis_Mod {
 if (!class_exists('Skyline_Turbo_Mod')) {
 class Skyline_Turbo_Mod {
     public function __construct() {
-        // 核心逻辑：保证图片压缩在 COS 同步之前执行
         add_filter('wp_generate_attachment_metadata', [$this, 'compress'], 5, 2);
     }
     public function compress($metadata, $attachment_id) {
@@ -132,13 +129,10 @@ class Skyline_Turbo_Mod {
 }
 }
 
-// 核心功能：COS 全尺寸上云 + 本地秒删 Zero-Disk + 域名劫持
 if (!class_exists('Skyline_OSS_Mod')) {
 class Skyline_OSS_Mod {
     public function __construct() {
-        // 在阶段 99 彻底接管所有的原图和缩略图
         add_filter('wp_generate_attachment_metadata', [$this, 'upload_all_sizes'], 99, 2);
-        // 接管前台输出的图片链接，无缝替换 CDN
         add_filter('wp_get_attachment_url', [$this, 'replace_url'], 99, 2);
         add_filter('wp_get_attachment_image_src', [$this, 'replace_image_src'], 99, 4);
     }
@@ -155,43 +149,29 @@ class Skyline_OSS_Mod {
             $base_dir = dirname($file);
             $uploads = [];
             
-            // 🌟 物理开颅：完全抛弃错乱的数据库，直接从真实的绝对路径字符串中截取
             $normalized_file = wp_normalize_path($file);
             $rel_path = '';
-            
-            $pos = strrpos($normalized_file, '/uploads/');
-            if ($pos !== false) {
-                // 强制截取出类似于 2026/05/xxx.png 的绝对干净字符串
-                $rel_path = substr($normalized_file, $pos + 9);
-            } elseif (preg_match('/\/(\d{4}\/\d{2}\/.*)$/', $normalized_file, $matches)) {
+            if (preg_match('/(\d{4}\/\d{2}\/[^\/]+)$/', $normalized_file, $matches)) {
                 $rel_path = $matches[1];
             } else {
                 $rel_path = basename($normalized_file);
             }
 
-            // 清理软链接导致的连环 Bug：如果在提取中真的出现了 2026/05/2026/05 的双重情况，强制切掉一半
-            $rel_path = ltrim($rel_path, '/');
-            if (preg_match('/^(\d{4}\/\d{2}\/)\1(.*)$/', $rel_path, $m)) {
-                $rel_path = $m[1] . $m[2];
-            }
+            global $wpdb;
+            $wpdb->update($wpdb->postmeta, ['meta_value' => $rel_path], ['post_id' => $attachment_id, 'meta_key' => '_wp_attached_file']);
+            clean_post_cache($attachment_id);
 
-            // ⚠️ 极其关键的一步：将我们强制修正后的完美路径，强行写回 WordPress 数据库
-            // 这样前台生成网址的时候，就不会带上那两层恶心的年月了
-            update_post_meta($attachment_id, '_wp_attached_file', $rel_path);
-
-            // 获取前缀 (wp-content/uploads)
             $upload_dir = wp_upload_dir();
-            $base_url_path = trim((string)parse_url($upload_dir['baseurl'], PHP_URL_PATH), '/'); 
+            $base_url_path = trim(parse_url($upload_dir['baseurl'], PHP_URL_PATH), '/');
             if (empty($base_url_path)) $base_url_path = 'wp-content/uploads';
 
-            // 1. 上传原图 (拼接云端完美的单层年月结构)
             $object_key = $base_url_path . '/' . $rel_path;
             
+            // 执行上传动作
             if ($client->putFile($object_key, $file)) {
                 $uploads[] = $file;
             }
             
-            // 2. 上传系统自动裁切的所有尺寸缩略图
             if (isset($metadata['sizes']) && is_array($metadata['sizes'])) {
                 $rel_dir = dirname($rel_path);
                 if ($rel_dir === '.') $rel_dir = '';
@@ -209,15 +189,18 @@ class Skyline_OSS_Mod {
                 }
             }
 
-            // Zero-Disk：只有图片成功上了云，才清理本地，绝对安全
-            if ($core->get_opt('oss_delete_local') && count($uploads) > 0) {
-                foreach ($uploads as $uploaded_file) {
-                    @unlink($uploaded_file);
+            // 🌟 修复 Bug: 只有当真正有图片上传到腾讯云时，才标记同步并执行本地删除！
+            if (count($uploads) > 0) {
+                if ($core->get_opt('oss_delete_local')) {
+                    foreach ($uploads as $uploaded_file) {
+                        @unlink($uploaded_file);
+                    }
+                    $core->log("COS 同步完美成功，并已删除本地文件: " . basename($file), 'info', 'OSS');
                 }
-                $core->log("COS 终极同步成功，双重路径已修正: " . basename($file), 'info', 'OSS');
+                update_post_meta($attachment_id, '_sky_oss_synced', 1);
+            } else {
+                $core->log("COS 上传被腾讯云拒绝，中止替换链接。图片: " . basename($file), 'error', 'OSS');
             }
-            
-            update_post_meta($attachment_id, '_sky_oss_synced', 1);
 
         } catch (Exception $e) {
              $core->log("COS Upload Fail: ".$e->getMessage(), 'error', 'OSS');
@@ -251,7 +234,13 @@ class Sky_S3_Client {
     public function __construct($ak, $sk, $bucket, $endpoint, $ssl_verify = true) {
         $this->ak = (string)$ak; $this->sk = (string)$sk; $this->host = "{$bucket}.{$endpoint}";
         $this->ssl_verify = $ssl_verify;
-        if($endpoint && preg_match('/^oss-([a-z0-9-]+)\./', $endpoint, $m)) $this->region = $m[1];
+        // 🌟 修复签名区域匹配 Bug：同时完美兼容腾讯云(cos)和阿里云(oss)
+        if($endpoint && preg_match('/^(?:oss|cos|s3)[.-]([a-z0-9-]+)\./', $endpoint, $m)) {
+            $this->region = $m[1]; // 精准提取 ap-beijing
+        } else {
+            $parts = explode('.', $endpoint);
+            if (count($parts) >= 3) $this->region = $parts[1];
+        }
     }
     public function putFile($key, $file) { return file_exists($file) ? $this->putContent($key, file_get_contents($file)) : false; }
     public function putContent($key, $content) {
