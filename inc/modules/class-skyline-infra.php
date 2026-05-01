@@ -135,6 +135,18 @@ class Skyline_OSS_Mod {
         add_filter('wp_generate_attachment_metadata', [$this, 'upload_all_sizes'], 99, 2);
         add_filter('wp_get_attachment_url', [$this, 'replace_url'], 99, 2);
         add_filter('wp_get_attachment_image_src', [$this, 'replace_image_src'], 99, 4);
+
+        // 🌟 强力报错显示系统：把报错置顶显示在后台
+        add_action('admin_notices', function() {
+            $err = get_option('sky_oss_debug_msg');
+            if ($err) {
+                echo "<div class='notice notice-error is-dismissible' style='padding:15px; font-size:15px; border-left: 6px solid red;'>
+                        <p>🚨 <b>COS 上传被拦截！下面是腾讯云返回的真实原因：</b></p>
+                        <p style='color:#d63638; background:#fff; padding:10px; border:1px solid #ffb0b0;'>{$err}</p>
+                      </div>";
+                delete_option('sky_oss_debug_msg'); // 显示一次后自动清除
+            }
+        });
     }
 
     public function upload_all_sizes($metadata, $attachment_id) {
@@ -149,7 +161,7 @@ class Skyline_OSS_Mod {
             $base_dir = dirname($file);
             $uploads = [];
             
-            // 获取数据库里登记的路径（如果有软链接错乱，下面强行修正）
+            // 获取并修正相对路径
             $attached_file = get_post_meta($attachment_id, '_wp_attached_file', true);
             if (strpos((string)$attached_file, '/') === false) {
                 $normalized = wp_normalize_path($file);
@@ -161,18 +173,19 @@ class Skyline_OSS_Mod {
                 }
             }
 
-            // 拼接正确的云端路径 wp-content/uploads/2026/05/图片名.jpg
+            // 拼接云端对象键
             $upload_dir = wp_upload_dir();
             $base_url_path = trim(parse_url($upload_dir['baseurl'], PHP_URL_PATH), '/');
             if (empty($base_url_path)) $base_url_path = 'wp-content/uploads';
             
             $object_key = $base_url_path . '/' . ltrim($attached_file, '/');
             
-            // 核心修改点：这里调用上传方法，用正确的 $object_key 替代了以前错误的 basename($file)
+            // 上传原图
             if ($client->putFile($object_key, $file)) {
                 $uploads[] = $file;
             }
             
+            // 上传缩略图
             if (isset($metadata['sizes']) && is_array($metadata['sizes'])) {
                 $rel_dir = dirname($attached_file);
                 if ($rel_dir === '.') $rel_dir = '';
@@ -197,10 +210,13 @@ class Skyline_OSS_Mod {
                     }
                 }
                 update_post_meta($attachment_id, '_sky_oss_synced', 1);
+            } else {
+                throw new Exception("图片解析成功，但未能上传任何文件。");
             }
 
         } catch (Exception $e) {
-             $core->log("COS Upload Fail: ".$e->getMessage(), 'error', 'OSS');
+             $err_msg = current_time('mysql') . ' => ' . $e->getMessage();
+             update_option('sky_oss_debug_msg', esc_html($err_msg)); // 存入数据库供前台弹窗读取
         }
         return $metadata;
     }
@@ -208,7 +224,6 @@ class Skyline_OSS_Mod {
     public function replace_url($url, $post_id) {
         $core = Skyline_Core::instance();
         if(!$core->get_opt('oss_enable') || !get_post_meta($post_id, '_sky_oss_synced', true)) return $url;
-        
         $domain = rtrim($core->get_opt('oss_domain') ?: "https://{$core->get_opt('oss_bucket')}.{$core->get_opt('oss_endpoint')}", '/');
         return str_replace(rtrim(get_site_url(), '/'), $domain, $url);
     }
@@ -217,7 +232,6 @@ class Skyline_OSS_Mod {
         if (!$image) return $image;
         $core = Skyline_Core::instance();
         if(!$core->get_opt('oss_enable') || !get_post_meta($attachment_id, '_sky_oss_synced', true)) return $image;
-        
         $domain = rtrim($core->get_opt('oss_domain') ?: "https://{$core->get_opt('oss_bucket')}.{$core->get_opt('oss_endpoint')}", '/');
         $image[0] = str_replace(rtrim(get_site_url(), '/'), $domain, $image[0]);
         return $image;
@@ -225,30 +239,51 @@ class Skyline_OSS_Mod {
 }
 }
 
-// 这里的引擎已经 100% 还原回了你反馈“能传到根目录”的那个最稳定版本，一行都没多动！
+// 核心上传引擎
 if (!class_exists('Sky_S3_Client')) {
 class Sky_S3_Client {
     private $ak, $sk, $host, $region='us-east-1', $ssl_verify;
     public function __construct($ak, $sk, $bucket, $endpoint, $ssl_verify = true) {
         $this->ak = (string)$ak; $this->sk = (string)$sk; $this->host = "{$bucket}.{$endpoint}";
         $this->ssl_verify = $ssl_verify;
-        if($endpoint && preg_match('/^oss-([a-z0-9-]+)\./', $endpoint, $m)) $this->region = $m[1];
+        // 兼容提取腾讯云地域
+        if($endpoint && preg_match('/^(?:oss|cos|s3)[.-]([a-z0-9-]+)\./', $endpoint, $m)) {
+            $this->region = $m[1];
+        } else {
+            $parts = explode('.', $endpoint);
+            if (count($parts) >= 3) $this->region = $parts[1];
+        }
     }
     public function putFile($key, $file) { return file_exists($file) ? $this->putContent($key, file_get_contents($file)) : false; }
     public function putContent($key, $content) {
         $content = (string)$content; $dt = gmdate('Ymd\THis\Z'); $d = gmdate('Ymd');
-        $safe_key = implode('/', array_map('rawurlencode', explode('/', $key)));
         $hash = hash('sha256', $content);
-        $canon = "PUT\n/{$safe_key}\n\nhost:{$this->host}\nx-amz-content-sha256:{$hash}\nx-amz-date:{$dt}\n\nhost;x-amz-content-sha256;x-amz-date\n{$hash}";
+        $canon = "PUT\n/{$key}\n\nhost:{$this->host}\nx-amz-content-sha256:{$hash}\nx-amz-date:{$dt}\n\nhost;x-amz-content-sha256;x-amz-date\n{$hash}";
         $scope = "{$d}/{$this->region}/s3/aws4_request";
         $kSigning = hash_hmac('sha256', "aws4_request", hash_hmac('sha256', "s3", hash_hmac('sha256', $this->region, hash_hmac('sha256', $d, "AWS4".$this->sk, true), true), true), true);
         $sig = hash_hmac('sha256', "AWS4-HMAC-SHA256\n{$dt}\n{$scope}\n".hash('sha256', $canon), $kSigning);
         $auth = "AWS4-HMAC-SHA256 Credential={$this->ak}/{$scope}, SignedHeaders=host;x-amz-content-sha256;x-amz-date, Signature={$sig}";
         
-        $ch = curl_init("https://{$this->host}/{$safe_key}");
-        curl_setopt_array($ch, [CURLOPT_PUT=>1, CURLOPT_INFILE=>$fp=fopen('php://memory','r+'), CURLOPT_INFILESIZE=>strlen($content), CURLOPT_HTTPHEADER=>["Authorization: {$auth}", "x-amz-date: {$dt}", "x-amz-content-sha256: {$hash}"], CURLOPT_RETURNTRANSFER=>1, CURLOPT_SSL_VERIFYPEER=>$this->ssl_verify]);
-        fwrite($fp, $content); rewind($fp); curl_exec($ch); $code = curl_getinfo($ch, CURLINFO_HTTP_CODE); curl_close($ch);
-        return ($code >= 200 && $code < 300);
+        $ch = curl_init("https://{$this->host}/{$key}");
+        curl_setopt_array($ch, [
+            CURLOPT_PUT=>1, 
+            CURLOPT_INFILE=>$fp=fopen('php://memory','r+'), 
+            CURLOPT_INFILESIZE=>strlen($content), 
+            CURLOPT_HTTPHEADER=>["Authorization: {$auth}", "x-amz-date: {$dt}", "x-amz-content-sha256: {$hash}"], 
+            CURLOPT_RETURNTRANSFER=>1, 
+            CURLOPT_SSL_VERIFYPEER=>$this->ssl_verify,
+            CURLOPT_TIMEOUT=>30
+        ]);
+        fwrite($fp, $content); rewind($fp); 
+        $response = curl_exec($ch); 
+        $code = curl_getinfo($ch, CURLINFO_HTTP_CODE); 
+        $err = curl_error($ch);
+        curl_close($ch);
+        
+        if ($code >= 200 && $code < 300) return true;
+        
+        // 如果被拦截，直接抛出极其详尽的异常
+        throw new Exception("HTTP状态码: {$code} | 网络错误: {$err} | 腾讯云返回详情: " . strip_tags((string)$response));
     }
 }
 }
