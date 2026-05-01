@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="100" height="100">
+  <!-- Background circle -->
+  <circle cx="50" cy="50" r="48" fill="#6366f1" opacity="0.1"/>
+  
+  <!-- Robot body -->
+  <rect x="25" y="35" width="50" height="40" rx="10" fill="#6366f1"/>
+  
+  <!-- Robot head -->
+  <rect x="30" y="15" width="40" height="30" rx="8" fill="#818cf8"/>
+  
+  <!-- Eyes -->
+  <circle cx="40" cy="28" r="4" fill="white"/>
+  <circle cx="60" cy="28" r="4" fill="white"/>
+  
+  <!-- Eye pupils -->
+  <circle cx="41" cy="28" r="2" fill="#1e1b4b"/>
+  <circle cx="61" cy="28" r="2" fill="#1e1b4b"/>
+  
+  <!-- Mouth -->
+  <path d="M 40 38 Q 50 44 60 38" stroke="white" stroke-width="2" fill="none" stroke-linecap="round"/>
+  
+  <!-- Antenna -->
+  <line x1="50" y1="15" x2="50" y2="8" stroke="#818cf8" stroke-width="2" stroke-linecap="round"/>
+  <circle cx="50" cy="6" r="3" fill="#a855f7"/>
+  
+  <!-- Arms -->
+  <rect x="15" y="40" width="10" height="25" rx="5" fill="#818cf8"/>
+  <rect x="75" y="40" width="10" height="25" rx="5" fill="#818cf8"/>
+  
+  <!-- Legs -->
+  <rect x="35" y="75" width="10" height="15" rx="5" fill="#818cf8"/>
+  <rect x="55" y="75" width="10" height="15" rx="5" fill="#818cf8"/>
+  
+  <!-- Chest light -->
+  <circle cx="50" cy="52" r="5" fill="#a855f7" opacity="0.8"/>
+  <circle cx="50" cy="52" r="3" fill="white"/>
+</svg>
