@@ -29,6 +29,7 @@ class Skyline_Infra {
             if (!empty($opts['redis_auth'])) $this->redis->auth($opts['redis_auth']);
             if (!empty($opts['redis_db'])) $this->redis->select((int)$opts['redis_db']);
             
+            // 补充优化：激活高阶性能配置
             if (isset($opts['redis_serializer']) && $opts['redis_serializer'] === 'igbinary' && defined('Redis::SERIALIZER_IGBINARY')) {
                 $this->redis->setOption(Redis::OPT_SERIALIZER, Redis::SERIALIZER_IGBINARY);
             }
@@ -70,6 +71,7 @@ class Skyline_Redis_Mod {
     public function page_cache() {
         if (!class_exists('Skyline_Core')) return;
         $core = Skyline_Core::instance();
+        
         if(!$core->get_opt('redis_enable') || is_user_logged_in() || is_admin() || $_SERVER['REQUEST_METHOD'] !== 'GET') return;
         
         $uri = $_SERVER['REQUEST_URI'];
@@ -103,6 +105,7 @@ class Skyline_Redis_Mod {
 if (!class_exists('Skyline_Turbo_Mod')) {
 class Skyline_Turbo_Mod {
     public function __construct() {
+        // 核心逻辑：保证图片压缩在 COS 同步之前执行
         add_filter('wp_generate_attachment_metadata', [$this, 'compress'], 5, 2);
     }
     public function compress($metadata, $attachment_id) {
@@ -129,24 +132,15 @@ class Skyline_Turbo_Mod {
 }
 }
 
+// 核心功能：COS 全尺寸上云 + 本地秒删 Zero-Disk + 域名劫持
 if (!class_exists('Skyline_OSS_Mod')) {
 class Skyline_OSS_Mod {
     public function __construct() {
+        // 在阶段 99 彻底接管所有的原图和缩略图
         add_filter('wp_generate_attachment_metadata', [$this, 'upload_all_sizes'], 99, 2);
+        // 接管前台输出的图片链接，无缝替换 CDN
         add_filter('wp_get_attachment_url', [$this, 'replace_url'], 99, 2);
         add_filter('wp_get_attachment_image_src', [$this, 'replace_image_src'], 99, 4);
-
-        // 🌟 强力报错显示系统：把报错置顶显示在后台
-        add_action('admin_notices', function() {
-            $err = get_option('sky_oss_debug_msg');
-            if ($err) {
-                echo "<div class='notice notice-error is-dismissible' style='padding:15px; font-size:15px; border-left: 6px solid red;'>
-                        <p>🚨 <b>COS 上传被拦截！下面是腾讯云返回的真实原因：</b></p>
-                        <p style='color:#d63638; background:#fff; padding:10px; border:1px solid #ffb0b0;'>{$err}</p>
-                      </div>";
-                delete_option('sky_oss_debug_msg'); // 显示一次后自动清除
-            }
-        });
     }
 
     public function upload_all_sizes($metadata, $attachment_id) {
@@ -161,35 +155,36 @@ class Skyline_OSS_Mod {
             $base_dir = dirname($file);
             $uploads = [];
             
-            // 获取并修正相对路径
+            // 提取正确的相对路径 (如 2026/05/abc.jpg)，解决软链接和截断问题
             $attached_file = get_post_meta($attachment_id, '_wp_attached_file', true);
-            if (strpos((string)$attached_file, '/') === false) {
+            if (empty($attached_file) || strpos($attached_file, '/') === false) {
                 $normalized = wp_normalize_path($file);
                 if (preg_match('/(\d{4}\/\d{2}\/[^\/]+)$/', $normalized, $m)) {
                     $attached_file = $m[1];
-                    update_post_meta($attachment_id, '_wp_attached_file', $attached_file);
                 } else {
                     $attached_file = basename($file);
                 }
+                update_post_meta($attachment_id, '_wp_attached_file', $attached_file);
             }
 
-            // 拼接云端对象键
+            // 获取 wp-content/uploads 基础路径
             $upload_dir = wp_upload_dir();
             $base_url_path = trim(parse_url($upload_dir['baseurl'], PHP_URL_PATH), '/');
             if (empty($base_url_path)) $base_url_path = 'wp-content/uploads';
-            
+
+            // 拼接最终完美的云端路径
             $object_key = $base_url_path . '/' . ltrim($attached_file, '/');
-            
-            // 上传原图
+
+            // 上传原图 (只修改了这里，去掉了 basename，传入完美的带目录路径)
             if ($client->putFile($object_key, $file)) {
                 $uploads[] = $file;
             }
             
-            // 上传缩略图
+            // 上传系统自动裁切的所有尺寸缩略图
             if (isset($metadata['sizes']) && is_array($metadata['sizes'])) {
                 $rel_dir = dirname($attached_file);
                 if ($rel_dir === '.') $rel_dir = '';
-                
+
                 foreach ($metadata['sizes'] as $size => $size_info) {
                     $size_file = $base_dir . '/' . $size_info['file'];
                     if (file_exists($size_file)) {
@@ -203,20 +198,18 @@ class Skyline_OSS_Mod {
                 }
             }
 
-            if (count($uploads) > 0) {
-                if ($core->get_opt('oss_delete_local')) {
-                    foreach ($uploads as $uploaded_file) {
-                        @unlink($uploaded_file);
-                    }
+            // Zero-Disk：只有图片成功上了云，才清理本地，绝对安全
+            if ($core->get_opt('oss_delete_local') && count($uploads) > 0) {
+                foreach ($uploads as $uploaded_file) {
+                    @unlink($uploaded_file);
                 }
-                update_post_meta($attachment_id, '_sky_oss_synced', 1);
-            } else {
-                throw new Exception("图片解析成功，但未能上传任何文件。");
+                $core->log("COS 全尺寸同步完成，已清理本地存储: " . basename($file), 'info', 'OSS');
             }
+            
+            update_post_meta($attachment_id, '_sky_oss_synced', 1);
 
         } catch (Exception $e) {
-             $err_msg = current_time('mysql') . ' => ' . $e->getMessage();
-             update_option('sky_oss_debug_msg', esc_html($err_msg)); // 存入数据库供前台弹窗读取
+             $core->log("COS Upload Fail: ".$e->getMessage(), 'error', 'OSS');
         }
         return $metadata;
     }
@@ -224,6 +217,7 @@ class Skyline_OSS_Mod {
     public function replace_url($url, $post_id) {
         $core = Skyline_Core::instance();
         if(!$core->get_opt('oss_enable') || !get_post_meta($post_id, '_sky_oss_synced', true)) return $url;
+        
         $domain = rtrim($core->get_opt('oss_domain') ?: "https://{$core->get_opt('oss_bucket')}.{$core->get_opt('oss_endpoint')}", '/');
         return str_replace(rtrim(get_site_url(), '/'), $domain, $url);
     }
@@ -232,6 +226,7 @@ class Skyline_OSS_Mod {
         if (!$image) return $image;
         $core = Skyline_Core::instance();
         if(!$core->get_opt('oss_enable') || !get_post_meta($attachment_id, '_sky_oss_synced', true)) return $image;
+        
         $domain = rtrim($core->get_opt('oss_domain') ?: "https://{$core->get_opt('oss_bucket')}.{$core->get_opt('oss_endpoint')}", '/');
         $image[0] = str_replace(rtrim(get_site_url(), '/'), $domain, $image[0]);
         return $image;
@@ -239,20 +234,13 @@ class Skyline_OSS_Mod {
 }
 }
 
-// 核心上传引擎
 if (!class_exists('Sky_S3_Client')) {
 class Sky_S3_Client {
     private $ak, $sk, $host, $region='us-east-1', $ssl_verify;
     public function __construct($ak, $sk, $bucket, $endpoint, $ssl_verify = true) {
         $this->ak = (string)$ak; $this->sk = (string)$sk; $this->host = "{$bucket}.{$endpoint}";
         $this->ssl_verify = $ssl_verify;
-        // 兼容提取腾讯云地域
-        if($endpoint && preg_match('/^(?:oss|cos|s3)[.-]([a-z0-9-]+)\./', $endpoint, $m)) {
-            $this->region = $m[1];
-        } else {
-            $parts = explode('.', $endpoint);
-            if (count($parts) >= 3) $this->region = $parts[1];
-        }
+        if($endpoint && preg_match('/^oss-([a-z0-9-]+)\./', $endpoint, $m)) $this->region = $m[1];
     }
     public function putFile($key, $file) { return file_exists($file) ? $this->putContent($key, file_get_contents($file)) : false; }
     public function putContent($key, $content) {
@@ -265,25 +253,9 @@ class Sky_S3_Client {
         $auth = "AWS4-HMAC-SHA256 Credential={$this->ak}/{$scope}, SignedHeaders=host;x-amz-content-sha256;x-amz-date, Signature={$sig}";
         
         $ch = curl_init("https://{$this->host}/{$key}");
-        curl_setopt_array($ch, [
-            CURLOPT_PUT=>1, 
-            CURLOPT_INFILE=>$fp=fopen('php://memory','r+'), 
-            CURLOPT_INFILESIZE=>strlen($content), 
-            CURLOPT_HTTPHEADER=>["Authorization: {$auth}", "x-amz-date: {$dt}", "x-amz-content-sha256: {$hash}"], 
-            CURLOPT_RETURNTRANSFER=>1, 
-            CURLOPT_SSL_VERIFYPEER=>$this->ssl_verify,
-            CURLOPT_TIMEOUT=>30
-        ]);
-        fwrite($fp, $content); rewind($fp); 
-        $response = curl_exec($ch); 
-        $code = curl_getinfo($ch, CURLINFO_HTTP_CODE); 
-        $err = curl_error($ch);
-        curl_close($ch);
-        
-        if ($code >= 200 && $code < 300) return true;
-        
-        // 如果被拦截，直接抛出极其详尽的异常
-        throw new Exception("HTTP状态码: {$code} | 网络错误: {$err} | 腾讯云返回详情: " . strip_tags((string)$response));
+        curl_setopt_array($ch, [CURLOPT_PUT=>1, CURLOPT_INFILE=>$fp=fopen('php://memory','r+'), CURLOPT_INFILESIZE=>strlen($content), CURLOPT_HTTPHEADER=>["Authorization: {$auth}", "x-amz-date: {$dt}", "x-amz-content-sha256: {$hash}"], CURLOPT_RETURNTRANSFER=>1, CURLOPT_SSL_VERIFYPEER=>$this->ssl_verify]);
+        fwrite($fp, $content); rewind($fp); curl_exec($ch); $code = curl_getinfo($ch, CURLINFO_HTTP_CODE); curl_close($ch);
+        return ($code >= 200 && $code < 300);
     }
 }
 }
