@@ -1,0 +1,23 @@
+{
+    "name": "lingganwu/skyline-ai-pro",
+    "description": "Skyline AI Pro - WordPress AI Operations Platform",
+    "type": "wordpress-plugin",
+    "license": "GPL-2.0-or-later",
+    "require": {
+        "php": ">=7.4"
+    },
+    "require-dev": {
+        "wp-coding-standards/wpcs": "^3.0",
+        "phpcompatibility/phpcompatibility-wp": "*",
+        "dealerdirect/phpcodesniffer-composer-installer": "^1.0"
+    },
+    "config": {
+        "allow-plugins": {
+            "dealerdirect/phpcodesniffer-composer-installer": true
+        }
+    },
+    "scripts": {
+        "lint": "phpcs --standard=WordPress",
+        "lint:fix": "phpcbf --standard=WordPress"
+    }
+}
