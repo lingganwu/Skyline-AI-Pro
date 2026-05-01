@@ -155,27 +155,46 @@ class Skyline_OSS_Mod {
             $base_dir = dirname($file);
             $uploads = [];
             
-            // 上传原图
-            if ($client->putFile(basename($file), $file)) {
+            // 🌟 终极修复：无视软链接，直接获取 WP 数据库内登记的相对路径 (例如 2026/05/xxx.png)
+            $rel_path = wp_normalize_path(get_post_meta($attachment_id, '_wp_attached_file', true));
+            $upload_dir = wp_upload_dir();
+            $base_url_path = trim(parse_url($upload_dir['baseurl'], PHP_URL_PATH), '/'); // 提取 wp-content/uploads
+            
+            if (!$rel_path || $rel_path === '') {
+                $rel_path = basename($file); // 极端情况下的兜底
+            }
+
+            // 1. 上传原图 (完美对齐前端带年份月份的 URL 路径)
+            $object_key = $base_url_path . '/' . ltrim($rel_path, '/');
+            
+            if ($client->putFile($object_key, $file)) {
                 $uploads[] = $file;
             }
             
-            // 上传系统自动裁切的所有尺寸缩略图
+            // 2. 上传缩略图 (保持与原图同级年月目录)
             if (isset($metadata['sizes']) && is_array($metadata['sizes'])) {
+                $rel_dir = dirname($rel_path);
+                if ($rel_dir === '.') $rel_dir = '';
+                
                 foreach ($metadata['sizes'] as $size => $size_info) {
                     $size_file = $base_dir . '/' . $size_info['file'];
-                    if (file_exists($size_file) && $client->putFile($size_info['file'], $size_file)) {
-                        $uploads[] = $size_file;
+                    if (file_exists($size_file)) {
+                        $size_rel_path = $rel_dir ? $rel_dir . '/' . $size_info['file'] : $size_info['file'];
+                        $size_object_key = $base_url_path . '/' . ltrim($size_rel_path, '/');
+                        
+                        if ($client->putFile($size_object_key, $size_file)) {
+                            $uploads[] = $size_file;
+                        }
                     }
                 }
             }
 
-            // Zero-Disk：只有图片成功上了云，才清理本地，绝对安全
+            // Zero-Disk：只有图片成功上了云，才清理本地
             if ($core->get_opt('oss_delete_local') && count($uploads) > 0) {
                 foreach ($uploads as $uploaded_file) {
                     @unlink($uploaded_file);
                 }
-                $core->log("COS 全尺寸同步完成，已清理本地存储: " . basename($file), 'info', 'OSS');
+                $core->log("COS 同步完成(软链接路径完美对齐)，已清理本地: " . basename($file), 'info', 'OSS');
             }
             
             update_post_meta($attachment_id, '_sky_oss_synced', 1);
