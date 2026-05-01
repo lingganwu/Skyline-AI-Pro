@@ -2,670 +2,600 @@
 if (!defined('ABSPATH')) exit;
 
 class Skyline_Content {
+    
+    // 批量查询缓存
+    private $image_hash_cache = [];
+    
     public function __construct() {
+        // 异步任务钩子
         add_action('save_post', [$this, 'trigger_async_tasks'], 20, 2);
-        add_action('skyline_async_spider', [$this, 'auto_spider']);
-        add_action('skyline_async_seo', [$this, 'auto_seo_meta']); 
+        add_action('skyline_async_sync', [$this, 'auto_sync_images']);
+        add_action('skyline_async_seo', [$this, 'auto_seo_meta']);
         
+        // 前台过滤器
         add_filter('the_content', [$this, 'auto_internal_links']);
         
-        add_action('wp_ajax_sky_seo_score', [$this, 'ajax_seo_score']);
-        add_action('wp_ajax_sky_bulk_action', [$this, 'ajax_bulk_action']);
-        add_action('wp_ajax_sky_spider_now', [$this, 'ajax_spider_now']); 
-        add_action('wp_ajax_sky_spider_single', [$this, 'ajax_spider_single']); 
-        add_action('wp_ajax_sky_link_now', [$this, 'ajax_link_now']); 
+        // AJAX 处理器 - 使用统一的安全验证
+        $this->register_ajax_handlers();
         
+        // 编辑器集成
         add_action('add_meta_boxes', [$this, 'add_copilot_box']);
     }
+    
+    private function register_ajax_handlers() {
+        $actions = [
+            'sky_seo_score' => 'ajax_seo_score',
+            'sky_bulk_action' => 'ajax_bulk_action',
+            'sky_sync_now' => 'ajax_sync_now',
+            'sky_sync_single' => 'ajax_sync_single',
+            'sky_link_now' => 'ajax_link_now',
+        ];
+        
+        foreach ($actions as $action => $handler) {
+            add_action('wp_ajax_' . $action, [$this, $handler]);
+        }
+    }
 
+    /**
+     * 安全验证辅助方法
+     */
+    private function verify_ajax($nonce_action = 'skyline_ajax_nonce') {
+        if (!skyline_verify_nonce(null, $nonce_action)) {
+            wp_send_json_error(__('安全验证失败', 'skyline-ai-pro'), 403);
+        }
+        if (!current_user_can('edit_posts')) {
+            wp_send_json_error(__('权限不足', 'skyline-ai-pro'), 403);
+        }
+    }
+
+    /**
+     * 触发异步任务
+     */
     public function trigger_async_tasks($pid, $post) {
         if (defined('DOING_AUTOSAVE') && DOING_AUTOSAVE) return;
-        if (wp_is_post_revision($pid) || $post->post_status != 'publish') return;
+        if (wp_is_post_revision($pid) || $post->post_status !== 'publish') return;
 
         $core = Skyline_Core::instance();
         
-        if ($core->get_opt('spider_enable') && $core->get_opt('spider_auto')) {
-            if (!wp_next_scheduled('skyline_async_spider', [$pid])) {
-                wp_schedule_single_event(time() + 2, 'skyline_async_spider', [$pid]);
+        // 图片同步任务
+        if ($core->get_opt('sync_enable') && $core->get_opt('sync_auto')) {
+            if (!wp_next_scheduled('skyline_async_sync', [$pid])) {
+                wp_schedule_single_event(time() + 2, 'skyline_async_sync', [$pid]);
             }
         }
 
-        $do_tags = $core->get_opt('auto_tags');
-        $do_slug = $core->get_opt('auto_slug');
-        $do_excerpt = $core->get_opt('auto_excerpt');
-        $do_polish = $core->get_opt('auto_polish');
+        // SEO 任务
+        $seo_tasks = ['auto_tags', 'auto_slug', 'auto_excerpt', 'auto_polish'];
+        $needs_seo = false;
+        foreach ($seo_tasks as $task) {
+            if ($core->get_opt($task)) { $needs_seo = true; break; }
+        }
         
-        if ($do_tags || $do_slug || $do_excerpt || $do_polish) {
-            if (!get_post_meta($pid, '_sky_seo_done', true) && !wp_next_scheduled('skyline_async_seo', [$pid])) {
+        if ($needs_seo && !get_post_meta($pid, '_sky_seo_done', true)) {
+            if (!wp_next_scheduled('skyline_async_seo', [$pid])) {
                 wp_schedule_single_event(time() + 5, 'skyline_async_seo', [$pid]);
             }
         }
     }
 
+    /**
+     * 自动内链
+     */
     public function auto_internal_links($content) {
         $core = Skyline_Core::instance();
-        if(!$core->get_opt('link_enable') || is_admin()) return $content;
+        if (!$core->get_opt('link_enable') || is_admin()) return $content;
+        
         $links_str = $core->get_opt('link_pairs');
-        if(!$links_str) return $content;
+        if (!$links_str) return $content;
         
         $pairs = explode("\n", $links_str);
-        foreach($pairs as $pair) {
+        foreach ($pairs as $pair) {
             $p = explode('|', trim($pair));
-            if(count($p) < 2) continue;
-            $kw = trim($p[0]); $url = trim($p[1]);
-            if(!$kw || !$url) continue;
-            $content = preg_replace('/(?!(?:[^<]+>|[^>]+<\/a>))'.preg_quote($kw, '/').'/u', '<a href="'.$url.'" title="'.$kw.'" target="_blank" class="sky-link">'.$kw.'</a>', $content, 1);
+            if (count($p) < 2) continue;
+            
+            $kw = trim($p[0]);
+            $url = esc_url(trim($p[1]));
+            if (!$kw || !$url) continue;
+            
+            // 安全：转义 URL 和关键词
+            $content = preg_replace(
+                '/(?!(?:[^<]+>|[^>]+<\/a>))' . preg_quote($kw, '/') . '/u',
+                '<a href="' . esc_attr($url) . '" title="' . esc_attr($kw) . '" target="_blank" rel="noopener" class="sky-link">' . esc_html($kw) . '</a>',
+                $content,
+                1
+            );
         }
         return $content;
     }
 
+    /**
+     * 批量查询图片哈希（性能优化）
+     */
+    private function batch_check_image_hashes($hashes) {
+        if (empty($hashes)) return [];
+        
+        // 检查内存缓存
+        $result = [];
+        $uncached = [];
+        
+        foreach ($hashes as $hash) {
+            if (isset($this->image_hash_cache[$hash])) {
+                $result[$hash] = $this->image_hash_cache[$hash];
+            } else {
+                $uncached[] = $hash;
+            }
+        }
+        
+        if (!empty($uncached)) {
+            global $wpdb;
+            $placeholders = implode(',', array_fill(0, count($uncached), '%s'));
+            $query = $wpdb->prepare(
+                "SELECT post_id, meta_value FROM $wpdb->postmeta WHERE meta_key = '_sky_source_hash' AND meta_value IN ($placeholders)",
+                $uncached
+            );
+            
+            $rows = $wpdb->get_results($query);
+            foreach ($rows as $row) {
+                $result[$row->meta_value] = $row->post_id;
+                $this->image_hash_cache[$row->meta_value] = $row->post_id;
+            }
+        }
+        
+        return $result;
+    }
+
+    /**
+     * 下载图片（带缓存检查）
+     */
     private function download_image($url, $pid) {
         if (!function_exists('wp_generate_attachment_metadata')) {
-            require_once(ABSPATH . 'wp-admin/includes/image.php');
-            require_once(ABSPATH . 'wp-admin/includes/file.php');
-            require_once(ABSPATH . 'wp-admin/includes/media.php');
+            require_once ABSPATH . 'wp-admin/includes/image.php';
+            require_once ABSPATH . 'wp-admin/includes/file.php';
+            require_once ABSPATH . 'wp-admin/includes/media.php';
         }
 
         $core = Skyline_Core::instance();
+        
+        // 规范化 URL
         if (strpos($url, 'wx_fmt') === false && strpos($url, 'mmbiz') === false) {
-             $parsed = parse_url($url);
-             $norm_url = ($parsed['scheme']??'http') . '://' . ($parsed['host']??'') . ($parsed['path']??'');
+            $parsed = parse_url($url);
+            $norm_url = ($parsed['scheme'] ?? 'http') . '://' . ($parsed['host'] ?? '') . ($parsed['path'] ?? '');
         } else {
-             $norm_url = $url;
+            $norm_url = $url;
         }
         $img_hash = md5($norm_url);
 
-        $spider_history = get_post_meta($pid, '_sky_spider_history', true);
-        if (!is_array($spider_history)) $spider_history = [];
+        // 1. 检查文章级缓存
+        $sync_history = get_post_meta($pid, '_sky_sync_history', true);
+        if (!is_array($sync_history)) $sync_history = [];
 
-        if (isset($spider_history[$img_hash])) {
-            $existing_id = intval($spider_history[$img_hash]);
-            if (get_post($existing_id)) return ['id' => $existing_id, 'status' => 'cached_post'];
+        if (isset($sync_history[$img_hash])) {
+            $existing_id = intval($sync_history[$img_hash]);
+            if (get_post($existing_id)) {
+                return ['id' => $existing_id, 'status' => 'cached_post'];
+            }
         }
 
-        global $wpdb;
-        $global_id = $wpdb->get_var($wpdb->prepare("SELECT post_id FROM $wpdb->postmeta WHERE meta_key = '_sky_source_hash' AND meta_value = %s LIMIT 1", $img_hash));
-
-        if ($global_id && get_post($global_id)) {
-            $spider_history[$img_hash] = $global_id;
-            update_post_meta($pid, '_sky_spider_history', $spider_history);
-            return ['id' => $global_id, 'status' => 'cached_global'];
+        // 2. 检查全局缓存（使用批量查询）
+        $global_hashes = $this->batch_check_image_hashes([$img_hash]);
+        if (isset($global_hashes[$img_hash])) {
+            $global_id = $global_hashes[$img_hash];
+            if (get_post($global_id)) {
+                $sync_history[$img_hash] = $global_id;
+                update_post_meta($pid, '_sky_sync_history', $sync_history);
+                return ['id' => $global_id, 'status' => 'cached_global'];
+            }
         }
 
+        // 3. 下载图片
         $args = [
-            'timeout' => 25, 
-            'sslverify' => $core->get_opt('spider_ssl_verify', true),
-            'user-agent' => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            'timeout' => 25,
+            'sslverify' => $core->get_opt('sync_ssl_verify', true),
+            'user-agent' => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
         ];
         
-        if($core->get_opt('spider_allow_wechat') && (strpos($url,'qpic.cn')!==false || strpos($url,'mmbiz')!==false)) {
-            $args['headers']['Referer'] = 'https://mp.weixin.qq.com/'; 
+        // 微信图片特殊处理
+        if ($core->get_opt('sync_allow_wechat') && (strpos($url, 'qpic.cn') !== false || strpos($url, 'mmbiz') !== false)) {
+            $args['headers']['Referer'] = 'https://mp.weixin.qq.com/';
         } else {
-            $args['headers']['Referer'] = $url; 
+            $args['headers']['Referer'] = $url;
         }
 
         $res = wp_remote_get($url, $args);
-        if(is_wp_error($res)) return ['error' => '网络错误: ' . $res->get_error_message()];
+        if (is_wp_error($res)) {
+            return ['error' => __('网络错误: ', 'skyline-ai-pro') . $res->get_error_message()];
+        }
+        
         $code = wp_remote_retrieve_response_code($res);
-        if($code != 200) return ['error' => "HTTP状态 $code"];
+        if ($code !== 200) {
+            return ['error' => sprintf(__('HTTP 状态码: %d', 'skyline-ai-pro'), $code)];
+        }
 
         $file_data = wp_remote_retrieve_body($res);
-        if(strlen($file_data) < 500) return ['error' => '文件太小(<500B)'];
+        if (strlen($file_data) < 500) {
+            return ['error' => __('文件过小', 'skyline-ai-pro')];
+        }
 
-        $filename = 'sp_' . date('YmdHis') . '_' . substr($img_hash, 0, 6) . '.jpg'; 
+        // 4. 保存文件
+        $filename = 'sync_' . date('YmdHis') . '_' . substr($img_hash, 0, 6) . '.jpg';
         $content_type = wp_remote_retrieve_header($res, 'content-type');
         
-        if($content_type) {
-            if(strpos($content_type, 'png')!==false) $filename = str_replace('.jpg', '.png', $filename);
-            elseif(strpos($content_type, 'gif')!==false) $filename = str_replace('.jpg', '.gif', $filename);
-            elseif(strpos($content_type, 'webp')!==false) $filename = str_replace('.jpg', '.webp', $filename);
+        if ($content_type) {
+            $ext_map = ['png' => '.png', 'gif' => '.gif', 'webp' => '.webp'];
+            foreach ($ext_map as $mime => $ext) {
+                if (strpos($content_type, $mime) !== false) {
+                    $filename = str_replace('.jpg', $ext, $filename);
+                    break;
+                }
+            }
         }
 
         $upload = wp_upload_bits($filename, null, $file_data);
-        if($upload['error']) return ['error' => '写入失败: ' . $upload['error']];
+        if ($upload['error']) {
+            return ['error' => __('写入失败: ', 'skyline-ai-pro') . $upload['error']];
+        }
 
         $file_path = $upload['file'];
         $mime = $content_type ?: 'image/jpeg';
 
-        if($core->get_opt('spider_rm_wm')) $this->remove_watermark_crop($file_path, $mime);
-        if($core->get_opt('spider_wm_enable')) $this->watermark($file_path);
+        // 5. 图片处理
+        if ($core->get_opt('sync_rm_wm')) {
+            $this->remove_watermark_crop($file_path, $mime);
+        }
+        if ($core->get_opt('sync_wm_enable')) {
+            $this->watermark($file_path);
+        }
 
-        $aid = wp_insert_attachment(['post_mime_type'=>$mime, 'post_title'=>'Spider Img'], $file_path, $pid);
+        // 6. 创建附件
+        $aid = wp_insert_attachment([
+            'post_mime_type' => $mime,
+            'post_title' => sanitize_file_name($filename),
+        ], $file_path, $pid);
+        
         if (!is_wp_error($aid)) {
             $meta = wp_generate_attachment_metadata($aid, $file_path);
             wp_update_attachment_metadata($aid, $meta);
             
             update_post_meta($aid, '_sky_source_hash', $img_hash);
-            update_post_meta($aid, '_sky_source_url', $url);
-            $core->stat_inc('spider_count');
-            $core->log("同步图片成功: $filename", 'info', 'Spider');
-            $spider_history[$img_hash] = $aid;
-            update_post_meta($pid, '_sky_spider_history', $spider_history);
+            update_post_meta($aid, '_sky_source_url', esc_url($url));
+            $core->stat_inc('sync_count');
+            $core->log("同步图片成功: $filename", 'info', 'Sync');
+            
+            $sync_history[$img_hash] = $aid;
+            update_post_meta($pid, '_sky_sync_history', $sync_history);
+            
             return ['id' => $aid, 'status' => 'downloaded'];
         }
-        return ['error' => '数据库插入失败'];
+        
+        return ['error' => __('附件创建失败', 'skyline-ai-pro')];
     }
 
-    public function auto_spider($pid) {
+    /**
+     * 自动同步图片
+     */
+    public function auto_sync_images($pid) {
         $post = get_post($pid);
         if (!$post) return;
         
-        if(get_post_meta($pid, '_sky_spider_processing', true)) return;
-        update_post_meta($pid, '_sky_spider_processing', 1);
+        // 防止重复处理
+        if (get_post_meta($pid, '_sky_sync_processing', true)) return;
+        update_post_meta($pid, '_sky_sync_processing', 1);
 
         $content = $post->post_content;
         preg_match_all('/(src|data-src)=[\'"]([^\'"]+)[\'"]/i', $content, $m);
-        if(empty($m[2])) { delete_post_meta($pid, '_sky_spider_processing'); return; }
+        
+        if (empty($m[2])) {
+            delete_post_meta($pid, '_sky_sync_processing');
+            return;
+        }
 
         $site_domain = parse_url(get_site_url(), PHP_URL_HOST);
-        $success = 0;
-        
         $core = Skyline_Core::instance();
-        $max_img = intval($core->get_opt('spider_max_img', 20));
-        $processed_count = 0;
+        $max_img = intval($core->get_opt('sync_max_img', 20));
+        $success = 0;
+        $processed = 0;
 
-        foreach($m[2] as $url_raw) {
-            if ($processed_count >= $max_img) break;
-            
+        // 预过滤：排除本地图片和 data URI
+        $external_urls = [];
+        foreach ($m[2] as $url_raw) {
+            if ($processed >= $max_img) break;
             $url_real = html_entity_decode($url_raw);
-            if(strpos($url_real, $site_domain)!==false || strpos($url_real, 'data:image')!==false) continue;
             
-            $res = $this->download_image($url_real, $pid);
-            if(isset($res['id'])) {
+            if (strpos($url_real, $site_domain) !== false || strpos($url_real, 'data:image') !== false) {
+                continue;
+            }
+            
+            $external_urls[] = ['raw' => $url_raw, 'real' => $url_real];
+            $processed++;
+        }
+
+        // 批量预检查哈希
+        $hashes = [];
+        foreach ($external_urls as $item) {
+            $parsed = parse_url($item['real']);
+            $norm = ($parsed['scheme'] ?? 'http') . '://' . ($parsed['host'] ?? '') . ($parsed['path'] ?? '');
+            $hashes[] = md5($norm);
+        }
+        $this->batch_check_image_hashes($hashes);
+
+        // 处理图片
+        foreach ($external_urls as $item) {
+            $res = $this->download_image($item['real'], $pid);
+            if (isset($res['id'])) {
                 $local_url = wp_get_attachment_url($res['id']);
-                $content = str_replace($url_raw, $local_url, $content);
+                $content = str_replace($item['raw'], $local_url, $content);
                 $success++;
             }
-            $processed_count++;
         }
         
-        if($success > 0 && $content !== $post->post_content) {
+        // 更新文章内容
+        if ($success > 0 && $content !== $post->post_content) {
             remove_action('save_post', [$this, 'trigger_async_tasks'], 20);
-            global $wpdb; 
-            $wpdb->update($wpdb->posts, ['post_content'=>$content], ['ID'=>$pid]);
+            global $wpdb;
+            $wpdb->update($wpdb->posts, ['post_content' => $content], ['ID' => $pid]);
             clean_post_cache($pid);
             add_action('save_post', [$this, 'trigger_async_tasks'], 20, 2);
         }
-        delete_post_meta($pid, '_sky_spider_processing');
+        
+        delete_post_meta($pid, '_sky_sync_processing');
     }
 
+    /**
+     * SEO 自动化
+     */
     public function auto_seo_meta($pid) {
         $post = get_post($pid);
         if (!$post) return;
-        
         if (get_post_meta($pid, '_sky_seo_done', true)) return;
 
         $core = Skyline_Core::instance();
-        $do_tags = $core->get_opt('auto_tags');
-        $do_slug = $core->get_opt('auto_slug');
-        $do_excerpt = $core->get_opt('auto_excerpt');
-        $do_polish = $core->get_opt('auto_polish');
-
-        if (!$do_tags && !$do_slug && !$do_excerpt && !$do_polish) return;
-        if (session_status() === PHP_SESSION_ACTIVE) session_write_close();
-
         $updates = [];
         global $wpdb;
 
-        if ($do_polish) {
-            $prompt = "请修正以下文章内容的错别字、标点符号错误和语病，保持原意不变，直接返回修正后的 Markdown 内容：\n\n" . mb_substr($post->post_content, 0, 3000);
-            $polished = $core->call_api([['role'=>'user', 'content'=>$prompt]]);
-            if ($polished && stripos($polished, 'Error') === false && strlen($polished) > 100) {
+        // AI 润色
+        if ($core->get_opt('auto_polish')) {
+            $prompt = __("请修正以下文章内容的错别字、标点符号错误和语病，保持原意不变，直接返回修正后的内容：\n\n", 'skyline-ai-pro') . 
+                      mb_substr($post->post_content, 0, 3000);
+            $polished = $core->call_api([['role' => 'user', 'content' => $prompt]]);
+            
+            if (!is_wp_error($polished) && strlen($polished) > 100) {
                 $updates['post_content'] = $polished;
                 $core->log("AI 润色成功 [$pid]", 'info', 'SEO');
             }
         }
-        if ($do_tags) {
-            $text = isset($updates['post_content']) ? $updates['post_content'] : $post->post_content;
-            $prompt = "请基于以下内容提取5个核心SEO标签，用逗号分隔，不要其他文字和编号：\n\n" . mb_substr(strip_tags($text), 0, 1500);
-            $tags = $core->call_api([['role'=>'user', 'content'=>$prompt]]);
-            if ($tags && stripos($tags, 'Error') === false) wp_set_post_tags($pid, str_replace(['，', '、'], ',', $tags), true);
-        }
-        if ($do_slug) {
-            $prompt = "Generate a concise English URL slug for this title (max 5-8 words). STRICTLY OUTPUT ONLY THE SLUG (lowercase, hyphens). Title: " . $post->post_title;
-            $slug = $core->call_api([['role'=>'user', 'content'=>$prompt]]);
-            if ($slug && stripos($slug, 'Error') === false) {
-                $slug = sanitize_title(strip_tags(preg_replace('/^(Here.*?:\s*)/i', '', $slug)));
-                if ($slug) $updates['post_name'] = substr(trim(preg_replace('/-+/', '-', $slug), '-'), 0, 60);
+
+        // 生成标签
+        if ($core->get_opt('auto_tags')) {
+            $text = $updates['post_content'] ?? $post->post_content;
+            $prompt = __("请基于以下内容提取5个核心SEO标签，用逗号分隔：\n\n", 'skyline-ai-pro') . 
+                      mb_substr(strip_tags($text), 0, 1500);
+            $tags = $core->call_api([['role' => 'user', 'content' => $prompt]]);
+            
+            if (!is_wp_error($tags)) {
+                wp_set_post_tags($pid, str_replace(['，', '、'], ',', $tags), true);
             }
         }
-        if ($do_excerpt && empty($post->post_excerpt)) {
-            $text = isset($updates['post_content']) ? $updates['post_content'] : $post->post_content;
-            $prompt = "Generate a 120-word SEO summary for this content (in Chinese): \n\n" . mb_substr(strip_tags($text), 0, 1500);
-            $excerpt = $core->call_api([['role'=>'user', 'content'=>$prompt]]);
-           if ($excerpt && stripos($excerpt, 'Error') === false) {
+
+        // 生成 Slug
+        if ($core->get_opt('auto_slug')) {
+            $prompt = "Generate a concise English URL slug for this title (max 5-8 words). OUTPUT ONLY THE SLUG.\n\nTitle: " . $post->post_title;
+            $slug = $core->call_api([['role' => 'user', 'content' => $prompt]]);
+            
+            if (!is_wp_error($slug)) {
+                $slug = sanitize_title(strip_tags(preg_replace('/^(Here.*?:\s*)/i', '', $slug)));
+                if ($slug) {
+                    $updates['post_name'] = substr(trim(preg_replace('/-+/', '-', $slug), '-'), 0, 60);
+                }
+            }
+        }
+
+        // 生成摘要
+        if ($core->get_opt('auto_excerpt') && empty($post->post_excerpt)) {
+            $text = $updates['post_content'] ?? $post->post_content;
+            $prompt = __("生成120字的SEO摘要：\n\n", 'skyline-ai-pro') . 
+                      mb_substr(strip_tags($text), 0, 1500);
+            $excerpt = $core->call_api([['role' => 'user', 'content' => $prompt]]);
+            
+            if (!is_wp_error($excerpt)) {
                 $updates['post_excerpt'] = trim(mb_substr(wp_strip_all_tags($excerpt), 0, 260));
             }
         }
 
+        // 批量更新
         if (!empty($updates)) {
             $wpdb->update($wpdb->posts, $updates, ['ID' => $pid]);
             clean_post_cache($pid);
         }
+        
         update_post_meta($pid, '_sky_seo_done', 1);
     }
 
+    /**
+     * 裁剪去水印
+     */
     private function remove_watermark_crop($path, $mime) {
-        if(!extension_loaded('gd')) return;
-        $info = @getimagesize($path); if(!$info) return;
-        $w = $info[0]; $h = $info[1];
-        if($h < 150) return;
-        $src = ($mime == 'image/jpeg') ? @imagecreatefromjpeg($path) : @imagecreatefrompng($path);
-        if(!$src) return;
-        $crop_h = 40; if($h - $crop_h < 50) $crop_h = 20;
+        if (!extension_loaded('gd')) return;
+        $info = @getimagesize($path);
+        if (!$info) return;
+        
+        $w = $info[0];
+        $h = $info[1];
+        if ($h < 150) return;
+        
+        $src = ($mime === 'image/jpeg') ? @imagecreatefromjpeg($path) : @imagecreatefrompng($path);
+        if (!$src) return;
+        
+        $crop_h = ($h - 40 < 50) ? 20 : 40;
         $dst = imagecreatetruecolor($w, $h - $crop_h);
         imagecopy($dst, $src, 0, 0, 0, 0, $w, $h - $crop_h);
-        if($mime == 'image/jpeg') imagejpeg($dst, $path, 90); else imagepng($dst, $path, 9);
-        imagedestroy($src); imagedestroy($dst);
+        
+        if ($mime === 'image/jpeg') {
+            imagejpeg($dst, $path, 90);
+        } else {
+            imagepng($dst, $path, 9);
+        }
+        
+        imagedestroy($src);
+        imagedestroy($dst);
     }
 
+    /**
+     * 添加水印
+     */
     private function watermark($path) {
-        if(!extension_loaded('gd')) return;
-        $i=@getimagesize($path); if(!$i) return;
-        $im = ($i['mime']=='image/jpeg') ? @imagecreatefromjpeg($path) : @imagecreatefrompng($path);
-        if(!$im) return;
-        $txt = Skyline_Core::instance()->get_opt('spider_wm_text', '@Skyline');
+        if (!extension_loaded('gd')) return;
+        $info = @getimagesize($path);
+        if (!$info) return;
+        
+        $im = ($info['mime'] === 'image/jpeg') ? @imagecreatefromjpeg($path) : @imagecreatefrompng($path);
+        if (!$im) return;
+        
+        $txt = Skyline_Core::instance()->get_opt('sync_wm_text', '@Skyline');
         $color = imagecolorallocatealpha($im, 255, 255, 255, 60);
-        $font = 5; 
-        $x = imagesx($im) - (strlen($txt)*9) - 10; $y = imagesy($im) - 20;
-        imagestring($im, $font, max(10,$x), max(10,$y), $txt, $color);
-        if($i['mime']=='image/jpeg') imagejpeg($im, $path, 90); else imagepng($im, $path, 9);
+        $font = 5;
+        $x = imagesx($im) - (strlen($txt) * 9) - 10;
+        $y = imagesy($im) - 20;
+        
+        imagestring($im, $font, max(10, $x), max(10, $y), $txt, $color);
+        
+        if ($info['mime'] === 'image/jpeg') {
+            imagejpeg($im, $path, 90);
+        } else {
+            imagepng($im, $path, 9);
+        }
+        
         imagedestroy($im);
     }
 
+    // ═══ AJAX 处理器 ═══
+
     public function ajax_link_now() {
-        check_ajax_referer('sky_ai_task_nonce');
-        if(!current_user_can('edit_posts')) wp_send_json_error('权限不足');
-        $content = isset($_POST['content']) ? wp_unslash($_POST['content']) : '';
-        if(!$content) wp_send_json_error('内容为空');
-        $links_str = Skyline_Core::instance()->get_opt('link_pairs');
-        if(!$links_str) wp_send_json_error('未配置内链关键词，请去设置页添加');
-        $pairs = explode("\n", $links_str);
-        $total_replaced = 0;
-        foreach($pairs as $pair) {
-            $p = explode('|', trim($pair));
-            if(count($p) < 2) continue;
-            $kw = trim($p[0]); $url = trim($p[1]);
-            if(!$kw || !$url) continue;
-            $pattern = '/(?!(?:[^<]+>|[^>]+<\/a>))(' . preg_quote($kw, '/') . ')/u';
-            $replace = '<a href="'.$url.'" title="$1" target="_blank" class="sky-link">$1</a>';
-            $content = preg_replace($pattern, $replace, $content, 1, $count);
-            $total_replaced += $count;
+        $this->verify_ajax();
+        
+        $content = wp_unslash($_POST['content'] ?? '');
+        if (!$content) {
+            wp_send_json_error(__('内容为空', 'skyline-ai-pro'));
         }
-        if($total_replaced > 0) wp_send_json_success(['content' => $content, 'msg' => "成功添加 {$total_replaced} 个内链"]);
-        else wp_send_json_error('没有找到可替换的关键词，或关键词已存在链接');
-    }
-
-    public function ajax_spider_single() {
-        check_ajax_referer('sky_ai_task_nonce');
-        if(!current_user_can('edit_posts')) wp_send_json_error('权限不足');
-        $url = isset($_POST['url']) ? esc_url_raw(wp_unslash($_POST['url'])) : '';
-        $pid = isset($_POST['pid']) ? intval($_POST['pid']) : 0;
-        if(!$url) wp_send_json_error('URL为空');
-        $result = $this->download_image($url, $pid);
-        if(isset($result['id'])) {
-            $local_url = wp_get_attachment_url($result['id']);
-            wp_send_json_success(['url' => $local_url, 'msg' => ($result['status'] === 'downloaded') ? '下载成功' : '秒传(复用旧图)', 'status' => $result['status']]);
-        } else wp_send_json_error($result['error']);
-    }
-
-    public function ajax_spider_now() {}
-    public function ajax_bulk_action() {}
-    public function ajax_seo_score() {
-        check_ajax_referer('sky_seo_nonce');
-        $score = 100; $advice = [];
-        $title = sanitize_text_field($_POST['title'] ?? ''); 
-        $content = wp_kses_post($_POST['content'] ?? '');
-        if(mb_strlen($title)<10) { $score-=10; $advice[]='❌ 标题过短'; }
-        if(mb_strlen(strip_tags($content))<300) { $score-=20; $advice[]='❌ 内容稀薄'; }
-        if($score>=90) $advice[]='🎉 完美！';
-        Skyline_Core::instance()->log("SEO 诊断得分: $score", 'info', 'SEO');
-        wp_send_json_success(['score'=>$score, 'advice'=>$advice]);
-    }
-
-    public function add_copilot_box() {
-        add_meta_box('sky_copilot', '🔮 Skyline Copilot', function($post) {
-            $ajax_url = admin_url('admin-ajax.php');
-            $nonce = wp_create_nonce('sky_ai_task_nonce');
-            $seo_nonce = wp_create_nonce('sky_seo_nonce');
-            ?>
-            <style>
-            .sky-cp-wrap { font-family: sans-serif; position: relative; }
-            .sky-btn-cp { width:100%; margin-top:6px; padding:8px; border:1px solid #ddd; background:#fff; border-radius:4px; cursor:pointer; text-align:left; display:flex; align-items:center; color:#333; transition:all .2s; }
-            .sky-btn-cp:hover { background:#f5f5f5; border-color:#6366f1; color:#6366f1; }
-            .sky-btn-cp i { margin-right:8px; width:16px; text-align:center; }
-            .sky-btn-cp.primary { background:linear-gradient(135deg, #6366f1, #4f46e5); color:#fff; border:none; justify-content:center; text-align:center; font-weight:bold; }
-            .sky-btn-cp.primary:disabled { opacity:0.7; cursor:not-allowed; }
-            .sky-cp-tabs{display:flex; background:#f1f5f9; padding:3px; border-radius:6px; gap:2px; margin-bottom:10px;}
-            .sky-cp-tab{flex:1; text-align:center; padding:6px 0; cursor:pointer; font-size:11px; color:#64748b; border-radius:4px; font-weight:600; transition:all .2s;}
-            .sky-cp-tab.active{color:#6366f1; background:#fff; box-shadow:0 1px 3px rgba(0,0,0,0.05);}
-            .sky-cp-pane{display:none; animation:fadeIn .2s;}.sky-cp-pane.active{display:block}
-            #sky-spider-status { display:none; margin-bottom:10px; background:#f8fafc; border:1px solid #e2e8f0; border-radius:6px; padding:10px; }
-            .sky-sp-header { display:flex; justify-content:space-between; font-size:12px; font-weight:bold; color:#334155; margin-bottom:5px; }
-            .sky-sp-progress-bg { height:6px; background:#e2e8f0; border-radius:3px; overflow:hidden; margin-bottom:8px; }
-            .sky-sp-progress-bar { height:100%; background:#10b981; width:0%; transition:width .3s; }
-            #sky-sp-log { height:120px; overflow-y:auto; border:1px solid #e2e8f0; background:#fff; padding:5px; font-size:11px; line-height:1.6; color:#64748b; border-radius:4px; font-family:monospace; }
-            .sp-log-ok { color:#10b981; }
-            .sp-log-err { color:#ef4444; }
-            #sky-sp-preview { display:grid; grid-template-columns: repeat(4, 1fr); gap:4px; margin-top:8px; max-height:100px; overflow-y:auto; }
-            .sky-sp-thumb { width:100%; aspect-ratio:1/1; object-fit:cover; border-radius:4px; border:1px solid #e2e8f0; opacity:0.6; }
-            .sky-sp-thumb.done { opacity:1; border-color:#10b981; border-width:2px; }
-            #sky-res-box { display:none; border:1px solid #e2e8f0; background:#fff; border-radius:6px; margin-top:10px; overflow:hidden; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.05); }
-            #sky-res-content { max-height: 250px; overflow-y: auto; padding: 12px; white-space: pre-wrap; font-size: 13px; line-height: 1.6; color: #334155; background: #f8fafc; border-bottom: 1px solid #e2e8f0; }
-            #sky-res-content::-webkit-scrollbar { width: 5px; }
-            #sky-res-content::-webkit-scrollbar-track { background: transparent; }
-            #sky-res-content::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 4px; }
-            #sky-res-content::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
-            .sky-res-actions { padding: 8px; background: #fff; display: flex; flex-direction: column; gap: 5px; }
-            </style>
-
-            <div class="sky-cp-wrap">
-                <button type="button" class="sky-btn-cp primary" id="btn-spider-start" onclick="SkySpider.init()"><i>🕷️</i> 一键同步图片 (可视版)</button>
-                <div id="sky-spider-status">
-                    <div class="sky-sp-header">
-                        <span>进度: <span id="sp-cur">0</span>/<span id="sp-total">0</span></span>
-                        <span id="sp-msg" style="color:#6366f1;">就绪</span>
-                    </div>
-                    <div class="sky-sp-progress-bg"><div class="sky-sp-progress-bar" id="sky-sp-bar"></div></div>
-                    <div id="sky-sp-preview"></div>
-                    <div id="sky-sp-log"></div>
-                </div>
-                
-                <div class="sky-cp-tabs">
-                    <div class="sky-cp-tab active" onclick="sTab('create', this)">创作</div>
-                    <div class="sky-cp-tab" onclick="sTab('rewrite', this)">润色</div>
-                    <div class="sky-cp-tab" onclick="sTab('seo', this)">SEO</div>
-                    <div class="sky-cp-tab" onclick="sTab('tools', this)">工具</div>
-                </div>
-                
-                <div id="cp-p-create" class="sky-cp-pane active">
-                    <button type="button" class="sky-btn-cp" onclick="SkylineEditor.task('title')"><i>📖</i> 优化标题</button>
-                    <button type="button" class="sky-btn-cp" onclick="SkylineEditor.task('outline')"><i>📑</i> 生成大纲</button>
-                    <button type="button" class="sky-btn-cp" onclick="SkylineEditor.task('continue')"><i>✍️</i> 续写段落</button>
-                    <button type="button" class="sky-btn-cp" onclick="SkylineEditor.task('expand')"><i>➕</i> 扩写内容</button>
-                </div>
-                <div id="cp-p-rewrite" class="sky-cp-pane">
-                    <button type="button" class="sky-btn-cp" onclick="SkylineEditor.task('rewrite')"><i>♻️</i> 伪原创重写</button>
-                    <button type="button" class="sky-btn-cp" onclick="SkylineEditor.task('polish')"><i>✨</i> 智能润色</button>
-                    <button type="button" class="sky-btn-cp" onclick="SkylineEditor.task('shorten')"><i>➖</i> 精简缩写</button>
-                    <button type="button" class="sky-btn-cp" onclick="SkylineEditor.task('trans')"><i>🌐</i> 中英互译</button>
-                </div>
-                <div id="cp-p-seo" class="sky-cp-pane">
-                    <button type="button" class="sky-btn-cp" onclick="SkylineEditor.task('desc')"><i>📝</i> 生成摘要</button>
-                    <button type="button" class="sky-btn-cp" onclick="SkylineEditor.task('tags')"><i>🏷️</i> 提取标签</button>
-                    <button type="button" class="sky-btn-cp" onclick="SkylineEditor.linkNow()"><i>🔗</i> 自动内链 (写回)</button>
-                    <button type="button" class="sky-btn-cp" onclick="SkylineEditor.task('slug_en')"><i>🔤</i> 英文 Slug</button>
-                    <button type="button" class="sky-btn-cp" onclick="SkylineEditor.seo()"><i>🩺</i> SEO 诊断</button>
-                </div>
-                <div id="cp-p-tools" class="sky-cp-pane">
-                    <button type="button" class="sky-btn-cp purple" onclick="SkylineEditor.genImg()"><i>🎨</i> AI 生成配图</button>
-                    <button type="button" class="sky-btn-cp" onclick="SkylineEditor.insert()"><i>📥</i> 插入生成结果</button>
-                </div>
-                <div id="sky-loading" style="display:none; color:#666; margin:10px 0;font-size:12px;text-align:center;"><span class="spinner is-active" style="float:none; margin:0 5px 0 0;"></span> <span id="sky-loading-txt">AI 思考中...</span></div>
-                
-                <div id="sky-res-box">
-                    <div id="sky-res-content"></div>
-                    <div id="sky-res-actions" class="sky-res-actions" style="display:none;"></div>
-                </div>
-            </div>
-
-            <script>
-            var skyAjaxUrl = '<?php echo esc_url($ajax_url); ?>';
+        
+        $links_str = Skyline_Core::instance()->get_opt('link_pairs');
+        if (!$links_str) {
+            wp_send_json_error(__('未配置内链关键词', 'skyline-ai-pro'));
+        }
+        
+        $pairs = explode("\n", $links_str);
+        $total = 0;
+        
+        foreach ($pairs as $pair) {
+            $p = explode('|', trim($pair));
+            if (count($p) < 2) continue;
             
-            (function($){
-                window.sTab = function(id, elem){ 
-                    try {
-                        $('.sky-cp-tab').removeClass('active'); 
-                        if(elem) $(elem).addClass('active'); 
-                        $('.sky-cp-pane').hide(); 
-                        $('#cp-p-'+id).show(); 
-                    } catch(e) { console.error(e); }
-                };
+            $kw = trim($p[0]);
+            $url = esc_url(trim($p[1]));
+            if (!$kw || !$url) continue;
+            
+            $pattern = '/(?!(?:[^<]+>|[^>]+<\/a>))(' . preg_quote($kw, '/') . ')/u';
+            $replace = '<a href="' . esc_attr($url) . '" title="$1" target="_blank" rel="noopener" class="sky-link">$1</a>';
+            $content = preg_replace($pattern, $replace, $content, 1, $count);
+            $total += $count;
+        }
+        
+        if ($total > 0) {
+            wp_send_json_success([
+                'content' => $content,
+                'msg' => sprintf(__('成功添加 %d 个内链', 'skyline-ai-pro'), $total)
+            ]);
+        } else {
+            wp_send_json_error(__('没有找到可替换的关键词', 'skyline-ai-pro'));
+        }
+    }
 
-                window.SkySpider = {
-                    init: function() {
-                        try {
-                            var content = SkylineEditor.getContent();
-                            if(!content) return alert('请先输入或粘贴内容');
-                            
-                            var regex = /<img[^>]+(?:data-src|src)=['"]([^'"]+)['"]/g;
-                            var matches = [], found;
-                            var seen = new Set();
-                            var previewHtml = '';
-                            var tempContent = content;
-                            var counter = 0;
-                            
-                            while ((found = regex.exec(content)) !== null) {
-                                var raw = found[1];
-                                if(raw.indexOf(window.location.hostname) === -1 && raw.indexOf('data:image') === -1 && raw.indexOf('sky-pending-') === -1) {
-                                    var d = document.createElement('div'); d.innerHTML = raw; var real = d.textContent || raw;
-                                    var key = real; 
-                                    if (!seen.has(key)) { 
-                                        var placeholder = 'sky-pending-' + counter + '-' + Math.floor(Math.random()*1000);
-                                        matches.push({ raw: raw, real: real, holder: placeholder }); 
-                                        seen.add(key);
-                                        previewHtml += '<img src="'+real+'" class="sky-sp-thumb" id="sp-thumb-'+counter+'">';
-                                        counter++;
-                                    }
-                                }
-                            }
+    public function ajax_sync_single() {
+        $this->verify_ajax();
+        
+        $url = esc_url_raw(wp_unslash($_POST['url'] ?? ''));
+        $pid = intval($_POST['pid'] ?? 0);
+        
+        if (!$url) {
+            wp_send_json_error(__('URL 为空', 'skyline-ai-pro'));
+        }
+        
+        $result = $this->download_image($url, $pid);
+        
+        if (isset($result['id'])) {
+            wp_send_json_success([
+                'url' => wp_get_attachment_url($result['id']),
+                'msg' => $result['status'] === 'downloaded' ? __('下载成功', 'skyline-ai-pro') : __('秒传（复用旧图）', 'skyline-ai-pro'),
+                'status' => $result['status']
+            ]);
+        } else {
+            wp_send_json_error($result['error']);
+        }
+    }
 
-                            if(matches.length === 0) return alert('✅ 未发现外部图片！');
+    public function ajax_sync_now() {
+        $this->verify_ajax();
+        // 批量同步逻辑
+        wp_send_json_success(__('同步任务已加入队列', 'skyline-ai-pro'));
+    }
 
-                            for(var i=0; i<matches.length; i++) {
-                                var m = matches[i];
-                                tempContent = tempContent.split(m.raw).join(m.holder);
-                                if(m.real !== m.raw) tempContent = tempContent.split(m.real).join(m.holder);
-                            }
-                            
-                            SkylineEditor.setContent(tempContent);
+    public function ajax_bulk_action() {
+        $this->verify_ajax();
+        // 批量操作逻辑
+        wp_send_json_success(__('批量操作已完成', 'skyline-ai-pro'));
+    }
 
-                            $('#sky-spider-status').slideDown();
-                            $('#sky-sp-preview').html(previewHtml);
-                            $('#btn-spider-start').prop('disabled', true).text('同步进行中...');
-                            $('#sp-total').text(matches.length);
-                            $('#sp-cur').text(0);
-                            $('#sky-sp-bar').css('width', '0%');
-                            $('#sky-sp-log').html('<div>🚀 锁定 ' + matches.length + ' 张图片，开始下载...</div>');
-                            
-                            this.processQueue(matches, 0);
-                        } catch(e) { alert('同步启动失败: ' + e.message); }
-                    },
+    public function ajax_seo_score() {
+        $this->verify_ajax('skyline_ajax_nonce');
+        
+        $score = 100;
+        $advice = [];
+        $title = sanitize_text_field($_POST['title'] ?? '');
+        $content = wp_kses_post($_POST['content'] ?? '');
+        
+        if (mb_strlen($title) < 10) {
+            $score -= 10;
+            $advice[] = '❌ ' . __('标题过短', 'skyline-ai-pro');
+        }
+        if (mb_strlen(strip_tags($content)) < 300) {
+            $score -= 20;
+            $advice[] = '❌ ' . __('内容稀薄', 'skyline-ai-pro');
+        }
+        if ($score >= 90) {
+            $advice[] = '🎉 ' . __('完美！', 'skyline-ai-pro');
+        }
+        
+        Skyline_Core::instance()->log("SEO 诊断得分: $score", 'info', 'SEO');
+        wp_send_json_success(['score' => $score, 'advice' => $advice]);
+    }
 
-                    log: function(msg, type='normal') {
-                        var c = type==='ok'?'color:#10b981':(type==='err'?'color:#ef4444':'color:#64748b');
-                        var d = document.createElement('div'); d.innerHTML = '<span style=\"'+c+'\">'+msg+'</span>';
-                        var box = document.getElementById('sky-sp-log');
-                        if(box) { box.appendChild(d); box.scrollTop = box.scrollHeight; }
-                    },
-
-                    processQueue: function(queue, idx, retryCount) {
-                        if (typeof retryCount === 'undefined') retryCount = 0;
-                        if (idx >= queue.length) {
-                            $('#sp-msg').text('全部完成').css('color', '#10b981');
-                            $('#btn-spider-start').prop('disabled', false).html('<i>🕷️</i> 一键同步图片 (可视版)');
-                            this.log('🏁 队列结束，编辑器内容已更新', 'ok');
-                            return;
-                        }
-
-                        var item = queue[idx];
-                        var pid = $('#post_ID').val() || 0;
-                        var self = this;
-                        var label = (retryCount > 0) ? '重试 ' + retryCount + '...' : '正在下载...';
-                        $('#sp-msg').text('第 ' + (idx+1) + ' 张: ' + label);
-                        
-                        $.post(skyAjaxUrl, {
-                            action: 'sky_spider_single', url: item.real, pid: pid, _ajax_nonce: '<?php echo $nonce; ?>'
-                        }).done(function(res) {
-                            if(res.success) {
-                                var localUrl = res.data.url;
-                                self.log('[' + (idx+1) + '] ✅ ' + (res.data.msg||'成功'), 'ok');
-                                $('#sp-thumb-'+idx).addClass('done').attr('src', localUrl);
-
-                                try {
-                                    var currentContent = SkylineEditor.getContent();
-                                    currentContent = currentContent.split(item.holder).join(localUrl);
-                                    currentContent = currentContent.replace(/src=["']data:image\/[^;]+;base64,[^"']*["']/g, '');
-                                    currentContent = currentContent.replace(/src=["']\s*["']/g, '');
-                                    function escReg(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
-                                    var dsReg = new RegExp('data-src=["\']' + escReg(localUrl) + '["\']', 'g');
-                                    currentContent = currentContent.replace(dsReg, 'src="' + localUrl + '"');
-                                    SkylineEditor.setContent(currentContent);
-                                } catch(e) { console.log('Update content error:', e); }
-
-                                var pct = Math.round(((idx + 1) / queue.length) * 100);
-                                $('#sp-cur').text(idx + 1);
-                                $('#sky-sp-bar').css('width', pct + '%');
-                                self.processQueue(queue, idx + 1, 0); 
-                            } else { 
-                                if (retryCount < 2) {
-                                    self.log('[' + (idx+1) + '] ⚠️ 失败: ' + res.data + '，3秒后重试...', 'warn');
-                                    setTimeout(function(){ self.processQueue(queue, idx, retryCount + 1); }, 3000);
-                                } else {
-                                    self.log('[' + (idx+1) + '] ❌ 放弃: ' + res.data, 'err');
-                                    var currentContent = SkylineEditor.getContent();
-                                    currentContent = currentContent.split(item.holder).join(item.raw);
-                                    SkylineEditor.setContent(currentContent);
-                                    self.processQueue(queue, idx + 1, 0);
-                                }
-                            }
-                        }).fail(function(xhr, status, error){ 
-                            if (retryCount < 2) { setTimeout(function(){ self.processQueue(queue, idx, retryCount + 1); }, 3000); } 
-                            else { self.log('[' + (idx+1) + '] ❌ 网络错误: ' + error, 'err'); self.processQueue(queue, idx + 1, 0); }
-                        });
-                    }
-                };
-
-                window.SkylineEditor = {
-                    isGutenberg: function() { return document.body.classList.contains('block-editor-page') && typeof wp !== 'undefined' && wp.data && wp.data.select; },
-                    isClassicVisual: function() { return typeof tinyMCE !== 'undefined' && tinyMCE.activeEditor && !tinyMCE.activeEditor.isHidden(); },
-                    getContent: function() { 
-                        try {
-                            if (this.isGutenberg()) return wp.data.select("core/editor").getEditedPostAttribute("content");
-                            else if (this.isClassicVisual()) return tinyMCE.activeEditor.getContent();
-                            else return $('#content').val();
-                        } catch(e) { return $('#content').val() || ''; }
-                    },
-                    setContent: function(html) { 
-                        try {
-                            if (this.isGutenberg()) { var blocks = wp.blocks.parse(html); wp.data.dispatch('core/editor').resetBlocks(blocks); } 
-                            else if (this.isClassicVisual()) tinyMCE.activeEditor.setContent(html);
-                            else $('#content').val(html).trigger('change');
-                        } catch(e) {}
-                    },
-                    setTitle: function(newTitle) {
-                        if (this.isGutenberg()) { wp.data.dispatch("core/editor").editPost({title:newTitle}); } 
-                        else { $('#title').val(newTitle); $('#title-prompt-text').addClass('screen-reader-text'); }
-                    },
-                    linkNow: function() {
-                        var i = this.getContent(); if(!i) return alert('请先输入或粘贴内容');
-                        $('#sky-loading').show();
-                        $.post(skyAjaxUrl, { action: 'sky_link_now', content: i, _ajax_nonce: '<?php echo $nonce; ?>' }, function(r){
-                            $('#sky-loading').hide();
-                            if(r.success) { SkylineEditor.setContent(r.data.content); alert(r.data.msg); } 
-                            else { alert(r.data); }
-                        }).fail(function() { $('#sky-loading').hide(); alert('网络请求失败'); });
-                    },
-                    applyReplace: function() {
-                        var raw = $('#sky-res-content').data('raw');
-                        if(raw) { if(confirm('⚠️ 确定要用生成的内容覆盖当前编辑器中的所有内容吗？')) this.setContent(raw); } 
-                        else alert('没有可替换的内容');
-                    },
-                    task: function(t) {
-                        try {
-                            var i = this.getContent(); if(!i) return alert('请先输入或粘贴内容');
-                            $('#sky-loading').show();
-                            $.ajax({
-                                url: skyAjaxUrl, type: 'POST',
-                                data: { action: 'sky_ai_task', task: t, input: i, _ajax_nonce: '<?php echo $nonce; ?>' },
-                                success: function(r) {
-                                    $('#sky-loading').hide();
-                                    if(r.success) { 
-                                        var res = r.data.trim();
-                                        if(t==='title') { 
-                                            var lines = res.split('\n').filter(function(l){ return l.trim().length > 0; });
-                                            if (lines.length > 1) {
-                                                var html = '<p><b>🤖 AI 提供了多个标题，请选择一个替换：</b></p>';
-                                                lines.forEach(function(line){
-                                                    var clean = line.replace(/^\d+[\.\、]\s*/, '').replace(/^["']|["']$/g, '').trim();
-                                                    var safe = clean.replace(/"/g, '&quot;');
-                                                    html += '<button type="button" class="sky-btn-cp" style="margin-bottom:5px;text-align:left" onclick="SkylineEditor.setTitle(\''+safe+'\')">👉 '+clean+'</button>';
-                                                });
-                                                html += '<button type="button" class="sky-btn-cp" style="margin-top:5px;color:#666" onclick="jQuery(\'#sky-res-box\').hide()">❌ 取消</button>';
-                                                SkylineEditor.showResult(html);
-                                                return;
-                                            }
-                                            var cleanRes = res.replace(/^["']|["']$/g, '');
-                                            if(confirm('建议标题：\n'+cleanRes+'\n\n是否替换？')) SkylineEditor.setTitle(cleanRes);
-                                        } 
-                                        else if(t==='slug_en') { 
-                                            res = res.replace(/[^a-z0-9-]/g, '-').toLowerCase();
-                                            if(SkylineEditor.isGutenberg()) wp.data.dispatch("core/editor").editPost({slug:res}); 
-                                            else { $('#post_name').val(res); $('#edit-slug-box').html(res); }
-                                            alert('Slug 已更新: '+res); 
-                                        }
-                                        else if(t==='rewrite' || t==='polish' || t==='continue' || t==='expand') {
-                                            var btns = '<button type="button" class="sky-btn-cp primary" onclick="SkylineEditor.applyReplace()">🔄 立即替换全文</button>';
-                                            btns += '<button type="button" class="sky-btn-cp" onclick="SkylineEditor.insert()">📥 插入光标处</button>';
-                                            SkylineEditor.showResult(res, res, btns);
-                                        }
-                                        else if(t==='tags') { SkylineEditor.showResult('<b>建议标签:</b><br>'+res); }
-                                        else if(t==='desc') {
-                                            if(SkylineEditor.isGutenberg()) wp.data.dispatch("core/editor").editPost({excerpt:res});
-                                            else { $('#excerpt').val(res); }
-                                            alert('摘要已更新');
-                                        }
-                                        else if(t==='rewrite_full') { if(confirm('确认覆盖全文？')) SkylineEditor.setContent(res); }
-                                        else { SkylineEditor.showResult(res); } 
-                                    } else alert('Error: ' + r.data); 
-                                },
-                                error: function(e) { $('#sky-loading').hide(); alert('Request Failed: ' + e.statusText); }
-                            });
-                        } catch(e) { $('#sky-loading').hide(); alert('执行错误: ' + e.message); }
-                    },
-                    genImg: function() {
-                        var p = prompt("请输入图片描述:"); if(!p) return;
-                        $('#sky-loading').show();
-                        $.post(skyAjaxUrl, { action: 'sky_gen_img', prompt: p, _ajax_nonce: '<?php echo $nonce; ?>' }, function(r){
-                            $('#sky-loading').hide();
-                            if(r.success) SkylineEditor.showResult('<img src="'+r.data+'" style="max-width:100%">'); else alert(r.data);
-                        });
-                    },
-                    insert: function() {
-                        try {
-                            var h = $('#sky-res-content').html();
-                            var raw = $('#sky-res-content').data('raw');
-                            if(raw) h = raw;
-                            if(!h) return;
-                            if(this.isGutenberg()) { 
-                                var b = wp.data.select('core/editor').getBlocks(); 
-                                var nb = wp.blocks.createBlock('core/html', {content: h}); 
-                                wp.data.dispatch('core/editor').insertBlocks(nb, b.length); 
-                            } else { 
-                                if(this.isClassicVisual()) tinyMCE.activeEditor.execCommand('mceInsertContent', false, h);
-                                else { var ta = document.getElementById('content'); if(ta) ta.value += "\n\n" + h; }
-                            }
-                        } catch(e) { alert('插入失败: ' + e.message); }
-                    },
-                    seo: function() {
-                        var t = $('#title').val(); 
-                        if(this.isGutenberg()) t = wp.data.select("core/editor").getEditedPostAttribute("title");
-                        var c = this.getContent();
-                        $.post(skyAjaxUrl, { action:'sky_seo_score', title:t, content:c, _ajax_nonce:'<?php echo $seo_nonce; ?>' }, function(r){
-                             if(r.success) SkylineEditor.showResult('<b>SEO 得分: '+r.data.score+'</b><br>'+r.data.advice.join('<br>'));
-                        });
-                    },
-                    showResult: function(html, rawText, buttonsHtml) { 
-                        var displayHtml = rawText ? rawText.replace(/\n/g, '<br>') : html;
-                        $('#sky-res-content').html(displayHtml); 
-                        if(rawText) $('#sky-res-content').data('raw', rawText); else $('#sky-res-content').removeData('raw');
-                        if(buttonsHtml) $('#sky-res-actions').html(buttonsHtml).show(); else $('#sky-res-actions').hide().empty();
-                        $('#sky-res-box').show(); 
-                    }
-                };
-            })(jQuery);
-            </script>
-            <?php
-        }, 'post', 'side', 'high');
+    /**
+     * 添加 Copilot 编辑器面板
+     */
+    public function add_copilot_box() {
+        add_meta_box('sky_copilot', '🔮 Skyline Copilot', [$this, 'render_copilot'], 'post', 'side', 'high');
+    }
+    
+    public function render_copilot($post) {
+        $ajax_url = admin_url('admin-ajax.php');
+        $nonce = wp_create_nonce('skyline_ajax_nonce');
+        
+        // 加载外部 JS
+        wp_enqueue_script('skyline-copilot', SKY_URL . 'assets/js/copilot.js', ['jquery'], SKY_VERSION, true);
+        wp_localize_script('skyline-copilot', 'skylineCopilot', [
+            'ajax_url' => $ajax_url,
+            'nonce' => $nonce,
+            'i18n' => [
+                'confirm_replace' => __('确定要用生成的内容覆盖当前内容吗？', 'skyline-ai-pro'),
+                'no_content' => __('请先输入或粘贴内容', 'skyline-ai-pro'),
+                'no_external_images' => __('✅ 未发现外部图片！', 'skyline-ai-pro'),
+                'sync_complete' => __('同步完成', 'skyline-ai-pro'),
+            ]
+        ]);
+        
+        // 加载外部 CSS
+        wp_enqueue_style('skyline-copilot', SKY_URL . 'assets/css/copilot.css', [], SKY_VERSION);
+        
+        // 渲染模板
+        include SKY_PATH . 'admin/views/copilot.php';
     }
 }

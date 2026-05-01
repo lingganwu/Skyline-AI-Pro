@@ -3,6 +3,7 @@ if (!defined('ABSPATH')) exit;
 
 class Skyline_Core {
     private static $instance = null;
+    private static $memory_cache = [];
     private $options = [];
     private $stat_cache = [];
     private $log_file;
@@ -16,35 +17,122 @@ class Skyline_Core {
     }
 
     public function __construct() {
-        $this->log_file = plugin_dir_path(__FILE__) . '../logs/skyline_ai.log';
-        if (!file_exists(dirname($this->log_file))) {
-            wp_mkdir_p(dirname($this->log_file));
-            file_put_contents(dirname($this->log_file) . '/.htaccess', 'Deny from all');
+        $log_dir = WP_CONTENT_DIR . '/logs/skyline';
+        $this->log_file = $log_dir . '/skyline_ai.log';
+        
+        if (!file_exists($log_dir)) {
+            wp_mkdir_p($log_dir);
+            // 安全：防止目录列表
+            file_put_contents($log_dir . '/index.php', '<?php // Silence is golden');
+            // 安全：Apache + Nginx 兼容的访问限制
+            $htaccess = "# Apache\n<IfModule mod_authz_core.c>\n    Require all denied\n</IfModule>\n<IfModule !mod_authz_core.c>\n    Order deny,allow\n    Deny from all\n</IfModule>\n\n# Nginx\nlocation ~ /logs/skyline/ {\n    deny all;\n    return 404;\n}";
+            file_put_contents($log_dir . '/.htaccess', $htaccess);
         }
     }
 
     public function setup() {
         $this->load_modules();
         
+        // AJAX 处理器 - 带安全验证
+        $this->register_ajax_handlers();
+    }
+
+    private function register_ajax_handlers() {
+        // 公开 AJAX（需要额外安全措施）
         add_action('wp_ajax_sky_chat_front', [$this, 'handle_chat_front']);
         add_action('wp_ajax_nopriv_sky_chat_front', [$this, 'handle_chat_front']);
-        add_action('wp_ajax_sky_ai_task', [$this, 'handle_ai_task']);
-        add_action('wp_ajax_sky_gen_img', [$this, 'handle_gen_img']);
-        add_action('wp_ajax_sky_test_api', [$this, 'handle_api_test']);
-        add_action('wp_ajax_sky_test_redis', [$this, 'handle_test_redis']);
-        add_action('wp_ajax_sky_test_oss', [$this, 'handle_test_oss']);
-        add_action('wp_ajax_sky_clear_logs', [$this, 'handle_clear_logs']);
-        add_action('wp_ajax_sky_save_prompt', [$this, 'handle_save_prompt']);
-        add_action('wp_ajax_sky_get_prompts', [$this, 'handle_get_prompts']);
-        add_action('wp_ajax_sky_check_quality', [$this, 'handle_check_quality']);
+        
+        // 管理员 AJAX
+        $admin_actions = [
+            'sky_ai_task', 'sky_gen_img', 'sky_test_api', 'sky_test_redis',
+            'sky_test_oss', 'sky_clear_logs', 'sky_save_prompt', 'sky_get_prompts',
+            'sky_check_quality', 'skyline_health_check'
+        ];
+        
+        foreach ($admin_actions as $action) {
+            add_action('wp_ajax_' . $action, [$this, 'handle_admin_ajax']);
+        }
+        
+        // 前台资源
         add_action('wp_enqueue_scripts', [$this, 'enqueue_waifu_assets']);
         add_action('wp_footer', [$this, 'render_waifu']);
+    }
+
+    /**
+     * 统一管理员 AJAX 处理器
+     */
+    public function handle_admin_ajax() {
+        $action = current_filter();
+        
+        // 1. Nonce 验证
+        if (!skyline_verify_nonce()) {
+            wp_send_json_error(__('安全验证失败，请刷新页面重试。', 'skyline-ai-pro'), 403);
+        }
+        
+        // 2. 权限检查
+        if (!current_user_can('manage_options')) {
+            wp_send_json_error(__('权限不足', 'skyline-ai-pro'), 403);
+        }
+        
+        // 3. 速率限制
+        if (!skyline_check_rate_limit($action, 30, 60)) {
+            wp_send_json_error(__('请求过于频繁，请稍后再试。', 'skyline-ai-pro'), 429);
+        }
+        
+        // 4. 路由到具体处理方法
+        $handler = 'handle_' . str_replace('sky_', '', $action);
+        if (method_exists($this, $handler)) {
+            $this->$handler();
+        } else {
+            wp_send_json_error(__('未知操作', 'skyline-ai-pro'), 400);
+        }
+    }
+
+    /**
+     * 前台聊天 AJAX 处理器（带速率限制）
+     */
+    public function handle_chat_front() {
+        // 1. Nonce 验证
+        if (!skyline_verify_nonce()) {
+            wp_send_json_error(__('安全验证失败', 'skyline-ai-pro'), 403);
+        }
+        
+        // 2. 速率限制（每分钟 5 次）
+        if (!skyline_check_rate_limit('chat_front', 5, 60)) {
+            wp_send_json_error(__('请求过于频繁，请稍后再试。', 'skyline-ai-pro'), 429);
+        }
+        
+        // 3. 输入验证
+        $message = sanitize_textarea_field($_POST['message'] ?? '');
+        if (empty($message)) {
+            wp_send_json_error(__('消息不能为空', 'skyline-ai-pro'), 400);
+        }
+        
+        if (mb_strlen($message) > 2000) {
+            wp_send_json_error(__('消息过长，请限制在 2000 字以内。', 'skyline-ai-pro'), 400);
+        }
+        
+        // 4. 处理请求
+        $response = $this->call_api([
+            ['role' => 'system', 'content' => $this->get_opt('system_prompt')],
+            ['role' => 'user', 'content' => $message]
+        ]);
+        
+        if (is_wp_error($response)) {
+            wp_send_json_error($response->get_error_message(), 500);
+        }
+        
+        wp_send_json_success(['reply' => $response]);
     }
 
     private function load_modules() {
         if (class_exists('Skyline_Content')) new Skyline_Content();
         if (class_exists('Skyline_Infra')) {
-            try { Skyline_Infra::instance(); } catch(Throwable $e) { error_log('Skyline Infra Load Error: '.$e->getMessage()); }
+            try { 
+                Skyline_Infra::instance(); 
+            } catch (Throwable $e) { 
+                $this->log('Infra 模块加载失败: ' . $e->getMessage(), 'error'); 
+            }
         }
         if (class_exists('Skyline_API_Gateway')) new Skyline_API_Gateway();
         if (is_admin() && class_exists('Skyline_Admin')) new Skyline_Admin();
@@ -52,96 +140,160 @@ class Skyline_Core {
 
     public function get_config_schema() {
         return [
-            'api_base' => ['group'=>'ai', 'type'=>'url', 'label'=>'API Endpoint', 'default'=>'https://api.siliconflow.cn/v1/chat/completions'],
-            'api_key' => ['group'=>'ai', 'type'=>'password', 'label'=>'API Key', 'desc'=>'你的 API 密钥 (sk-...)', 'required'=>true],
-            'chat_model' => ['group'=>'ai', 'type'=>'text', 'label'=>'对话模型', 'default'=>'deepseek-ai/DeepSeek-V3'],
-            'image_model' => ['group'=>'ai', 'type'=>'text', 'label'=>'绘图模型', 'default'=>'black-forest-labs/FLUX.1-schnell'],
-            'system_prompt' => ['group'=>'ai', 'type'=>'textarea', 'label'=>'系统人设', 'default'=>"你是由灵感屋(lgwu.net)训练的专业内容创作助手。"],
-            'robot_enable' => ['group'=>'ai', 'type'=>'bool', 'label'=>'启用前台悬浮助手', 'default'=>true],
-            'robot_only_logged' => ['group'=>'ai', 'type'=>'bool', 'label'=>'仅登录用户可见', 'default'=>false],
-            'robot_img' => ['group'=>'ai', 'type'=>'url', 'label'=>'自定义图标 URL'],
+            // AI 配置
+            'api_base' => ['group'=>'ai', 'type'=>'url', 'label'=>__('API Endpoint', 'skyline-ai-pro'), 'default'=>'https://api.siliconflow.cn/v1/chat/completions'],
+            'api_key' => ['group'=>'ai', 'type'=>'password', 'label'=>__('API Key', 'skyline-ai-pro'), 'desc'=>__('你的 API 密钥 (sk-...)', 'skyline-ai-pro'), 'required'=>true],
+            'chat_model' => ['group'=>'ai', 'type'=>'text', 'label'=>__('对话模型', 'skyline-ai-pro'), 'default'=>'deepseek-ai/DeepSeek-V3'],
+            'image_model' => ['group'=>'ai', 'type'=>'text', 'label'=>__('绘图模型', 'skyline-ai-pro'), 'default'=>'black-forest-labs/FLUX.1-schnell'],
+            'system_prompt' => ['group'=>'ai', 'type'=>'textarea', 'label'=>__('系统人设', 'skyline-ai-pro'), 'default'=>__('你是由灵感屋(lgwu.net)训练的专业内容创作助手。', 'skyline-ai-pro')],
+            'robot_enable' => ['group'=>'ai', 'type'=>'bool', 'label'=>__('启用前台悬浮助手', 'skyline-ai-pro'), 'default'=>true],
+            'robot_only_logged' => ['group'=>'ai', 'type'=>'bool', 'label'=>__('仅登录用户可见', 'skyline-ai-pro'), 'default'=>false],
+            'robot_img' => ['group'=>'ai', 'type'=>'url', 'label'=>__('自定义图标 URL', 'skyline-ai-pro')],
             
-            'spider_enable' => ['group'=>'spider', 'type'=>'bool', 'label'=>'启用内容同步', 'default'=>true],
-            'spider_auto' => ['group'=>'spider', 'type'=>'bool', 'label'=>'发布时自动同步', 'default'=>true],
-            'spider_max_img' => ['group'=>'spider', 'type'=>'number', 'label'=>'单篇最大同步数', 'default'=>20],
-            'spider_allow_wechat' => ['group'=>'spider', 'type'=>'bool', 'label'=>'允许微信图片', 'default'=>true],
-            'spider_ssl_verify' => ['group'=>'spider', 'type'=>'bool', 'label'=>'验证 SSL 证书', 'default'=>true],
-            'spider_domains' => ['group'=>'spider', 'type'=>'textarea', 'label'=>'排除域名 (一行一个)'],
-            'spider_wm_enable' => ['group'=>'spider', 'type'=>'bool', 'label'=>'启用添加水印', 'default'=>false],
-            'spider_rm_wm' => ['group'=>'spider', 'type'=>'bool', 'label'=>'智能去除水印 (裁剪底部)', 'default'=>false],
-            'spider_wm_text' => ['group'=>'spider', 'type'=>'text', 'label'=>'文字水印内容', 'default'=>'@Skyline'],
-            'spider_wm_img_url' => ['group'=>'spider', 'type'=>'text', 'label'=>'图片水印 URL'],
-            'spider_wm_pos' => ['group'=>'spider', 'type'=>'text', 'label'=>'水印位置', 'default'=>'bottom-right'],
+            // 同步配置
+            'sync_enable' => ['group'=>'sync', 'type'=>'bool', 'label'=>__('启用内容同步', 'skyline-ai-pro'), 'default'=>true],
+            'sync_auto' => ['group'=>'sync', 'type'=>'bool', 'label'=>__('发布时自动同步', 'skyline-ai-pro'), 'default'=>true],
+            'sync_max_img' => ['group'=>'sync', 'type'=>'number', 'label'=>__('单篇最大同步数', 'skyline-ai-pro'), 'default'=>20],
+            'sync_allow_wechat' => ['group'=>'sync', 'type'=>'bool', 'label'=>__('允许微信图片', 'skyline-ai-pro'), 'default'=>true],
+            'sync_ssl_verify' => ['group'=>'sync', 'type'=>'bool', 'label'=>__('验证 SSL 证书', 'skyline-ai-pro'), 'default'=>true],
+            'sync_domains' => ['group'=>'sync', 'type'=>'textarea', 'label'=>__('排除域名 (一行一个)', 'skyline-ai-pro')],
+            'sync_wm_enable' => ['group'=>'sync', 'type'=>'bool', 'label'=>__('启用添加水印', 'skyline-ai-pro'), 'default'=>false],
+            'sync_rm_wm' => ['group'=>'sync', 'type'=>'bool', 'label'=>__('智能去除水印 (裁剪底部)', 'skyline-ai-pro'), 'default'=>false],
+            'sync_wm_text' => ['group'=>'sync', 'type'=>'text', 'label'=>__('文字水印内容', 'skyline-ai-pro'), 'default'=>'@Skyline'],
+            'sync_wm_img_url' => ['group'=>'sync', 'type'=>'text', 'label'=>__('图片水印 URL', 'skyline-ai-pro')],
+            'sync_wm_pos' => ['group'=>'sync', 'type'=>'text', 'label'=>__('水印位置', 'skyline-ai-pro'), 'default'=>'bottom-right'],
             
-            'oss_enable' => ['group'=>'oss', 'type'=>'bool', 'label'=>'启用 OSS 云存储', 'default'=>false],
-            'oss_endpoint' => ['group'=>'oss', 'type'=>'text', 'label'=>'Endpoint'],
-            'oss_bucket' => ['group'=>'oss', 'type'=>'text', 'label'=>'Bucket 名称'],
-            'oss_ak' => ['group'=>'oss', 'type'=>'text', 'label'=>'Access Key'],
-            'oss_sk' => ['group'=>'oss', 'type'=>'password', 'label'=>'Secret Key'],
-            'oss_domain' => ['group'=>'oss', 'type'=>'text', 'label'=>'自定义域名'],
-            'oss_ssl_verify' => ['group'=>'oss', 'type'=>'bool', 'label'=>'验证 SSL', 'default'=>true],
-            'oss_delete_local' => ['group'=>'oss', 'type'=>'bool', 'label'=>'Zero-Disk (同步后删除本地文件)', 'default'=>false],
+            // OSS 配置
+            'oss_enable' => ['group'=>'oss', 'type'=>'bool', 'label'=>__('启用 OSS 云存储', 'skyline-ai-pro'), 'default'=>false],
+            'oss_endpoint' => ['group'=>'oss', 'type'=>'text', 'label'=>__('Endpoint', 'skyline-ai-pro')],
+            'oss_bucket' => ['group'=>'oss', 'type'=>'text', 'label'=>__('Bucket 名称', 'skyline-ai-pro')],
+            'oss_ak' => ['group'=>'oss', 'type'=>'text', 'label'=>__('Access Key', 'skyline-ai-pro')],
+            'oss_sk' => ['group'=>'oss', 'type'=>'password', 'label'=>__('Secret Key', 'skyline-ai-pro')],
+            'oss_domain' => ['group'=>'oss', 'type'=>'text', 'label'=>__('自定义域名', 'skyline-ai-pro')],
+            'oss_ssl_verify' => ['group'=>'oss', 'type'=>'bool', 'label'=>__('验证 SSL', 'skyline-ai-pro'), 'default'=>true],
+            'oss_delete_local' => ['group'=>'oss', 'type'=>'bool', 'label'=>__('Zero-Disk (同步后删除本地文件)', 'skyline-ai-pro'), 'default'=>false],
             
-            'auto_tags' => ['group'=>'seo', 'type'=>'bool', 'label'=>'自动生成标签', 'default'=>true],
-            'auto_slug' => ['group'=>'seo', 'type'=>'bool', 'label'=>'自动生成英文 Slug', 'default'=>true],
-            'auto_excerpt' => ['group'=>'seo', 'type'=>'bool', 'label'=>'自动生成摘要', 'default'=>true],
-            'auto_polish' => ['group'=>'seo', 'type'=>'bool', 'label'=>'发布前 AI 智能润色', 'default'=>false],
-            'link_enable' => ['group'=>'seo', 'type'=>'bool', 'label'=>'自动内链', 'default'=>false],
-            'link_pairs' => ['group'=>'seo', 'type'=>'textarea', 'label'=>'内链关键词 (词|链接)'],
+            // SEO 配置
+            'auto_tags' => ['group'=>'seo', 'type'=>'bool', 'label'=>__('自动生成标签', 'skyline-ai-pro'), 'default'=>true],
+            'auto_slug' => ['group'=>'seo', 'type'=>'bool', 'label'=>__('自动生成英文 Slug', 'skyline-ai-pro'), 'default'=>true],
+            'auto_excerpt' => ['group'=>'seo', 'type'=>'bool', 'label'=>__('自动生成摘要', 'skyline-ai-pro'), 'default'=>true],
+            'auto_polish' => ['group'=>'seo', 'type'=>'bool', 'label'=>__('发布前 AI 智能润色', 'skyline-ai-pro'), 'default'=>false],
+            'link_enable' => ['group'=>'seo', 'type'=>'bool', 'label'=>__('自动内链', 'skyline-ai-pro'), 'default'=>false],
+            'link_pairs' => ['group'=>'seo', 'type'=>'textarea', 'label'=>__('内链关键词 (词|链接)', 'skyline-ai-pro')],
             
-            'redis_enable' => ['group'=>'speed', 'type'=>'bool', 'label'=>'启用 Redis 缓存', 'default'=>false],
-            'redis_smart_purge' => ['group'=>'speed', 'type'=>'bool', 'label'=>'智能脏数据清理', 'default'=>true],
-            'redis_host' => ['group'=>'speed', 'type'=>'text', 'label'=>'Redis Host', 'default'=>'127.0.0.1'],
-            'redis_port' => ['group'=>'speed', 'type'=>'number', 'label'=>'Redis Port', 'default'=>6379],
-            'redis_auth' => ['group'=>'speed', 'type'=>'password', 'label'=>'Redis Password'],
-            'redis_db' => ['group'=>'speed', 'type'=>'number', 'label'=>'Database', 'default'=>0],
-            'redis_ttl' => ['group'=>'speed', 'type'=>'number', 'label'=>'TTL (秒)', 'default'=>3600],
-            'redis_exclude' => ['group'=>'speed', 'type'=>'textarea', 'label'=>'排除缓存路径', 'default'=>"/wp-json/\n/cart/\n/checkout/"],
-            'redis_serializer' => ['group'=>'speed', 'type'=>'select', 'label'=>'序列化', 'default'=>'php', 'options' => ['php'=>'PHP Default', 'igbinary'=>'Igbinary']],
-            'redis_compression' => ['group'=>'speed', 'type'=>'select', 'label'=>'压缩', 'default'=>'none', 'options' => ['none'=>'None', 'zstd'=>'Zstd', 'lzf'=>'LZF']],
-            'turbo_disable_emoji' => ['group'=>'speed', 'type'=>'bool', 'label'=>'禁用 Emoji', 'default'=>false],
-            'turbo_disable_embeds' => ['group'=>'speed', 'type'=>'bool', 'label'=>'禁用 oEmbeds', 'default'=>false],
-            'turbo_disable_xmlrpc' => ['group'=>'speed', 'type'=>'bool', 'label'=>'禁用 XML-RPC', 'default'=>false],
-            'turbo_sanitize_names' => ['group'=>'speed', 'type'=>'bool', 'label'=>'文件名哈希化', 'default'=>false],
-            'turbo_lazy_load' => ['group'=>'speed', 'type'=>'bool', 'label'=>'强制图片懒加载', 'default'=>true],
-            'turbo_enable_image_opt' => ['group'=>'speed', 'type'=>'bool', 'label'=>'上传图片压缩', 'default'=>false],
-            'turbo_quality' => ['group'=>'speed', 'type'=>'number', 'label'=>'压缩质量', 'default'=>85],
-            'turbo_limit_5m' => ['group'=>'speed', 'type'=>'bool', 'label'=>'限制上传 5MB', 'default'=>false],
-            'turbo_allow_svg' => ['group'=>'speed', 'type'=>'bool', 'label'=>'允许 SVG/WebP', 'default'=>false],
+            // 性能配置
+            'redis_enable' => ['group'=>'speed', 'type'=>'bool', 'label'=>__('启用 Redis 缓存', 'skyline-ai-pro'), 'default'=>false],
+            'redis_smart_purge' => ['group'=>'speed', 'type'=>'bool', 'label'=>__('智能脏数据清理', 'skyline-ai-pro'), 'default'=>true],
+            'redis_host' => ['group'=>'speed', 'type'=>'text', 'label'=>__('Redis Host', 'skyline-ai-pro'), 'default'=>'127.0.0.1'],
+            'redis_port' => ['group'=>'speed', 'type'=>'number', 'label'=>__('Redis Port', 'skyline-ai-pro'), 'default'=>6379],
+            'redis_auth' => ['group'=>'speed', 'type'=>'password', 'label'=>__('Redis Password', 'skyline-ai-pro')],
+            'redis_db' => ['group'=>'speed', 'type'=>'number', 'label'=>__('Database', 'skyline-ai-pro'), 'default'=>0],
+            'redis_ttl' => ['group'=>'speed', 'type'=>'number', 'label'=>__('TTL (秒)', 'skyline-ai-pro'), 'default'=>3600],
+            'redis_exclude' => ['group'=>'speed', 'type'=>'textarea', 'label'=>__('排除缓存路径', 'skyline-ai-pro'), 'default'=>"/wp-json/\n/cart/\n/checkout/"],
+            'redis_serializer' => ['group'=>'speed', 'type'=>'select', 'label'=>__('序列化', 'skyline-ai-pro'), 'default'=>'php', 'options' => ['php'=>'PHP Default', 'igbinary'=>'Igbinary']],
+            'redis_compression' => ['group'=>'speed', 'type'=>'select', 'label'=>__('压缩', 'skyline-ai-pro'), 'default'=>'none', 'options' => ['none'=>'None', 'zstd'=>'Zstd', 'lzf'=>'LZF']],
+            'turbo_disable_emoji' => ['group'=>'speed', 'type'=>'bool', 'label'=>__('禁用 Emoji', 'skyline-ai-pro'), 'default'=>false],
+            'turbo_disable_embeds' => ['group'=>'speed', 'type'=>'bool', 'label'=>__('禁用 oEmbeds', 'skyline-ai-pro'), 'default'=>false],
+            'turbo_disable_xmlrpc' => ['group'=>'speed', 'type'=>'bool', 'label'=>__('禁用 XML-RPC', 'skyline-ai-pro'), 'default'=>false],
+            'turbo_sanitize_names' => ['group'=>'speed', 'type'=>'bool', 'label'=>__('文件名哈希化', 'skyline-ai-pro'), 'default'=>false],
+            'turbo_lazy_load' => ['group'=>'speed', 'type'=>'bool', 'label'=>__('强制图片懒加载', 'skyline-ai-pro'), 'default'=>true],
+            'turbo_enable_image_opt' => ['group'=>'speed', 'type'=>'bool', 'label'=>__('上传图片压缩', 'skyline-ai-pro'), 'default'=>false],
+            'turbo_quality' => ['group'=>'speed', 'type'=>'number', 'label'=>__('压缩质量', 'skyline-ai-pro'), 'default'=>85],
+            'turbo_limit_5m' => ['group'=>'speed', 'type'=>'bool', 'label'=>__('限制上传 5MB', 'skyline-ai-pro'), 'default'=>false],
+            'turbo_allow_svg' => ['group'=>'speed', 'type'=>'bool', 'label'=>__('允许 SVG/WebP', 'skyline-ai-pro'), 'default'=>false],
         ];
     }
 
+    /**
+     * 获取配置项（带多层缓存）
+     */
     public function get_opt($key, $default = null) {
-        if (isset($this->options[$key])) return $this->options[$key];
-
-        $cache_key = 'sky_opt_' . md5($key);
+        // 1. 内存缓存（最快）
+        if (isset(self::$memory_cache[$key])) {
+            return self::$memory_cache[$key];
+        }
         
+        // 2. 对象缓存
+        if (isset($this->options[$key])) {
+            self::$memory_cache[$key] = $this->options[$key];
+            return $this->options[$key];
+        }
+        
+        // 3. Redis/Object Cache
+        $cache_key = 'sky_opt_' . md5($key);
         $infra = class_exists('Skyline_Infra') ? Skyline_Infra::instance() : null;
         if ($infra && method_exists($infra, 'cache_get')) {
             $cached = $infra->cache_get($cache_key);
-            if ($cached !== null) { $this->options[$key] = $cached; return $cached; }
+            if ($cached !== null) {
+                self::$memory_cache[$key] = $cached;
+                $this->options[$key] = $cached;
+                return $cached;
+            }
         }
         
+        // 4. WordPress Transient
         $transient = get_transient($cache_key);
-        if ($transient !== false) { $this->options[$key] = $transient; return $transient; }
+        if ($transient !== false) {
+            self::$memory_cache[$key] = $transient;
+            $this->options[$key] = $transient;
+            return $transient;
+        }
         
+        // 5. 数据库查询
         $db_opts = get_option('skyline_ai_settings', []);
         $val = $db_opts[$key] ?? ($this->get_config_schema()[$key]['default'] ?? $default);
         
+        // 写入缓存
         set_transient($cache_key, $val, 86400);
         if ($infra) $infra->cache_set($cache_key, $val, 86400);
+        self::$memory_cache[$key] = $val;
         $this->options[$key] = $val;
         
         return $val;
     }
 
+    /**
+     * 清除配置缓存
+     */
+    public function clear_opt_cache($key = null) {
+        if ($key) {
+            unset(self::$memory_cache[$key]);
+            unset($this->options[$key]);
+            delete_transient('sky_opt_' . md5($key));
+            $infra = class_exists('Skyline_Infra') ? Skyline_Infra::instance() : null;
+            if ($infra) $infra->cache_del('sky_opt_' . md5($key));
+        } else {
+            self::$memory_cache = [];
+            $this->options = [];
+        }
+    }
+
+    /**
+     * 记录日志
+     */
     public function log($msg, $type = 'info', $context = 'System') {
         $timestamp = current_time('Y-m-d H:i:s');
         $log_entry = sprintf("[%s] [%s] [%s] %s\n", $timestamp, strtoupper($type), $context, $msg);
-        @file_put_contents($this->log_file, $log_entry, FILE_APPEND);
+        
+        // 使用 WordPress 文件系统 API
+        global $wp_filesystem;
+        if (!$wp_filesystem) {
+            require_once ABSPATH . 'wp-admin/includes/file.php';
+            WP_Filesystem();
+        }
+        
+        if ($wp_filesystem) {
+            $wp_filesystem->put_contents($this->log_file, $log_entry, FILE_APPEND);
+        } else {
+            // Fallback
+            @file_put_contents($this->log_file, $log_entry, FILE_APPEND);
+        }
     }
 
-    public function stat_inc($key, $val=1) {
+    /**
+     * 统计递增
+     */
+    public function stat_inc($key, $val = 1) {
         $stats = get_option('skyline_ai_stats', []);
         if (!is_array($stats)) $stats = [];
         $current = isset($stats[$key]) ? floatval($stats[$key]) : 0;
@@ -150,6 +302,9 @@ class Skyline_Core {
         $this->stat_cache[$key] = $stats[$key];
     }
     
+    /**
+     * 获取统计
+     */
     public function stat_get($key) {
         if (isset($this->stat_cache[$key])) return $this->stat_cache[$key];
         $stats = get_option('skyline_ai_stats', []);
@@ -159,219 +314,75 @@ class Skyline_Core {
         return $val;
     }
 
+    /**
+     * API 调用（带指数退避重试）
+     */
     public function call_api($messages, $temp = 0.7, $retry_count = 0) {
-        $k = $this->get_opt('api_key'); 
-        if(!$k) return 'Error: API Key missing';
-
-        $hash_key = 'sky_api_' . md5(json_encode($messages) . $temp);
-        $infra = class_exists('Skyline_Infra') ? Skyline_Infra::instance() : null;
-        if ($infra && method_exists($infra, 'cache_get')) {
-            $cached = $infra->cache_get($hash_key);
-            if ($cached) return $cached;
+        $k = $this->get_opt('api_key');
+        if (!$k) {
+            return new WP_Error('api_key_missing', __('API Key 未配置', 'skyline-ai-pro'));
         }
+
+        // 请求缓存
+        $request_hash = md5(json_encode($messages) . $temp);
+        $cache_key = 'sky_api_' . $request_hash;
+        $cached = wp_cache_get($cache_key, 'skyline');
+        if ($cached !== false) return $cached;
 
         $this->stat_inc('api_calls');
         
         $args = [
-            'headers' => ['Authorization' => 'Bearer '.$k, 'Content-Type' => 'application/json'],
+            'headers' => [
+                'Authorization' => 'Bearer ' . $k,
+                'Content-Type' => 'application/json'
+            ],
             'body' => json_encode([
-                'model' => $this->get_opt('chat_model'), 
-                'messages' => $messages, 
+                'model' => $this->get_opt('chat_model'),
+                'messages' => $messages,
                 'temperature' => $temp
             ]),
-            'timeout' => 120, 
+            'timeout' => 120,
             'sslverify' => true
         ];
 
         $r = wp_remote_post($this->get_opt('api_base'), $args);
         
-        if(is_wp_error($r)) {
+        if (is_wp_error($r)) {
             $err = $r->get_error_message();
-            if ($retry_count < 2) {
-                sleep(1 * ($retry_count + 1));
+            $this->log("API 调用失败: $err", 'error', 'API');
+            $this->stat_inc('api_errors');
+            
+            // 指数退避重试
+            if ($retry_count < SKY_MAX_RETRIES) {
+                $delay = pow(2, $retry_count);
+                sleep($delay);
                 return $this->call_api($messages, $temp, $retry_count + 1);
             }
-            return "Network Error: " . $err;
+            
+            return new WP_Error('api_failed', __('API 调用失败: ', 'skyline-ai-pro') . $err);
         }
 
         $code = wp_remote_retrieve_response_code($r);
         $body = wp_remote_retrieve_body($r);
         $d = json_decode($body, true);
-
-        if ($code !== 200) {
-            $errMsg = $d['error']['message'] ?? 'Unknown API Error';
-            if ($code >= 500 && $retry_count < 2) {
-                sleep(1 * ($retry_count + 1));
-                return $this->call_api($messages, $temp, $retry_count + 1);
-            }
-            return "API Error ({$code}): " . $errMsg;
-        }
-
-        $res = $d['choices'][0]['message']['content'] ?? 'API Error: Empty Response';
-        if (strpos($res, 'Error') === false && $infra) {
-            $infra->cache_set($hash_key, $res, 3600);
-        }
-        return $res;
-    }
-
-    public function handle_api_test() {
-        check_ajax_referer('sky_ai_test_nonce'); 
-        if(!current_user_can('manage_options')) wp_send_json_error('Unauthorized');
-        $res = $this->call_api([['role'=>'user', 'content'=>'Ping']]);
-        if (strpos($res, 'Error:') === 0) {
-            wp_send_json_error($res);
-        }
-        wp_send_json_success(['reply'=>$res]);
-    }
-
-    public function handle_test_redis() {
-        check_ajax_referer('sky_ai_test_nonce'); 
-        if(!current_user_can('manage_options')) wp_send_json_error('Unauthorized');
-        if (!$this->get_opt('redis_enable')) wp_send_json_error('Redis is disabled in settings');
-        try {
-            $redis = new Redis();
-            $connected = $redis->connect($this->get_opt('redis_host'), (int)$this->get_opt('redis_port'), 2);
-            if (!$connected) throw new Exception('Could not connect to Redis server');
-            if ($this->get_opt('redis_auth')) {
-                if (!$redis->auth($this->get_opt('redis_auth'))) throw new Exception('Redis authentication failed');
-            }
-            $redis->ping();
-            wp_send_json_success('Redis connection verified');
-        } catch(Throwable $e) {
-            wp_send_json_error($e->getMessage());
-        }
-    }
-
-    public function handle_test_oss() {
-        check_ajax_referer('sky_ai_test_nonce'); 
-        if(!current_user_can('manage_options')) wp_send_json_error('Unauthorized');
-        if (!$this->get_opt('oss_enable')) wp_send_json_error('OSS is disabled in settings');
-        $endpoint = $this->get_opt('oss_endpoint');
-        if (strpos($endpoint, 'http') !== 0) {
-            $endpoint = 'https://' . ltrim($endpoint, '/');
-        }
-        $response = wp_remote_get($endpoint, ['timeout' => 5]);
-        if (is_wp_error($response)) {
-            wp_send_json_error('Cannot reach OSS endpoint: ' . $response->get_error_message());
-        }
-        wp_send_json_success('OSS endpoint reachable');
-    }
-
-    public function handle_chat_front() {
-        check_ajax_referer('sky_chat_nonce');
-        $msg = sanitize_text_field($_POST['msg'] ?? '');
-        wp_send_json_success($this->call_api([['role'=>'user', 'content'=>$msg]]));
-    }
-
-    public function handle_ai_task() {
-        check_ajax_referer('sky_ai_task_nonce');
-        if(!current_user_can('edit_posts')) wp_send_json_error('Unauthorized');
-        $t = sanitize_key($_POST['task'] ?? '');
-        $i = wp_kses_post($_POST['input'] ?? '');
         
-        $prompts = [
-            'title'    => "你是一位资深的SEO内容专家。请根据以下文章内容，生成5个具有极高点击率、符合SEO原则且能精准概括核心价值的中文标题。要求：\n1. 提供5个不同风格（如：痛点驱动型、权威指南型、反直觉悬念型、结果导向型、极简概括型）。\n2. 严禁输出任何开场白或结束语（如 '为您生成的标题是' 或 '希望您满意'）。\n3. 每行输出一个标题，不要编号，不要引号。\n\n文章内容：\n$i",
-            'outline'   => "请分析以下文章的逻辑结构，并生成一个专业的 Markdown 形式的大纲。要求：层级清晰（# ## ###），涵盖所有核心观点和论据，确保逻辑严密。\n\n文章内容：\n$i",
-            'continue'  => "请阅读以下段落，并根据当前的语境、语气和逻辑，自然地续写接下来的内容。要求：无缝衔接，保持风格一致，直接输出续写部分，不要输出 '续写如下' 等提示词。\n\n内容：\n$i",
-            'expand'    => "请对以下内容进行深度扩写。要求：在不改变原意的前提下，增加细节描述、专业论证或具体案例，使内容更丰满、更有说服力，提升专业感。直接输出扩写后的全文。\n\n内容：\n$i",
-            'rewrite'   => "你是一位顶级的伪原创专家。请在保持原意绝对不变的前提下，彻底重写以下内容。要求：打破原有的句式结构，使用同义词替换，重新组织行文逻辑，确保在通过 AI 检测的同时，可读性极高。直接输出重写后的内容。\n\n内容：\n$i",
-            'polish'    => "请对以下内容进行智能润色。要求：修正所有错别字和病句，提升词汇的专业度，使行文风格符合『现代专业技术文档』的审美（客观、精炼、流畅）。直接输出润色后的内容。\n\n内容：\n$i",
-            'shorten'   => "请在保留所有核心结论和关键事实的前提下，将以下内容进行极简缩写。要求：删掉所有冗余修饰词，使表达像电报一样高效有力。直接输出缩写结果。\n\n内容：\n$i",
-            'trans'     => "请将以下内容进行高质量的中英互译（中文 ↔ 英文）。要求：翻译自然，符合目标语言的母语表达习惯，准确保留专业术语。直接输出翻译结果。\n\n内容：\n$i",
-            'desc'      => "请为以下文章生成一段 120 字左右的 SEO 元描述（Meta Description）。要求：包含核心关键词，采用『痛点+解决方案』的结构，具有强烈的诱导点击效果。直接输出摘要内容。\n\n内容：\n$i",
-            'tags'      => "请基于以下内容提取 5-8 个核心 SEO 标签。要求：包含 1-2 个行业大类词和 3-6 个具体核心词，用逗号分隔，严禁输出编号、前缀或任何解释文字。\n\n内容：\n$i",
-            'slug_en'   => "Generate a concise, SEO-friendly English URL slug for this content. Requirements: strictly lowercase, use hyphens instead of spaces, max 6 words, NO leading/trailing hyphens. STRICTLY output ONLY the slug text, no explanation.\n\nContent:\n$i",
-        ];
-
-        $prompt = isset($prompts[$t]) ? $prompts[$t] : "AI Task: $t. Input: $i";
-        
-        $res = $this->call_api([['role'=>'user', 'content'=>$prompt]]);
-        
-        if (is_string($res)) {
-            $res = preg_replace('/^(为您生成的.*?是|这里是.*?：|以下是.*?：|Sure!|Okay!|Certainly!)\s*/iu', '', $res);
-            $res = trim($res);
+        if ($code === 200 && isset($d['choices'][0]['message']['content'])) {
+            $result = $d['choices'][0]['message']['content'];
+            wp_cache_set($cache_key, $result, 'skyline', 300);
+            return $result;
         }
-
-        wp_send_json_success($res);
-    }
-
-    public function handle_save_prompt() {
-        check_ajax_referer('sky_prompt_nonce');
-        if(!current_user_can('manage_options')) wp_send_json_error('Unauthorized');
-        $name = sanitize_text_field($_POST['name'] ?? '');
-        $template = wp_kses_post($_POST['template'] ?? '');
-        if(!$name || !$template) wp_send_json_error('Missing data');
         
-        $lib = get_option('skyline_prompt_library', []);
-        $id = uniqid();
-        $lib[$id] = ['name' => $name, 'template' => $template];
-        update_option('skyline_prompt_library', $lib);
-        wp_send_json_success('Saved');
-    }
-
-    public function handle_get_prompts() {
-        check_ajax_referer('sky_prompt_nonce');
-        wp_send_json_success(get_option('skyline_prompt_library', []));
-    }
-
-    public function handle_check_quality() {
-        check_ajax_referer('sky_quality_nonce');
-        $content = wp_kses_post($_POST['content'] ?? '');
-        wp_send_json_success(Skyline_Utils::assess_quality($content));
-    }
-
-    public function handle_gen_img() {
-        check_ajax_referer('sky_ai_task_nonce');
-        $prompt = sanitize_text_field($_POST['prompt'] ?? '');
-        $k = $this->get_opt('api_key');
-        $args = [
-            'headers' => ['Authorization' => 'Bearer '.$k, 'Content-Type' => 'application/json'],
-            'body' => json_encode(['model' => $this->get_opt('image_model'), 'prompt' => $prompt]),
-            'timeout' => 60
-        ];
-        $r = wp_remote_post('https://api.siliconflow.cn/v1/images/generations', $args);
-        $d = json_decode(wp_remote_retrieve_body($r), true);
-        wp_send_json_success($d['data'][0]['url'] ?? 'Fail');
-    }
-
-    public function handle_clear_logs() {
-        check_ajax_referer('sky_clear_logs_nonce');
-        if (file_exists($this->log_file)) {
-            file_put_contents($this->log_file, '');
-            wp_send_json_success('Logs cleared from file');
-        } else {
-            wp_send_json_error('Log file not found');
+        // 处理可重试的状态码
+        if (in_array($code, [502, 503, 504]) && $retry_count < SKY_MAX_RETRIES) {
+            $delay = pow(2, $retry_count);
+            sleep($delay);
+            return $this->call_api($messages, $temp, $retry_count + 1);
         }
-    }
-
-    public function enqueue_waifu_assets() {
-        wp_enqueue_style('sky-waifu', SKY_URL . 'assets/css/waifu.css');
-        wp_enqueue_script('sky-waifu', SKY_URL . 'assets/js/waifu.js', ['jquery'], SKY_VERSION, true);
-        wp_localize_script('sky-waifu', 'skyline_vars', [
-            'ajax_url' => admin_url('admin-ajax.php'), 
-            'nonce' => wp_create_nonce('sky_chat_nonce')
-        ]);
-    }
-
-    public function render_waifu() {
-        if(!$this->get_opt('robot_enable')) return;
-        $img_url = $this->get_opt('robot_img', SKY_URL . 'assets/images/robot.png');
-        echo '
-        <div id="sky-waifu" onclick="toggleSkyChat()">
-            <img src="'.esc_url($img_url).'" alt="AI Assistant">
-        </div>
-        <div id="sky-waifu-tips" class="show">你好！我是灵感屋 AI 助手，有什么可以帮您？</div>
-        <div id="sky-chat-box">
-            <div class="sky-head">
-                <span>✨ Skyline Copilot</span>
-                <span style="cursor:pointer;" onclick="toggleSkyChat()">✖</span>
-            </div>
-            <div id="sky-chat-msgs"></div>
-            <div class="sky-foot">
-                <input type="text" id="sky-chat-in" placeholder="输入您的问题..." onkeypress="if(event.keyCode==13) skySend()">
-                <button onclick="skySend()" style="background:#6366f1;color:#fff;border:none;border-radius:20px;padding:0 15px;cursor:pointer;">发送</button>
-            </div>
-        </div>
-        ';
+        
+        $error_msg = $d['error']['message'] ?? "HTTP $code";
+        $this->log("API 返回错误: $error_msg", 'error', 'API');
+        $this->stat_inc('api_errors');
+        
+        return new WP_Error('api_error', $error_msg);
     }
 }
