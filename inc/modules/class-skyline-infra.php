@@ -155,23 +155,43 @@ class Skyline_OSS_Mod {
             $base_dir = dirname($file);
             $uploads = [];
             
-            // 🌟 终极修复：无视软链接，直接获取 WP 数据库内登记的相对路径 (例如 2026/05/xxx.png)
-            $rel_path = wp_normalize_path(get_post_meta($attachment_id, '_wp_attached_file', true));
-            $upload_dir = wp_upload_dir();
-            $base_url_path = trim(parse_url($upload_dir['baseurl'], PHP_URL_PATH), '/'); // 提取 wp-content/uploads
+            // 🌟 物理开颅：完全抛弃错乱的数据库，直接从真实的绝对路径字符串中截取
+            $normalized_file = wp_normalize_path($file);
+            $rel_path = '';
             
-            if (!$rel_path || $rel_path === '') {
-                $rel_path = basename($file); // 极端情况下的兜底
+            $pos = strrpos($normalized_file, '/uploads/');
+            if ($pos !== false) {
+                // 强制截取出类似于 2026/05/xxx.png 的绝对干净字符串
+                $rel_path = substr($normalized_file, $pos + 9);
+            } elseif (preg_match('/\/(\d{4}\/\d{2}\/.*)$/', $normalized_file, $matches)) {
+                $rel_path = $matches[1];
+            } else {
+                $rel_path = basename($normalized_file);
             }
 
-            // 1. 上传原图 (完美对齐前端带年份月份的 URL 路径)
-            $object_key = $base_url_path . '/' . ltrim($rel_path, '/');
+            // 清理软链接导致的连环 Bug：如果在提取中真的出现了 2026/05/2026/05 的双重情况，强制切掉一半
+            $rel_path = ltrim($rel_path, '/');
+            if (preg_match('/^(\d{4}\/\d{2}\/)\1(.*)$/', $rel_path, $m)) {
+                $rel_path = $m[1] . $m[2];
+            }
+
+            // ⚠️ 极其关键的一步：将我们强制修正后的完美路径，强行写回 WordPress 数据库
+            // 这样前台生成网址的时候，就不会带上那两层恶心的年月了
+            update_post_meta($attachment_id, '_wp_attached_file', $rel_path);
+
+            // 获取前缀 (wp-content/uploads)
+            $upload_dir = wp_upload_dir();
+            $base_url_path = trim((string)parse_url($upload_dir['baseurl'], PHP_URL_PATH), '/'); 
+            if (empty($base_url_path)) $base_url_path = 'wp-content/uploads';
+
+            // 1. 上传原图 (拼接云端完美的单层年月结构)
+            $object_key = $base_url_path . '/' . $rel_path;
             
             if ($client->putFile($object_key, $file)) {
                 $uploads[] = $file;
             }
             
-            // 2. 上传缩略图 (保持与原图同级年月目录)
+            // 2. 上传系统自动裁切的所有尺寸缩略图
             if (isset($metadata['sizes']) && is_array($metadata['sizes'])) {
                 $rel_dir = dirname($rel_path);
                 if ($rel_dir === '.') $rel_dir = '';
@@ -189,12 +209,12 @@ class Skyline_OSS_Mod {
                 }
             }
 
-            // Zero-Disk：只有图片成功上了云，才清理本地
+            // Zero-Disk：只有图片成功上了云，才清理本地，绝对安全
             if ($core->get_opt('oss_delete_local') && count($uploads) > 0) {
                 foreach ($uploads as $uploaded_file) {
                     @unlink($uploaded_file);
                 }
-                $core->log("COS 同步完成(软链接路径完美对齐)，已清理本地: " . basename($file), 'info', 'OSS');
+                $core->log("COS 终极同步成功，双重路径已修正: " . basename($file), 'info', 'OSS');
             }
             
             update_post_meta($attachment_id, '_sky_oss_synced', 1);
