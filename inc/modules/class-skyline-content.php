@@ -548,9 +548,22 @@ class Skyline_Content {
                     },
                     setContent: function(html) { 
                         try {
-                            if (this.isGutenberg()) { var blocks = wp.blocks.parse(html); wp.data.dispatch('core/editor').resetBlocks(blocks); } 
-                            else if (this.isClassicVisual()) tinyMCE.activeEditor.setContent(html);
-                            else $('#content').val(html).trigger('change');
+                            if (this.isGutenberg()) { 
+                                var blocks = wp.blocks.parse(html); 
+                                wp.data.dispatch('core/editor').resetBlocks(blocks); 
+                                setTimeout(function() {
+                                    if(wp.data && wp.data.dispatch && wp.data.dispatch('core/editor')) {
+                                        wp.data.dispatch('core/editor').savePost();
+                                    }
+                                }, 500);
+                            } 
+                            else if (this.isClassicVisual()) {
+                                tinyMCE.activeEditor.setContent(html);
+                                tinyMCE.activeEditor.setDirty(false); 
+                            }
+                            else { 
+                                $('#content').val(html).trigger('change'); 
+                            }
                         } catch(e) {}
                     },
                     setTitle: function(newTitle) {
