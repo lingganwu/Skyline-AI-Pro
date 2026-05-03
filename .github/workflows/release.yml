@@ -3,6 +3,10 @@ name: 构建并发布插件 (Build and Release)
 on:
   release:
     types: [published] # 当你在 GitHub 创建并发布一个新的 Release 时触发
+on:
+  release:
+    types: [published]
+  workflow_dispatch:  # 👈 只要加上这行，就会出现手动触发按钮！
 
 jobs:
   build:
