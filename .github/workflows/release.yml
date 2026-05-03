@@ -3,7 +3,7 @@ name: 构建并发布插件 (Build and Release)
 on:
   release:
     types: [published]
-  workflow_dispatch:
+  workflow_dispatch: # 开启手动触发按钮
 
 jobs:
   build:
@@ -20,15 +20,15 @@ jobs:
           php-version: '7.4'
 
       - name: 安装腾讯云 SDK (Install Composer dependencies)
-        # 这一步会自动读取 composer.json 并把 vendor 文件夹下载好
+        # 这一步会根据您的 composer.json 自动下载 vendor 文件夹
         run: composer install --no-dev --prefer-dist --optimize-autoloader
 
       - name: 整理文件夹并剔除无用文件 (Prepare Plugin Folder)
         run: |
-          # 1. 创建标准的插件文件夹 (全部小写)
+          # 1. 创建标准的插件文件夹
           mkdir skyline-ai-pro
           
-          # 2. 把所有需要的文件移动进去，同时排除开发文件、配置文件和 GitHub 自己的文件夹
+          # 2. 移动文件并排除开发、配置、GitHub 相关等不需要的文件
           rsync -av --progress ./ skyline-ai-pro/ \
           --exclude skyline-ai-pro \
           --exclude .git \
@@ -39,10 +39,20 @@ jobs:
           --exclude composer.lock \
           --exclude .DS_Store
           
-          # 3. 打包成最终的 zip 文件，名字干净利落
+          # 3. 打包成最终的压缩包
           zip -r skyline-ai-pro.zip skyline-ai-pro
 
-      - name: 将 ZIP 上传到 Release 附件 (Upload Release Asset)
+      - name: 临时保存 ZIP 供手动下载测试 (Upload Artifact)
+        # 只有在您手动点击 "Run workflow" 时执行
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v4
+        with:
+          name: skyline-ai-pro-test-build
+          path: skyline-ai-pro.zip
+
+      - name: 将 ZIP 正式挂载到 Release 附件 (Upload Release Asset)
+        # 只有在您真正发布 Release 时执行，避免找不到 Tag 的报错
+        if: github.event_name == 'release'
         uses: softprops/action-gh-release@v1
         with:
           files: skyline-ai-pro.zip
