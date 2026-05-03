@@ -463,10 +463,7 @@ class Skyline_Admin {
                 </button>
             </div>
             <pre id="sky-log-content"><?php
-                $log_file = WP_CONTENT_DIR . '/logs/skyline/skyline_ai.log';
-                if (!$log_file || !file_exists($log_file)) {
-                    $log_file = plugin_dir_path(__DIR__) . '../logs/skyline_ai.log';
-                }
+                $log_file = SKY_PATH . 'logs/skyline_ai.log';
                 echo esc_html(file_exists($log_file) ? file_get_contents($log_file) : '暂无日志记录');
             ?></pre>
         </div>
