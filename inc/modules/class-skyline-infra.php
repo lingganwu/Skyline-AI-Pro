@@ -78,7 +78,8 @@ class Skyline_Redis_Mod {
         foreach ($excludes as $ex) { if (trim($ex) && strpos($uri, trim($ex)) !== false) return; }
         
         $infra = Skyline_Infra::instance();
-        $cache_uri = preg_replace('/\?.*$/', '', $uri) . (isset($_GET['s']) ? '?s=' . $_GET['s'] : '');
+        // 替换为这行：保留完整的 URI，或者让缓存插件自己处理参数
+        $cache_uri = $uri;
         $key = 'page_' . md5(home_url($cache_uri));
         
         $cached = $infra->cache_get($key);
