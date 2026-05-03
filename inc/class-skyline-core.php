@@ -355,6 +355,8 @@ class Skyline_Core {
 
     public function render_waifu() {
         if(!$this->get_opt('robot_enable')) return;
+        // 补上缺失的登录可见逻辑！
+        if ($this->get_opt('robot_only_logged') && !is_user_logged_in()) return;
         $img_url = $this->get_opt('robot_img');
         if (empty($img_url)) {
         $img_url = SKY_URL . 'assets/images/robot.png';
