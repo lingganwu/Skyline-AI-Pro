@@ -78,7 +78,6 @@ class Skyline_Redis_Mod {
         foreach ($excludes as $ex) { if (trim($ex) && strpos($uri, trim($ex)) !== false) return; }
         
         $infra = Skyline_Infra::instance();
-        // 替换为这行：保留完整的 URI，或者让缓存插件自己处理参数
         $cache_uri = $uri;
         $key = 'page_' . md5(home_url($cache_uri));
         
@@ -131,11 +130,11 @@ class Skyline_Turbo_Mod {
 }
 }
 
-// ====================== 官方腾讯云 COS 模块 ======================
+// ====================== 最终强化版腾讯云 COS 模块 ======================
 if (!class_exists('Skyline_OSS_Mod')) {
 class Skyline_OSS_Mod {
     public function __construct() {
-        add_filter('wp_generate_attachment_metadata', [$this, 'upload_all_sizes'], 99, 2);
+        add_filter('wp_generate_attachment_metadata', [$this, 'upload_all_sizes'], 10, 2);  // 优先级提前
         add_filter('wp_get_attachment_url', [$this, 'replace_url'], 99, 2);
         add_filter('wp_get_attachment_image_src', [$this, 'replace_image_src'], 99, 4);
     }
@@ -157,39 +156,24 @@ class Skyline_OSS_Mod {
                 $core->get_opt('oss_endpoint')
             );
 
-            $base_dir = dirname($file);
-            $uploads = [];
-            $upload_success = false;
-
-            // 提取正确的相对路径（保留年/月文件夹）
-            $attached_file = get_post_meta($attachment_id, '_wp_attached_file', true);
-            if (empty($attached_file) || strpos($attached_file, '/') === false) {
-                $normalized = wp_normalize_path($file);
-                if (preg_match('/(\d{4}\/\d{2}\/[^\/]+)$/', $normalized, $m)) {
-                    $attached_file = $m[1];
-                } else {
-                    $attached_file = basename($file);
-                }
-                update_post_meta($attachment_id, '_wp_attached_file', $attached_file);
-            }
-
             $upload_dir = wp_upload_dir();
-            $base_url_path = trim(parse_url($upload_dir['baseurl'], PHP_URL_PATH), '/');
-            if (empty($base_url_path)) $base_url_path = 'wp-content/uploads';
+            $base_url_path = trim(parse_url($upload_dir['baseurl'], PHP_URL_PATH), '/') ?: 'wp-content/uploads';
+            $attached_file = get_post_meta($attachment_id, '_wp_attached_file', true) ?: basename($file);
 
             $object_key = $base_url_path . '/' . ltrim($attached_file, '/');
+            $success_files = [];
+            $failed_files = [];
 
-            // 上传原图
+            // 1. 上传原图
             if ($client->putFile($object_key, $file)) {
-                $uploads[] = $file;
-                $upload_success = true;
-                $core->log("✅ [OSS] 原图上传成功: {$object_key}", 'info', 'OSS');
+                $success_files[] = $file;
             } else {
-                $core->log("❌ [OSS] 原图上传失败: {$object_key}", 'error', 'OSS');
+                $failed_files[] = ['type' => 'original', 'path' => $file, 'key' => $object_key];
             }
 
-            // 上传所有缩略图
+            // 2. 上传所有缩略图
             if (isset($metadata['sizes']) && is_array($metadata['sizes'])) {
+                $base_dir = dirname($file);
                 $rel_dir = dirname($attached_file);
                 if ($rel_dir === '.') $rel_dir = '';
 
@@ -198,31 +182,33 @@ class Skyline_OSS_Mod {
                     if (file_exists($size_file)) {
                         $size_rel_path = $rel_dir ? $rel_dir . '/' . $size_info['file'] : $size_info['file'];
                         $size_object_key = $base_url_path . '/' . ltrim($size_rel_path, '/');
-                        
+
                         if ($client->putFile($size_object_key, $size_file)) {
-                            $uploads[] = $size_file;
-                            $core->log("✅ [OSS] 缩略图上传成功: {$size_object_key}", 'info', 'OSS');
+                            $success_files[] = $size_file;
                         } else {
-                            $core->log("❌ [OSS] 缩略图上传失败: {$size_object_key}", 'error', 'OSS');
+                            $failed_files[] = ['type' => $size, 'path' => $size_file, 'key' => $size_object_key];
                         }
                     }
                 }
             }
 
-            if ($upload_success && count($uploads) > 0) {
+            // 最终判断
+            if (empty($failed_files)) {
                 update_post_meta($attachment_id, '_sky_oss_synced', 1);
                 $core->log("🎉 [OSS] 附件 #{$attachment_id} 全部上传成功！", 'info', 'OSS');
 
                 if ($core->get_opt('oss_delete_local')) {
-                    foreach ($uploads as $uploaded_file) {
-                        @unlink($uploaded_file);
+                    foreach ($success_files as $f) {
+                        @unlink($f);
                     }
-                    $core->log("🗑️ [OSS] Zero-Disk 已清理本地文件", 'info', 'OSS');
+                    $core->log("🗑️ [OSS] Zero-Disk 已安全清理本地文件", 'info', 'OSS');
                 }
+            } else {
+                $core->log("⚠️ [OSS] 附件 #{$attachment_id} 存在失败项（共 " . count($failed_files) . " 个）", 'warn', 'OSS');
             }
 
         } catch (Exception $e) {
-            $core->log("💥 [OSS] 官方 SDK 异常: " . $e->getMessage(), 'error', 'OSS');
+            $core->log("💥 [OSS] 处理异常: " . $e->getMessage(), 'error', 'OSS');
         }
 
         return $metadata;
@@ -248,7 +234,7 @@ class Skyline_OSS_Mod {
 }
 }
 
-// 👑 官方腾讯云 COS SDK 客户端（稳定版）
+// 👑 最终强化版腾讯云 COS SDK 客户端（Upload + 重试 + 验证）
 if (!class_exists('Sky_Official_COS_Client')) {
 class Sky_Official_COS_Client {
     private $client;
@@ -257,45 +243,81 @@ class Sky_Official_COS_Client {
     public function __construct($ak, $sk, $bucket, $endpoint) {
         $this->bucket = trim($bucket);
 
-        // 自动提取 region（如 ap-beijing）
         $region = 'ap-beijing';
         if (preg_match('/cos\.([a-z0-9-]+)\.myqcloud/i', $endpoint, $m)) {
             $region = $m[1];
         }
 
-        // 加载 Composer 安装的官方 SDK
         if (!class_exists('\Qcloud\Cos\Client')) {
             $autoload = dirname(dirname(dirname(__FILE__))) . '/vendor/autoload.php';
-            if (file_exists($autoload)) {
-                require_once $autoload;
-            } else {
-                throw new Exception('腾讯云 SDK 未找到，请确认 composer install 已执行');
-            }
+            if (file_exists($autoload)) require_once $autoload;
+            else throw new Exception('腾讯云 SDK 未找到，请确认 composer install 已执行');
         }
 
         $this->client = new \Qcloud\Cos\Client([
-            'region'      => $region,
-            'schema'      => 'https',
-            'credentials' => [
+            'region'          => $region,
+            'schema'          => 'https',
+            'timeout'         => 180,
+            'connect_timeout' => 60,
+            'credentials'     => [
                 'secretId'  => trim($ak),
                 'secretKey' => trim($sk),
-            ]
+            ],
         ]);
     }
 
     public function putFile($key, $file) {
-        if (!file_exists($file)) return false;
-
-        try {
-            $this->client->putObject([
-                'Bucket' => $this->bucket,
-                'Key'    => ltrim($key, '/'),
-                'Body'   => fopen($file, 'rb')
-            ]);
-            return true;
-        } catch (\Exception $e) {
-            throw new Exception($e->getMessage());
+        if (!file_exists($file)) {
+            Skyline_Core::instance()->log("[OSS] 文件不存在: $file", 'error', 'OSS');
+            return false;
         }
+
+        $key = ltrim($key, '/');
+        $core = Skyline_Core::instance();
+        $maxRetries = 5;
+        $lastError = null;
+
+        // 提升资源限制
+        if (function_exists('wp_raise_memory_limit')) wp_raise_memory_limit('image');
+        if (function_exists('set_time_limit')) @set_time_limit(180);
+
+        for ($attempt = 0; $attempt < $maxRetries; $attempt++) {
+            $fp = null;
+            try {
+                $fp = fopen($file, 'rb');
+                if (!$fp) throw new Exception('无法打开文件句柄');
+
+                $this->client->Upload(
+                    $this->bucket,
+                    $key,
+                    $fp,
+                    ['ACL' => 'public-read']
+                );
+
+                // 二次验证
+                $this->client->headObject([
+                    'Bucket' => $this->bucket,
+                    'Key'    => $key
+                ]);
+
+                $core->log("✅ [OSS] 上传并验证成功 [尝试{$attempt}] : {$key}", 'info', 'OSS');
+                return true;
+
+            } catch (\Exception $e) {
+                $lastError = $e->getMessage();
+                $delay = (int) pow(2, $attempt);
+                $core->log("⚠️ [OSS] 上传失败 [尝试{$attempt}/{$maxRetries}] {$key}: {$lastError}，{$delay}秒后重试...", 'warn', 'OSS');
+                
+                if ($attempt < $maxRetries - 1) {
+                    sleep($delay);
+                }
+            } finally {
+                if (is_resource($fp)) fclose($fp);
+            }
+        }
+
+        $core->log("❌ [OSS] 最终上传失败（已重试{$maxRetries}次）: {$key} | 错误: {$lastError}", 'error', 'OSS');
+        return false;
     }
 }
 }
