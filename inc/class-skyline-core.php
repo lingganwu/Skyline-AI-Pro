@@ -356,9 +356,9 @@ class Skyline_Core {
     public function render_waifu() {
         if(!$this->get_opt('robot_enable')) return;
         $img_url = $this->get_opt('robot_img');
-if (empty($img_url)) {
-    $img_url = SKY_URL . 'assets/images/robot.png';
-}
+        if (empty($img_url)) {
+        $img_url = SKY_URL . 'assets/images/robot.png';
+    }
         echo '
         <div id="sky-waifu" onclick="toggleSkyChat()">
             <img src="'.esc_url($img_url).'" alt="AI Assistant">
