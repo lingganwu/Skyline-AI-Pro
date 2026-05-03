@@ -4,7 +4,8 @@
     "type": "wordpress-plugin",
     "license": "GPL-2.0-or-later",
     "require": {
-        "php": ">=7.4"
+        "php": ">=7.4",
+        "qcloud/cos-sdk-v5": "^2.6"
     },
     "require-dev": {
         "wp-coding-standards/wpcs": "^3.0",
