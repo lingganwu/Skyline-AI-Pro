@@ -62,9 +62,8 @@ class Skyline_Admin {
                             $sanitized[$key] = absint($posted[$key]);
                             break;
                         case 'password':
-                            if (!empty($posted[$key])) {
-                                $sanitized[$key] = sanitize_text_field($posted[$key]);
-                            }
+                         // 允许保存空字符串，从而实现清除密码的功能
+                            $sanitized[$key] = isset($posted[$key]) ? sanitize_text_field($posted[$key]) : '';
                             break;
                         default:
                             $sanitized[$key] = sanitize_text_field($posted[$key]);
