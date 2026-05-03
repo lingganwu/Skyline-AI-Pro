@@ -67,12 +67,7 @@ class Skyline_Content {
         }
 
         $core = Skyline_Core::instance();
-        if (strpos($url, 'wx_fmt') === false && strpos($url, 'mmbiz') === false) {
-             $parsed = parse_url($url);
-             $norm_url = ($parsed['scheme']??'http') . '://' . ($parsed['host']??'') . ($parsed['path']??'');
-        } else {
-             $norm_url = $url;
-        }
+        $norm_url = $url;
         $img_hash = md5($norm_url);
 
         $spider_history = get_post_meta($pid, '_sky_spider_history', true);
