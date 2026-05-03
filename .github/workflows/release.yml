@@ -1,0 +1,49 @@
+name: 构建并发布插件 (Build and Release)
+
+on:
+  release:
+    types: [published] # 当你在 GitHub 创建并发布一个新的 Release 时触发
+
+jobs:
+  build:
+    name: 生成纯净版 ZIP
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: 检出代码 (Checkout code)
+        uses: actions/checkout@v3
+
+      - name: 配置 PHP 环境 (Setup PHP)
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '7.4'
+
+      - name: 安装腾讯云 SDK (Install Composer dependencies)
+        # 这一步会自动读取 composer.json 并把 vendor 文件夹下载好
+        run: composer install --no-dev --prefer-dist --optimize-autoloader
+
+      - name: 整理文件夹并剔除无用文件 (Prepare Plugin Folder)
+        run: |
+          # 1. 创建标准的插件文件夹 (全部小写)
+          mkdir skyline-ai-pro
+          
+          # 2. 把所有需要的文件移动进去，同时排除开发文件、配置文件和 GitHub 自己的文件夹
+          rsync -av --progress ./ skyline-ai-pro/ \
+          --exclude skyline-ai-pro \
+          --exclude .git \
+          --exclude .github \
+          --exclude .gitignore \
+          --exclude README.md \
+          --exclude composer.json \
+          --exclude composer.lock \
+          --exclude .DS_Store
+          
+          # 3. 打包成最终的 zip 文件，名字干净利落
+          zip -r skyline-ai-pro.zip skyline-ai-pro
+
+      - name: 将 ZIP 上传到 Release 附件 (Upload Release Asset)
+        uses: softprops/action-gh-release@v1
+        with:
+          files: skyline-ai-pro.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
