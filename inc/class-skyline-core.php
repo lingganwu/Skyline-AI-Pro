@@ -347,7 +347,7 @@ class Skyline_Core {
     public function enqueue_waifu_assets() {
         wp_enqueue_style('sky-waifu', SKY_URL . 'assets/css/waifu.css');
         wp_enqueue_script('sky-waifu', SKY_URL . 'assets/js/waifu.js', ['jquery'], SKY_VERSION, true);
-        wp_localize_script('sky-waifu', 'skyline_vars', [
+        wp_localize_script('sky-waifu', 'sky_ajax', [
             'ajax_url' => admin_url('admin-ajax.php'), 
             'nonce' => wp_create_nonce('sky_chat_nonce')
         ]);
@@ -355,7 +355,10 @@ class Skyline_Core {
 
     public function render_waifu() {
         if(!$this->get_opt('robot_enable')) return;
-        $img_url = $this->get_opt('robot_img', SKY_URL . 'assets/images/robot.png');
+        $img_url = $this->get_opt('robot_img');
+if (empty($img_url)) {
+    $img_url = SKY_URL . 'assets/images/robot.png';
+}
         echo '
         <div id="sky-waifu" onclick="toggleSkyChat()">
             <img src="'.esc_url($img_url).'" alt="AI Assistant">
