@@ -15,11 +15,14 @@ class Skyline_Core {
         return self::$instance;
     }
 
-    public function __construct() {
-        $this->log_file = plugin_dir_path(__FILE__) . '../logs/skyline_ai.log';
-        if (!file_exists(dirname($this->log_file))) {
-            wp_mkdir_p(dirname($this->log_file));
-            file_put_contents(dirname($this->log_file) . '/.htaccess', 'Deny from all');
+     public function __construct() {
+        // 使用 SKY_PATH 常量定义日志路径，更稳定
+        $this->log_file = SKY_PATH . 'logs/skyline_ai.log';
+        
+        $log_dir = dirname($this->log_file);
+        if (!file_exists($log_dir)) {
+            wp_mkdir_p($log_dir);
+            @file_put_contents($log_dir . '/.htaccess', 'Deny from all');
         }
     }
 
