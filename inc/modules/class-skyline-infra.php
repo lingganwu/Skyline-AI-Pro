@@ -135,16 +135,12 @@ class Skyline_Turbo_Mod {
 // ====================== 旗舰版：安全生命周期的 OSS 模块 ======================
 if (!class_exists('Skyline_OSS_Mod')) {
     class Skyline_OSS_Mod {
-        // 用于暂存当前请求中需要被删除的本地文件路径
         private $files_to_delete = [];
 
         public function __construct() {
-            // 将优先级设为 99，确保我们在其他插件处理完图片后再进行云端同步
             add_filter('wp_generate_attachment_metadata', [$this, 'upload_all_sizes'], 99, 2);
             add_filter('wp_get_attachment_url', [$this, 'replace_url'], 99, 2);
             add_filter('wp_get_attachment_image_src', [$this, 'replace_image_src'], 99, 4);
-            
-            // 在整个 PHP 请求结束前（所有插件都运行完毕后），再执行本地删除
             add_action('shutdown', [$this, 'cleanup_local_files']);
         }
 
@@ -180,7 +176,7 @@ if (!class_exists('Skyline_OSS_Mod')) {
                     $failed_files[] = ['type' => 'original', 'path' => $file, 'key' => $object_key];
                 }
 
-                // 2. 上传所有缩略图
+                // 2. 上传缩略图
                 if (isset($metadata['sizes']) && is_array($metadata['sizes'])) {
                     $base_dir = dirname($file);
                     $rel_dir = dirname($attached_file);
@@ -201,12 +197,10 @@ if (!class_exists('Skyline_OSS_Mod')) {
                     }
                 }
 
-                // 最终判断
                 if (empty($failed_files)) {
                     update_post_meta($attachment_id, '_sky_oss_synced', 1);
                     $core->log("🎉 [OSS] 附件 #{$attachment_id} 全部上传成功！", 'info', 'OSS');
 
-                    // 核心逻辑：不在这里立刻执行 unlink，而是推入待删除队列
                     if ($core->get_opt('oss_delete_local')) {
                         $this->files_to_delete = array_merge($this->files_to_delete, $success_files);
                     }
@@ -221,7 +215,6 @@ if (!class_exists('Skyline_OSS_Mod')) {
             return $metadata;
         }
 
-        // 安全清理本地文件的方法（将在 shutdown 钩子中执行）
         public function cleanup_local_files() {
             if (empty($this->files_to_delete)) return;
             $core = Skyline_Core::instance();
@@ -229,7 +222,7 @@ if (!class_exists('Skyline_OSS_Mod')) {
             
             foreach (array_unique($this->files_to_delete) as $file) {
                 if (file_exists($file)) {
-                    @chmod($file, 0666); // 确保有权限删除
+                    @chmod($file, 0666); 
                     if (@unlink($file)) {
                         $deleted_count++;
                     }
@@ -287,13 +280,11 @@ if (!class_exists('Sky_Official_COS_Client')) {
             $core = Skyline_Core::instance();
             
             try {
-                // 【核心变动】：强制将图片内容加载到内存中，完全切断网络上传与本地磁盘流的联系
                 $body = file_get_contents($file);
                 if ($body === false) {
                     throw new Exception('无法读取本地文件: ' . $file);
                 }
 
-                // 执行上传（发送内存中的字符串）
                 $this->client->putObject([
                     'Bucket' => $this->bucket,
                     'Key'    => $key,
@@ -301,7 +292,6 @@ if (!class_exists('Sky_Official_COS_Client')) {
                     'ACL'    => 'public-read'
                 ]);
 
-                // 【核心防线】：向腾讯云强制发起查询，100%确认文件已在云端落盘
                 $this->client->headObject([
                     'Bucket' => $this->bucket,
                     'Key'    => $key
