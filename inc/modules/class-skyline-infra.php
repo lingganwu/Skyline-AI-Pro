@@ -206,7 +206,7 @@ if (!class_exists('Skyline_OSS_Mod')) {
                     update_post_meta($attachment_id, '_sky_oss_synced', 1);
                     $core->log("🎉 [OSS] 附件 #{$attachment_id} 全部上传成功！", 'info', 'OSS');
 
-                    // 核心修复：不在这里立刻执行 unlink，而是推入待删除队列
+                    // 核心逻辑：不在这里立刻执行 unlink，而是推入待删除队列
                     if ($core->get_opt('oss_delete_local')) {
                         $this->files_to_delete = array_merge($this->files_to_delete, $success_files);
                     }
@@ -227,10 +227,12 @@ if (!class_exists('Skyline_OSS_Mod')) {
             $core = Skyline_Core::instance();
             $deleted_count = 0;
             
-            // 去重后安全删除
             foreach (array_unique($this->files_to_delete) as $file) {
-                if (file_exists($file) && @unlink($file)) {
-                    $deleted_count++;
+                if (file_exists($file)) {
+                    @chmod($file, 0666); // 确保有权限删除
+                    if (@unlink($file)) {
+                        $deleted_count++;
+                    }
                 }
             }
             if ($deleted_count > 0) {
@@ -264,7 +266,7 @@ if (!class_exists('Sky_Official_COS_Client')) {
         public function __construct($ak, $sk, $bucket, $endpoint) {
             $this->bucket = trim($bucket);
             $region = 'ap-beijing';
-            if (preg_match('/cos\.([a-z0-9-]+)\.myqcloud/i', $endpoint, $m)) {
+            if (preg_match('/cos[-.]([a-z0-9-]+)\.myqcloud/i', $endpoint, $m)) {
                 $region = $m[1];
             }
 
@@ -283,38 +285,35 @@ if (!class_exists('Sky_Official_COS_Client')) {
 
             $key = ltrim($key, '/');
             $core = Skyline_Core::instance();
-            $maxRetries = 3;
-            $lastError = '';
-
-            for ($attempt = 0; $attempt < $maxRetries; $attempt++) {
-                $fp = null;
-                try {
-                    $fp = fopen($file, 'rb');
-                    if (!$fp) throw new Exception('无法打开文件流');
-
-                    // 使用底层 putObject，维持文件流，完美控制内存
-                    $this->client->putObject([
-                        'Bucket' => $this->bucket,
-                        'Key'    => $key,
-                        'Body'   => $fp, 
-                        'ACL'    => 'public-read'
-                    ]);
-
-                    return true;
-
-                } catch (\Exception $e) {
-                    $lastError = $e->getMessage();
-                    if ($attempt < $maxRetries - 1) sleep(1); // 失败退避重试
-                } finally {
-                    // 无论成功失败，确保句柄必须释放
-                    if (is_resource($fp)) {
-                        fclose($fp);
-                    }
+            
+            try {
+                // 【核心变动】：强制将图片内容加载到内存中，完全切断网络上传与本地磁盘流的联系
+                $body = file_get_contents($file);
+                if ($body === false) {
+                    throw new Exception('无法读取本地文件: ' . $file);
                 }
-            }
 
-            $core->log("❌ [OSS] 最终上传失败: {$key} | 错误: {$lastError}", 'error', 'OSS');
-            return false;
+                // 执行上传（发送内存中的字符串）
+                $this->client->putObject([
+                    'Bucket' => $this->bucket,
+                    'Key'    => $key,
+                    'Body'   => $body, 
+                    'ACL'    => 'public-read'
+                ]);
+
+                // 【核心防线】：向腾讯云强制发起查询，100%确认文件已在云端落盘
+                $this->client->headObject([
+                    'Bucket' => $this->bucket,
+                    'Key'    => $key
+                ]);
+
+                $core->log("✅ [OSS] 上传并真实验证成功 : {$key}", 'info', 'OSS');
+                return true;
+
+            } catch (\Exception $e) {
+                $core->log("❌ [OSS] 上传失败: {$key} | 错误: " . $e->getMessage(), 'error', 'OSS');
+                return false;
+            }
         }
     }
 }
