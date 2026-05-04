@@ -60,6 +60,7 @@ class Skyline_Infra {
     }
 }
 
+// ====================== Redis 缓存模块 ======================
 if (!class_exists('Skyline_Redis_Mod')) {
 class Skyline_Redis_Mod {
     public function __construct() {
@@ -101,6 +102,7 @@ class Skyline_Redis_Mod {
 }
 }
 
+// ====================== 图片压缩优化模块 ======================
 if (!class_exists('Skyline_Turbo_Mod')) {
 class Skyline_Turbo_Mod {
     public function __construct() {
@@ -130,194 +132,189 @@ class Skyline_Turbo_Mod {
 }
 }
 
-// ====================== 最终强化版腾讯云 COS 模块 ======================
+// ====================== 旗舰版：安全生命周期的 OSS 模块 ======================
 if (!class_exists('Skyline_OSS_Mod')) {
-class Skyline_OSS_Mod {
-    public function __construct() {
-        add_filter('wp_generate_attachment_metadata', [$this, 'upload_all_sizes'], 10, 2);  // 优先级提前
-        add_filter('wp_get_attachment_url', [$this, 'replace_url'], 99, 2);
-        add_filter('wp_get_attachment_image_src', [$this, 'replace_image_src'], 99, 4);
-    }
+    class Skyline_OSS_Mod {
+        // 用于暂存当前请求中需要被删除的本地文件路径
+        private $files_to_delete = [];
 
-    public function upload_all_sizes($metadata, $attachment_id) {
-        $core = Skyline_Core::instance();
-        if (!$core->get_opt('oss_enable')) return $metadata;
+        public function __construct() {
+            // 将优先级设为 99，确保我们在其他插件处理完图片后再进行云端同步
+            add_filter('wp_generate_attachment_metadata', [$this, 'upload_all_sizes'], 99, 2);
+            add_filter('wp_get_attachment_url', [$this, 'replace_url'], 99, 2);
+            add_filter('wp_get_attachment_image_src', [$this, 'replace_image_src'], 99, 4);
+            
+            // 在整个 PHP 请求结束前（所有插件都运行完毕后），再执行本地删除
+            add_action('shutdown', [$this, 'cleanup_local_files']);
+        }
 
-        $file = get_attached_file($attachment_id);
-        if (!$file || !file_exists($file)) return $metadata;
+        public function upload_all_sizes($metadata, $attachment_id) {
+            $core = Skyline_Core::instance();
+            if (!$core->get_opt('oss_enable')) return $metadata;
 
-        $core->log("🚀 [OSS] 开始处理附件 #{$attachment_id}: " . basename($file), 'info', 'OSS');
+            $file = get_attached_file($attachment_id);
+            if (!$file || !file_exists($file)) return $metadata;
 
-        try {
-            $client = new Sky_Official_COS_Client(
-                $core->get_opt('oss_ak'),
-                $core->get_opt('oss_sk'),
-                $core->get_opt('oss_bucket'),
-                $core->get_opt('oss_endpoint')
-            );
+            $core->log("🚀 [OSS] 开始处理附件 #{$attachment_id}: " . basename($file), 'info', 'OSS');
 
-            $upload_dir = wp_upload_dir();
-            $base_url_path = trim(parse_url($upload_dir['baseurl'], PHP_URL_PATH), '/') ?: 'wp-content/uploads';
-            $attached_file = get_post_meta($attachment_id, '_wp_attached_file', true) ?: basename($file);
+            try {
+                $client = new Sky_Official_COS_Client(
+                    $core->get_opt('oss_ak'),
+                    $core->get_opt('oss_sk'),
+                    $core->get_opt('oss_bucket'),
+                    $core->get_opt('oss_endpoint')
+                );
 
-            $object_key = $base_url_path . '/' . ltrim($attached_file, '/');
-            $success_files = [];
-            $failed_files = [];
+                $upload_dir = wp_upload_dir();
+                $base_url_path = trim(parse_url($upload_dir['baseurl'], PHP_URL_PATH), '/') ?: 'wp-content/uploads';
+                $attached_file = get_post_meta($attachment_id, '_wp_attached_file', true) ?: basename($file);
 
-            // 1. 上传原图
-            if ($client->putFile($object_key, $file)) {
-                $success_files[] = $file;
-            } else {
-                $failed_files[] = ['type' => 'original', 'path' => $file, 'key' => $object_key];
-            }
+                $object_key = $base_url_path . '/' . ltrim($attached_file, '/');
+                $success_files = [];
+                $failed_files = [];
 
-            // 2. 上传所有缩略图
-            if (isset($metadata['sizes']) && is_array($metadata['sizes'])) {
-                $base_dir = dirname($file);
-                $rel_dir = dirname($attached_file);
-                if ($rel_dir === '.') $rel_dir = '';
+                // 1. 上传原图
+                if ($client->putFile($object_key, $file)) {
+                    $success_files[] = $file;
+                } else {
+                    $failed_files[] = ['type' => 'original', 'path' => $file, 'key' => $object_key];
+                }
 
-                foreach ($metadata['sizes'] as $size => $size_info) {
-                    $size_file = $base_dir . '/' . $size_info['file'];
-                    if (file_exists($size_file)) {
-                        $size_rel_path = $rel_dir ? $rel_dir . '/' . $size_info['file'] : $size_info['file'];
-                        $size_object_key = $base_url_path . '/' . ltrim($size_rel_path, '/');
+                // 2. 上传所有缩略图
+                if (isset($metadata['sizes']) && is_array($metadata['sizes'])) {
+                    $base_dir = dirname($file);
+                    $rel_dir = dirname($attached_file);
+                    if ($rel_dir === '.') $rel_dir = '';
 
-                        if ($client->putFile($size_object_key, $size_file)) {
-                            $success_files[] = $size_file;
-                        } else {
-                            $failed_files[] = ['type' => $size, 'path' => $size_file, 'key' => $size_object_key];
+                    foreach ($metadata['sizes'] as $size => $size_info) {
+                        $size_file = $base_dir . '/' . $size_info['file'];
+                        if (file_exists($size_file)) {
+                            $size_rel_path = $rel_dir ? $rel_dir . '/' . $size_info['file'] : $size_info['file'];
+                            $size_object_key = $base_url_path . '/' . ltrim($size_rel_path, '/');
+
+                            if ($client->putFile($size_object_key, $size_file)) {
+                                $success_files[] = $size_file;
+                            } else {
+                                $failed_files[] = ['type' => $size, 'path' => $size_file, 'key' => $size_object_key];
+                            }
                         }
                     }
                 }
-            }
 
-            // 最终判断
-            if (empty($failed_files)) {
-                update_post_meta($attachment_id, '_sky_oss_synced', 1);
-                $core->log("🎉 [OSS] 附件 #{$attachment_id} 全部上传成功！", 'info', 'OSS');
+                // 最终判断
+                if (empty($failed_files)) {
+                    update_post_meta($attachment_id, '_sky_oss_synced', 1);
+                    $core->log("🎉 [OSS] 附件 #{$attachment_id} 全部上传成功！", 'info', 'OSS');
 
-                if ($core->get_opt('oss_delete_local')) {
-                    foreach ($success_files as $f) {
-                        @unlink($f);
+                    // 核心修复：不在这里立刻执行 unlink，而是推入待删除队列
+                    if ($core->get_opt('oss_delete_local')) {
+                        $this->files_to_delete = array_merge($this->files_to_delete, $success_files);
                     }
-                    $core->log("🗑️ [OSS] Zero-Disk 已安全清理本地文件", 'info', 'OSS');
+                } else {
+                    $core->log("⚠️ [OSS] 附件 #{$attachment_id} 存在失败项（共 " . count($failed_files) . " 个）", 'warn', 'OSS');
                 }
-            } else {
-                $core->log("⚠️ [OSS] 附件 #{$attachment_id} 存在失败项（共 " . count($failed_files) . " 个）", 'warn', 'OSS');
+
+            } catch (Exception $e) {
+                $core->log("💥 [OSS] 处理异常: " . $e->getMessage(), 'error', 'OSS');
             }
 
-        } catch (Exception $e) {
-            $core->log("💥 [OSS] 处理异常: " . $e->getMessage(), 'error', 'OSS');
+            return $metadata;
         }
 
-        return $metadata;
-    }
+        // 安全清理本地文件的方法（将在 shutdown 钩子中执行）
+        public function cleanup_local_files() {
+            if (empty($this->files_to_delete)) return;
+            $core = Skyline_Core::instance();
+            $deleted_count = 0;
+            
+            // 去重后安全删除
+            foreach (array_unique($this->files_to_delete) as $file) {
+                if (file_exists($file) && @unlink($file)) {
+                    $deleted_count++;
+                }
+            }
+            if ($deleted_count > 0) {
+                $core->log("🗑️ [OSS-Zero-Disk] 生命周期结束，安全清理了 {$deleted_count} 个本地文件", 'info', 'OSS');
+            }
+        }
 
-    public function replace_url($url, $post_id) {
-        $core = Skyline_Core::instance();
-        if (!$core->get_opt('oss_enable') || !get_post_meta($post_id, '_sky_oss_synced', true)) return $url;
-        
-        $domain = rtrim($core->get_opt('oss_domain') ?: "https://{$core->get_opt('oss_bucket')}.{$core->get_opt('oss_endpoint')}", '/');
-        return str_replace(rtrim(get_site_url(), '/'), $domain, $url);
-    }
+        public function replace_url($url, $post_id) {
+            $core = Skyline_Core::instance();
+            if (!$core->get_opt('oss_enable') || !get_post_meta($post_id, '_sky_oss_synced', true)) return $url;
+            $domain = rtrim($core->get_opt('oss_domain') ?: "https://{$core->get_opt('oss_bucket')}.{$core->get_opt('oss_endpoint')}", '/');
+            return str_replace(rtrim(get_site_url(), '/'), $domain, $url);
+        }
 
-    public function replace_image_src($image, $attachment_id, $size, $icon) {
-        if (!$image) return $image;
-        $core = Skyline_Core::instance();
-        if (!$core->get_opt('oss_enable') || !get_post_meta($attachment_id, '_sky_oss_synced', true)) return $image;
-        
-        $domain = rtrim($core->get_opt('oss_domain') ?: "https://{$core->get_opt('oss_bucket')}.{$core->get_opt('oss_endpoint')}", '/');
-        $image[0] = str_replace(rtrim(get_site_url(), '/'), $domain, $image[0]);
-        return $image;
+        public function replace_image_src($image, $attachment_id, $size, $icon) {
+            if (!$image) return $image;
+            $core = Skyline_Core::instance();
+            if (!$core->get_opt('oss_enable') || !get_post_meta($attachment_id, '_sky_oss_synced', true)) return $image;
+            $domain = rtrim($core->get_opt('oss_domain') ?: "https://{$core->get_opt('oss_bucket')}.{$core->get_opt('oss_endpoint')}", '/');
+            $image[0] = str_replace(rtrim(get_site_url(), '/'), $domain, $image[0]);
+            return $image;
+        }
     }
 }
-}
 
-// 👑 最终强化版腾讯云 COS SDK 客户端（Upload + 重试 + 验证）
 if (!class_exists('Sky_Official_COS_Client')) {
-class Sky_Official_COS_Client {
-    private $client;
-    private $bucket;
+    class Sky_Official_COS_Client {
+        private $client;
+        private $bucket;
 
-    public function __construct($ak, $sk, $bucket, $endpoint) {
-        $this->bucket = trim($bucket);
+        public function __construct($ak, $sk, $bucket, $endpoint) {
+            $this->bucket = trim($bucket);
+            $region = 'ap-beijing';
+            if (preg_match('/cos\.([a-z0-9-]+)\.myqcloud/i', $endpoint, $m)) {
+                $region = $m[1];
+            }
 
-        $region = 'ap-beijing';
-        if (preg_match('/cos\.([a-z0-9-]+)\.myqcloud/i', $endpoint, $m)) {
-            $region = $m[1];
-        }
-
-        if (!class_exists('\Qcloud\Cos\Client')) {
-            $autoload = dirname(dirname(dirname(__FILE__))) . '/vendor/autoload.php';
+            $autoload = SKY_PATH . 'vendor/autoload.php';
             if (file_exists($autoload)) require_once $autoload;
-            else throw new Exception('腾讯云 SDK 未找到，请确认 composer install 已执行');
+
+            $this->client = new \Qcloud\Cos\Client([
+                'region'          => $region,
+                'schema'          => 'https',
+                'credentials'     => ['secretId' => trim($ak), 'secretKey' => trim($sk)],
+            ]);
         }
 
-        $this->client = new \Qcloud\Cos\Client([
-            'region'          => $region,
-            'schema'          => 'https',
-            'timeout'         => 180,
-            'connect_timeout' => 60,
-            'credentials'     => [
-                'secretId'  => trim($ak),
-                'secretKey' => trim($sk),
-            ],
-        ]);
-    }
+        public function putFile($key, $file) {
+            if (!file_exists($file)) return false;
 
-    public function putFile($key, $file) {
-        if (!file_exists($file)) {
-            Skyline_Core::instance()->log("[OSS] 文件不存在: $file", 'error', 'OSS');
+            $key = ltrim($key, '/');
+            $core = Skyline_Core::instance();
+            $maxRetries = 3;
+            $lastError = '';
+
+            for ($attempt = 0; $attempt < $maxRetries; $attempt++) {
+                $fp = null;
+                try {
+                    $fp = fopen($file, 'rb');
+                    if (!$fp) throw new Exception('无法打开文件流');
+
+                    // 使用底层 putObject，维持文件流，完美控制内存
+                    $this->client->putObject([
+                        'Bucket' => $this->bucket,
+                        'Key'    => $key,
+                        'Body'   => $fp, 
+                        'ACL'    => 'public-read'
+                    ]);
+
+                    return true;
+
+                } catch (\Exception $e) {
+                    $lastError = $e->getMessage();
+                    if ($attempt < $maxRetries - 1) sleep(1); // 失败退避重试
+                } finally {
+                    // 无论成功失败，确保句柄必须释放
+                    if (is_resource($fp)) {
+                        fclose($fp);
+                    }
+                }
+            }
+
+            $core->log("❌ [OSS] 最终上传失败: {$key} | 错误: {$lastError}", 'error', 'OSS');
             return false;
         }
-
-        $key = ltrim($key, '/');
-        $core = Skyline_Core::instance();
-        $maxRetries = 5;
-        $lastError = null;
-
-        // 提升资源限制
-        if (function_exists('wp_raise_memory_limit')) wp_raise_memory_limit('image');
-        if (function_exists('set_time_limit')) @set_time_limit(180);
-
-        for ($attempt = 0; $attempt < $maxRetries; $attempt++) {
-            $fp = null;
-            try {
-                $fp = fopen($file, 'rb');
-                if (!$fp) throw new Exception('无法打开文件句柄');
-
-                $this->client->Upload(
-                    $this->bucket,
-                    $key,
-                    $fp,
-                    ['ACL' => 'public-read']
-                );
-
-                // 二次验证
-                $this->client->headObject([
-                    'Bucket' => $this->bucket,
-                    'Key'    => $key
-                ]);
-
-                $core->log("✅ [OSS] 上传并验证成功 [尝试{$attempt}] : {$key}", 'info', 'OSS');
-                return true;
-
-            } catch (\Exception $e) {
-                $lastError = $e->getMessage();
-                $delay = (int) pow(2, $attempt);
-                $core->log("⚠️ [OSS] 上传失败 [尝试{$attempt}/{$maxRetries}] {$key}: {$lastError}，{$delay}秒后重试...", 'warn', 'OSS');
-                
-                if ($attempt < $maxRetries - 1) {
-                    sleep($delay);
-                }
-            } finally {
-                if (is_resource($fp)) fclose($fp);
-            }
-        }
-
-        $core->log("❌ [OSS] 最终上传失败（已重试{$maxRetries}次）: {$key} | 错误: {$lastError}", 'error', 'OSS');
-        return false;
     }
-}
 }
