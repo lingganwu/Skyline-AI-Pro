@@ -15,7 +15,7 @@ class Skyline_Core {
         return self::$instance;
     }
 
-     public function __construct() {
+    public function __construct() {
         // 使用 SKY_PATH 常量定义日志路径，更稳定
         $this->log_file = SKY_PATH . 'logs/skyline_ai.log';
         
