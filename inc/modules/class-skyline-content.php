@@ -10,8 +10,6 @@ class Skyline_Content {
         add_filter('the_content', [$this, 'auto_internal_links']);
         
         add_action('wp_ajax_sky_seo_score', [$this, 'ajax_seo_score']);
-        add_action('wp_ajax_sky_bulk_action', [$this, 'ajax_bulk_action']);
-        add_action('wp_ajax_sky_spider_now', [$this, 'ajax_spider_now']); 
         add_action('wp_ajax_sky_spider_single', [$this, 'ajax_spider_single']); 
         add_action('wp_ajax_sky_link_now', [$this, 'ajax_link_now']); 
         
@@ -54,7 +52,7 @@ class Skyline_Content {
             if(count($p) < 2) continue;
             $kw = trim($p[0]); $url = trim($p[1]);
             if(!$kw || !$url) continue;
-            $content = preg_replace('/(?!(?:[^<]+>|[^>]+<\/a>))'.preg_quote($kw, '/').'/u', '<a href="'.$url.'" title="'.$kw.'" target="_blank" class="sky-link">'.$kw.'</a>', $content, 1);
+            $content = preg_replace('/(?!(?:[^<]+>|[^>]+<\/a>))'.preg_quote($kw, '/').'/u', '<a href="'.esc_url($url).'" title="'.esc_attr($kw).'" target="_blank" class="sky-link">'.$kw.'</a>', $content, 1);
         }
         return $content;
     }
@@ -85,6 +83,14 @@ class Skyline_Content {
             $spider_history[$img_hash] = $global_id;
             update_post_meta($pid, '_sky_spider_history', $spider_history);
             return ['id' => $global_id, 'status' => 'cached_global'];
+        }
+
+        $parsed = wp_parse_url($url);
+        if (!$parsed || !isset($parsed['host'])) return ['error' => '无效的URL格式'];
+        $host = strtolower($parsed['host']);
+        $ip = gethostbyname($host);
+        if ($ip && !filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE)) {
+            return ['error' => '不允许访问内部网络地址'];
         }
 
         $args = [
@@ -261,9 +267,28 @@ class Skyline_Content {
         if(!$im) return;
         $txt = Skyline_Core::instance()->get_opt('spider_wm_text', '@Skyline');
         $color = imagecolorallocatealpha($im, 255, 255, 255, 60);
-        $font = 5; 
-        $x = imagesx($im) - (strlen($txt)*9) - 10; $y = imagesy($im) - 20;
-        imagestring($im, $font, max(10,$x), max(10,$y), $txt, $color);
+        $font_paths = [
+            '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf',
+            '/usr/share/fonts/TTF/DejaVuSans.ttf',
+            '/usr/share/fonts/dejavu/DejaVuSans.ttf',
+        ];
+        $font_file = '';
+        foreach ($font_paths as $fp) {
+            if (file_exists($fp)) { $font_file = $fp; break; }
+        }
+        if ($font_file && function_exists('imagettftext')) {
+            $font_size = 16;
+            $bbox = imagettfbbox($font_size, 0, $font_file, $txt);
+            $text_width = abs($bbox[4] - $bbox[0]);
+            $x = imagesx($im) - $text_width - 10;
+            $y = imagesy($im) - 10;
+            imagettftext($im, $font_size, 0, max(10, $x), max(10, $y), $color, $font_file, $txt);
+        } else {
+            $font = 5;
+            $x = imagesx($im) - (strlen($txt)*9) - 10;
+            $y = imagesy($im) - 20;
+            imagestring($im, $font, max(10,$x), max(10,$y), $txt, $color);
+        }
         if($i['mime']=='image/jpeg') imagejpeg($im, $path, 90); else imagepng($im, $path, 9);
         imagedestroy($im);
     }
@@ -272,6 +297,7 @@ class Skyline_Content {
         check_ajax_referer('sky_ai_task_nonce');
         if(!current_user_can('edit_posts')) wp_send_json_error('权限不足');
         $content = isset($_POST['content']) ? wp_unslash($_POST['content']) : '';
+        $content = wp_kses_post($content);
         if(!$content) wp_send_json_error('内容为空');
         $links_str = Skyline_Core::instance()->get_opt('link_pairs');
         if(!$links_str) wp_send_json_error('未配置内链关键词，请去设置页添加');
@@ -283,7 +309,7 @@ class Skyline_Content {
             $kw = trim($p[0]); $url = trim($p[1]);
             if(!$kw || !$url) continue;
             $pattern = '/(?!(?:[^<]+>|[^>]+<\/a>))(' . preg_quote($kw, '/') . ')/u';
-            $replace = '<a href="'.$url.'" title="$1" target="_blank" class="sky-link">$1</a>';
+            $replace = '<a href="'.esc_url($url).'" title="$1" target="_blank" class="sky-link">$1</a>';
             $content = preg_replace($pattern, $replace, $content, 1, $count);
             $total_replaced += $count;
         }
@@ -304,8 +330,6 @@ class Skyline_Content {
         } else wp_send_json_error($result['error']);
     }
 
-    public function ajax_spider_now() {}
-    public function ajax_bulk_action() {}
     public function ajax_seo_score() {
         check_ajax_referer('sky_seo_nonce');
         $score = 100; $advice = [];
@@ -323,6 +347,8 @@ class Skyline_Content {
             $ajax_url = admin_url('admin-ajax.php');
             $nonce = wp_create_nonce('sky_ai_task_nonce');
             $seo_nonce = wp_create_nonce('sky_seo_nonce');
+            $esc_nonce = esc_js($nonce);
+            $esc_seo_nonce = esc_js($seo_nonce);
             ?>
             <style>
             .sky-cp-wrap { font-family: sans-serif; position: relative; }
@@ -490,7 +516,7 @@ class Skyline_Content {
                         $('#sp-msg').text('第 ' + (idx+1) + ' 张: ' + label);
                         
                         $.post(skyAjaxUrl, {
-                            action: 'sky_spider_single', url: item.real, pid: pid, _ajax_nonce: '<?php echo $nonce; ?>'
+                            action: 'sky_spider_single', url: item.real, pid: pid, _ajax_nonce: '<?php echo $esc_nonce; ?>'
                         }).done(function(res) {
                             if(res.success) {
                                 var localUrl = res.data.url;
@@ -568,7 +594,7 @@ class Skyline_Content {
                     linkNow: function() {
                         var i = this.getContent(); if(!i) return alert('请先输入或粘贴内容');
                         $('#sky-loading').show();
-                        $.post(skyAjaxUrl, { action: 'sky_link_now', content: i, _ajax_nonce: '<?php echo $nonce; ?>' }, function(r){
+                        $.post(skyAjaxUrl, { action: 'sky_link_now', content: i, _ajax_nonce: '<?php echo $esc_nonce; ?>' }, function(r){
                             $('#sky-loading').hide();
                             if(r.success) { SkylineEditor.setContent(r.data.content); alert(r.data.msg); } 
                             else { alert(r.data); }
@@ -585,7 +611,7 @@ class Skyline_Content {
                             $('#sky-loading').show();
                             $.ajax({
                                 url: skyAjaxUrl, type: 'POST',
-                                data: { action: 'sky_ai_task', task: t, input: i, _ajax_nonce: '<?php echo $nonce; ?>' },
+                                data: { action: 'sky_ai_task', task: t, input: i, _ajax_nonce: '<?php echo $esc_nonce; ?>' },
                                 success: function(r) {
                                     $('#sky-loading').hide();
                                     if(r.success) { 
@@ -634,7 +660,7 @@ class Skyline_Content {
                     genImg: function() {
                         var p = prompt("请输入图片描述:"); if(!p) return;
                         $('#sky-loading').show();
-                        $.post(skyAjaxUrl, { action: 'sky_gen_img', prompt: p, _ajax_nonce: '<?php echo $nonce; ?>' }, function(r){
+                        $.post(skyAjaxUrl, { action: 'sky_gen_img', prompt: p, _ajax_nonce: '<?php echo $esc_nonce; ?>' }, function(r){
                             $('#sky-loading').hide();
                             if(r.success) SkylineEditor.showResult('<img src="'+r.data+'" style="max-width:100%">'); else alert(r.data);
                         });
@@ -659,7 +685,7 @@ class Skyline_Content {
                         var t = $('#title').val(); 
                         if(this.isGutenberg()) t = wp.data.select("core/editor").getEditedPostAttribute("title");
                         var c = this.getContent();
-                        $.post(skyAjaxUrl, { action:'sky_seo_score', title:t, content:c, _ajax_nonce:'<?php echo $seo_nonce; ?>' }, function(r){
+                        $.post(skyAjaxUrl, { action:'sky_seo_score', title:t, content:c, _ajax_nonce:'<?php echo $esc_seo_nonce; ?>' }, function(r){
                              if(r.success) SkylineEditor.showResult('<b>SEO 得分: '+r.data.score+'</b><br>'+r.data.advice.join('<br>'));
                         });
                     },

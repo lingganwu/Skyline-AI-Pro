@@ -6,6 +6,12 @@ setTimeout(function(){
     } 
 }, 120000);
 
+function skyEscapeHtml(str) {
+    var div = document.createElement('div');
+    div.appendChild(document.createTextNode(str));
+    return div.innerHTML;
+}
+
 function toggleSkyChat(){ 
     var b = document.getElementById('sky-chat-box'); 
     var t = document.getElementById('sky-waifu-tips'); 
@@ -21,34 +27,39 @@ function skySend(){
     
     if(!m) return;
     
-    b.innerHTML += '<div class="sky-msg user">' + m.replace(/</g,"&lt;") + '</div>';
+    var userDiv = document.createElement('div');
+    userDiv.className = 'sky-msg user';
+    userDiv.textContent = m;
+    b.appendChild(userDiv);
     i.value = '';
     b.scrollTop = b.scrollHeight;
     
     var fd = new FormData();
     fd.append('action', 'sky_chat_front');
     fd.append('msg', m);
-    // 修正：调用 PHP 传来的 sky_ajax 变量
     fd.append('_ajax_nonce', sky_ajax.nonce);
     
     var ld = document.createElement('div'); 
     ld.className = 'sky-msg ai'; 
     ld.id = 'sky-loading'; 
-    ld.innerText = '思考中...'; 
+    ld.textContent = '思考中...'; 
     b.appendChild(ld); 
     b.scrollTop = b.scrollHeight;
     
-    // 修正：使用正确的接口地址
-    fetch(sky_ajax.url, {
+    fetch(sky_ajax.ajax_url, {
         method: 'POST',
         body: fd
     }).then(r => r.json()).then(d => {
         var loadingNode = document.getElementById('sky-loading');
         if(loadingNode) loadingNode.remove();
-        b.innerHTML += '<div class="sky-msg ai">' + (d.success ? d.data : 'Error: ' + d.data).replace(/\n/g, '<br>') + '</div>';
+        var aiDiv = document.createElement('div');
+        aiDiv.className = 'sky-msg ai';
+        var msgText = d.success ? d.data : 'Error: ' + d.data;
+        aiDiv.textContent = msgText;
+        b.appendChild(aiDiv);
         b.scrollTop = b.scrollHeight;
     }).catch(() => { 
         var loadingNode = document.getElementById('sky-loading');
-        if(loadingNode) loadingNode.innerText = '网络错误'; 
+        if(loadingNode) loadingNode.textContent = '网络错误'; 
     });
 }

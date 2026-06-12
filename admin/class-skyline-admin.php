@@ -92,6 +92,7 @@ class Skyline_Admin {
     }
 
     public function ajax_health_check() {
+        check_ajax_referer('skyline_ajax_nonce');
         if (!current_user_can('manage_options')) {
             wp_send_json_error('Unauthorized');
         }
@@ -137,8 +138,8 @@ class Skyline_Admin {
         $last = strtolower($val[strlen($val) - 1]);
         $val = intval($val);
         switch ($last) {
-            case 'g': $val *= 1024;
-            case 'm': $val *= 1024;
+            case 'g': $val *= 1024; // no break
+            case 'm': $val *= 1024; // no break
             case 'k': $val *= 1024;
         }
         return $val;
@@ -287,7 +288,7 @@ class Skyline_Admin {
         }
 
         jQuery(document).ready(function() {
-            if ('<?php echo $current_tab; ?>' === 'ai') loadPrompts();
+            if ('<?php echo esc_js($current_tab); ?>' === 'ai') loadPrompts();
         });
         </script>
         <?php
@@ -524,7 +525,7 @@ class Skyline_Admin {
         switch ($type) {
             case 'password':
                 echo '<div class="sky-field-input" style="width:100%;">';
-                echo '<input type="password" name="skyline_settings[' . esc_attr($key) . ']" value="' . esc_attr($val) . '">';
+                echo '<input type="password" name="skyline_settings[' . esc_attr($key) . ']" value="' . esc_attr($val) . '" autocomplete="off">';
                 echo '</div>';
                 break;
                 

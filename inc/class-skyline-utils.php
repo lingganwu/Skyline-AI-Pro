@@ -76,6 +76,13 @@ class Skyline_Utils {
             'data' => get_option('sky_ai_data', []),
             'timestamp' => current_time('mysql')
         ];
+        
+        global $wpdb;
+        $wpdb->query($wpdb->prepare(
+            "DELETE FROM {$wpdb->options} WHERE option_name LIKE %s ORDER BY option_id ASC LIMIT 1",
+            $wpdb->esc_like('skyline_backup_') . '%'
+        ));
+        
         update_option('skyline_backup_' . time(), $backup_data);
         return true;
     }

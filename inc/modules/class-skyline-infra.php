@@ -41,7 +41,13 @@ class Skyline_Infra {
     public function cache_get($key, $fallback = null, $ttl = 3600) {
         if ($this->redis) {
             $val = $this->redis->get('sky:' . $key);
-            if ($val !== false) return is_string($val) ? json_decode($val, true) ?? $val : $val;
+            if ($val !== false) {
+                if (is_string($val)) {
+                    $decoded = json_decode($val, true);
+                    return $decoded !== null ? $decoded : $val;
+                }
+                return $val;
+            }
         }
         if (is_callable($fallback)) {
             $val = $fallback();
@@ -83,7 +89,7 @@ class Skyline_Redis_Mod {
         $key = 'page_' . md5(home_url($cache_uri));
         
         $cached = $infra->cache_get($key);
-        if ($cached) { header('X-Sky-Redis: HIT'); echo $cached; exit; }
+        if ($cached && is_string($cached)) { header('X-Sky-Redis: HIT'); echo $cached; exit; }
         
         ob_start(function($buf) use ($infra, $key, $core) {
             if (strlen($buf) > 200 && http_response_code() === 200 && !is_404()) {
@@ -222,7 +228,6 @@ if (!class_exists('Skyline_OSS_Mod')) {
             
             foreach (array_unique($this->files_to_delete) as $file) {
                 if (file_exists($file)) {
-                    @chmod($file, 0666); 
                     if (@unlink($file)) {
                         $deleted_count++;
                     }

@@ -298,7 +298,7 @@
                 let html = '<p><b>🤖 AI 提供了多个标题，请选择：</b></p>';
                 lines.forEach(line => {
                     const clean = line.replace(/^\d+[\.\、]\s*/, '').replace(/^["']|["']$/g, '').trim();
-                    const safe = clean.replace(/'/g, "\\'").replace(/"/g, '&quot;');
+                    const safe = clean.replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
                     html += `<button type="button" class="sky-btn-cp" style="margin-bottom:5px;text-align:left" 
                              onclick="SkylineCopilot.editor.setTitle('${safe}')">👉 ${clean}</button>`;
                 });

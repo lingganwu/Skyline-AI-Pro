@@ -194,7 +194,7 @@ class Skyline_Core {
                 sleep(1 * ($retry_count + 1));
                 return $this->call_api($messages, $temp, $retry_count + 1);
             }
-            return "Network Error: " . $err;
+            return "Network Error: Request failed";
         }
 
         $code = wp_remote_retrieve_response_code($r);
@@ -262,6 +262,15 @@ class Skyline_Core {
 
     public function handle_chat_front() {
         check_ajax_referer('sky_chat_nonce');
+        
+        $rate_key = 'sky_chat_rate_' . md5($_SERVER['REMOTE_ADDR'] ?? '0.0.0.0');
+        $rate_count = get_transient($rate_key);
+        if ($rate_count === false) $rate_count = 0;
+        if ((int)$rate_count >= 20) {
+            wp_send_json_error('请求过于频繁，请稍后再试');
+        }
+        set_transient($rate_key, (int)$rate_count + 1, 60);
+        
         $msg = sanitize_text_field($_POST['msg'] ?? '');
         wp_send_json_success($this->call_api([['role'=>'user', 'content'=>$msg]]));
     }
@@ -325,6 +334,7 @@ class Skyline_Core {
 
     public function handle_gen_img() {
         check_ajax_referer('sky_ai_task_nonce');
+        if(!current_user_can('edit_posts')) wp_send_json_error('Unauthorized');
         $prompt = sanitize_text_field($_POST['prompt'] ?? '');
         $k = $this->get_opt('api_key');
         $args = [

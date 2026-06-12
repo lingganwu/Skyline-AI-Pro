@@ -11,13 +11,6 @@ if (!defined('ABSPATH')) exit;
 
 define('SKY_VERSION', '2.0.0');
 
-// AI Models Configuration
-define('SKY_AI_MODELS', json_encode([
-    'deepseek-v3' => ['name' => 'DeepSeek V3', 'cost' => 0.01],
-    'gpt-4' => ['name' => 'GPT-4', 'cost' => 0.03],
-    'claude-3' => ['name' => 'Claude 3', 'cost' => 0.02]
-]));
-
 // Batch Processing Settings
 define('SKY_BATCH_SIZE', 10);
 define('SKY_MAX_RETRIES', 3);
