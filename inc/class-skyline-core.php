@@ -40,6 +40,7 @@ class Skyline_Core {
         add_action('wp_ajax_sky_save_prompt', [$this, 'handle_save_prompt']);
         add_action('wp_ajax_sky_get_prompts', [$this, 'handle_get_prompts']);
         add_action('wp_ajax_sky_check_quality', [$this, 'handle_check_quality']);
+        add_action('wp_ajax_sky_delete_prompt', [$this, 'handle_delete_prompt']);
         add_action('wp_enqueue_scripts', [$this, 'enqueue_waifu_assets']);
         add_action('wp_footer', [$this, 'render_waifu']);
     }
@@ -140,8 +141,19 @@ class Skyline_Core {
 
     public function log($msg, $type = 'info', $context = 'System') {
         $timestamp = current_time('Y-m-d H:i:s');
-        $log_entry = sprintf("[%s] [%s] [%s] %s\n", $timestamp, strtoupper($type), $context, $msg);
-        @file_put_contents($this->log_file, $log_entry, FILE_APPEND);
+        // 日志轮转：按天切分（skyline_ai-YYYYMMDD.log），只保留最近 7 天，防无限膨胀
+        $dir = dirname($this->log_file);
+        $today = $dir . '/skyline_ai-' . current_time('Ymd') . '.log';
+        if (!file_exists($today) && file_exists($this->log_file)) {
+            @rename($this->log_file, $dir . '/skyline_ai-' . gmdate('Ymd', filemtime($this->log_file)) . '.log');
+        }
+        @file_put_contents($today, sprintf("[%s] [%s] [%s] %s\n", $timestamp, strtoupper($type), $context, $msg), FILE_APPEND);
+
+        // 清理 7 天前的轮转日志
+        $cutoff = time() - 7 * 86400;
+        foreach (glob($dir . '/skyline_ai-*.log') ?: [] as $f) {
+            if (filemtime($f) < $cutoff) @unlink($f);
+        }
     }
 
     public function stat_inc($key, $val=1) {
@@ -166,7 +178,7 @@ class Skyline_Core {
         $k = $this->get_opt('api_key'); 
         if(!$k) return 'Error: API Key missing';
 
-        $hash_key = 'sky_api_' . md5(json_encode($messages) . $temp);
+        $hash_key = 'sky_api_' . md5(json_encode($messages) . $temp . $this->get_opt('chat_model'));
         $infra = class_exists('Skyline_Infra') ? Skyline_Infra::instance() : null;
         if ($infra && method_exists($infra, 'cache_get')) {
             $cached = $infra->cache_get($hash_key);
@@ -190,6 +202,7 @@ class Skyline_Core {
         
         if(is_wp_error($r)) {
             $err = $r->get_error_message();
+            $this->log("API 网络失败: {$err}", 'error', 'API');
             if ($retry_count < 2) {
                 sleep(1 * ($retry_count + 1));
                 return $this->call_api($messages, $temp, $retry_count + 1);
@@ -203,6 +216,7 @@ class Skyline_Core {
 
         if ($code !== 200) {
             $errMsg = $d['error']['message'] ?? 'Unknown API Error';
+            $this->log("API 返回 {$code}: {$errMsg}", 'error', 'API');
             if ($code >= 500 && $retry_count < 2) {
                 sleep(1 * ($retry_count + 1));
                 return $this->call_api($messages, $temp, $retry_count + 1);
@@ -280,6 +294,8 @@ class Skyline_Core {
         if(!current_user_can('edit_posts')) wp_send_json_error('Unauthorized');
         $t = sanitize_key($_POST['task'] ?? '');
         $i = wp_kses_post($_POST['input'] ?? '');
+        // 长度限制，防止超长输入拖垮 API 调用与请求超时
+        $i = mb_substr($i, 0, 6000);
         
         $prompts = [
             'title'    => "你是一位资深的SEO内容专家。请根据以下文章内容，生成5个具有极高点击率、符合SEO原则且能精准概括核心价值的中文标题。要求：\n1. 提供5个不同风格（如：痛点驱动型、权威指南型、反直觉悬念型、结果导向型、极简概括型）。\n2. 严禁输出任何开场白或结束语（如 '为您生成的标题是' 或 '希望您满意'）。\n3. 每行输出一个标题，不要编号，不要引号。\n\n文章内容：\n$i",
@@ -326,8 +342,24 @@ class Skyline_Core {
         wp_send_json_success(get_option('skyline_prompt_library', []));
     }
 
+    public function handle_delete_prompt() {
+        check_ajax_referer('sky_prompt_nonce');
+        if(!current_user_can('manage_options')) wp_send_json_error('Unauthorized');
+        $id = sanitize_text_field($_POST['id'] ?? '');
+        if(!$id) wp_send_json_error('Missing id');
+        $lib = get_option('skyline_prompt_library', []);
+        if (!is_array($lib)) $lib = [];
+        if (isset($lib[$id])) {
+            unset($lib[$id]);
+            update_option('skyline_prompt_library', $lib);
+            wp_send_json_success('Deleted');
+        }
+        wp_send_json_error('Prompt not found');
+    }
+
     public function handle_check_quality() {
         check_ajax_referer('sky_quality_nonce');
+        if(!current_user_can('edit_posts')) wp_send_json_error('Unauthorized');
         $content = wp_kses_post($_POST['content'] ?? '');
         wp_send_json_success(Skyline_Utils::assess_quality($content));
     }
@@ -337,24 +369,40 @@ class Skyline_Core {
         if(!current_user_can('edit_posts')) wp_send_json_error('Unauthorized');
         $prompt = sanitize_text_field($_POST['prompt'] ?? '');
         $k = $this->get_opt('api_key');
+        if(!$k) wp_send_json_error('API Key 未配置');
+        // 图片端点：跟随 api_base 的根域名（chat/completions -> images/generations），不可用时回退默认
+        $base = $this->get_opt('api_base', 'https://api.siliconflow.cn/v1/chat/completions');
+        $img_url = str_replace('/chat/completions', '/images/generations', $base);
+        if ($img_url === $base) $img_url = 'https://api.siliconflow.cn/v1/images/generations';
         $args = [
             'headers' => ['Authorization' => 'Bearer '.$k, 'Content-Type' => 'application/json'],
             'body' => json_encode(['model' => $this->get_opt('image_model'), 'prompt' => $prompt]),
-            'timeout' => 60
+            'timeout' => 120
         ];
-        $r = wp_remote_post('https://api.siliconflow.cn/v1/images/generations', $args);
+        $r = wp_remote_post($img_url, $args);
+        if (is_wp_error($r)) {
+            $this->log("生图网络失败: {$r->get_error_message()}", 'error', 'API');
+            wp_send_json_error('生图请求失败: ' . $r->get_error_message());
+        }
+        $code = wp_remote_retrieve_response_code($r);
         $d = json_decode(wp_remote_retrieve_body($r), true);
+        if ($code !== 200) {
+            $errMsg = $d['error']['message'] ?? "HTTP {$code}";
+            $this->log("生图失败 ({$code}): {$errMsg}", 'error', 'API');
+            wp_send_json_error("生图失败 ({$code}): " . $errMsg);
+        }
         wp_send_json_success($d['data'][0]['url'] ?? 'Fail');
     }
 
     public function handle_clear_logs() {
         check_ajax_referer('sky_clear_logs_nonce');
-        if (file_exists($this->log_file)) {
-            file_put_contents($this->log_file, '');
-            wp_send_json_success('Logs cleared from file');
-        } else {
-            wp_send_json_error('Log file not found');
+        $dir = dirname($this->log_file);
+        foreach (glob($dir . '/skyline_ai*.log') ?: [] as $f) {
+            @unlink($f);
         }
+        // 重建空的今日日志文件
+        @file_put_contents($dir . '/skyline_ai-' . current_time('Ymd') . '.log', '');
+        wp_send_json_success('Logs cleared');
     }
 
     public function enqueue_waifu_assets() {

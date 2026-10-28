@@ -41,21 +41,37 @@ class Skyline_Content {
     }
 
     public function auto_internal_links($content) {
-        $core = Skyline_Core::instance();
-        if(!$core->get_opt('link_enable') || is_admin()) return $content;
-        $links_str = $core->get_opt('link_pairs');
-        if(!$links_str) return $content;
-        
-        $pairs = explode("\n", $links_str);
-        foreach($pairs as $pair) {
-            $p = explode('|', trim($pair));
-            if(count($p) < 2) continue;
-            $kw = trim($p[0]); $url = trim($p[1]);
-            if(!$kw || !$url) continue;
-            $content = preg_replace('/(?!(?:[^<]+>|[^>]+<\/a>))'.preg_quote($kw, '/').'/u', '<a href="'.esc_url($url).'" title="'.esc_attr($kw).'" target="_blank" class="sky-link">'.$kw.'</a>', $content, 1);
+            $core = Skyline_Core::instance();
+            if(!$core->get_opt('link_enable') || is_admin()) return $content;
+            $links_str = $core->get_opt('link_pairs');
+            if(!$links_str) return $content;
+
+            $pairs = explode("\n", $links_str);
+            foreach($pairs as $pair) {
+                $p = explode('|', trim($pair));
+                if(count($p) < 2) continue;
+                $kw = trim($p[0]); $url = trim($p[1]);
+                if(!$kw || !$url) continue;
+
+                // 修复：只在"标签外的纯文本段"里替换，避免把已链接的关键词再次包一层
+                // （原 regex 的 lookahead 形同虚设，会产出 <a><a> 嵌套链接）
+                $parts = preg_split('/(<[^>]+>)/u', $content, -1, PREG_SPLIT_DELIM_CAPTURE);
+                foreach ($parts as $i => $part) {
+                    if ($part === '' || $part[0] === '<') continue;
+                    if (mb_stripos($part, $kw) !== false) {
+                        $parts[$i] = preg_replace(
+                            '/' . preg_quote($kw, '/') . '/u',
+                            '<a href="' . esc_url($url) . '" title="' . esc_attr($kw) . '" target="_blank" class="sky-link">' . $kw . '</a>',
+                            $part,
+                            1
+                        );
+                        break; // 每个关键词最多替换 1 处
+                    }
+                }
+                $content = implode('', $parts);
+            }
+            return $content;
         }
-        return $content;
-    }
 
     private function download_image($url, $pid) {
         if (!function_exists('wp_generate_attachment_metadata')) {

@@ -7,7 +7,7 @@
 <a id="english"></a>
 ## 🇬🇧 English Version
 
-[![WordPress Version](https://img.shields.io/badge/WordPress-v1.5.0-blue.svg)](https://github.com/lingganwu/Skyline-AI-Pro/releases)
+[![WordPress Version](https://img.shields.io/badge/WordPress-v2.0.1-blue.svg)](https://github.com/lingganwu/Skyline-AI-Pro/releases)
 [![License](https://img.shields.io/badge/License-GPLv2%2B-green.svg)](https://creativecommons.org/licenses/by/2.0/)
 [![Security](https://img.shields.io/badge/Security-WP.org%20Standard-brightgreen.svg)]()
 
@@ -29,7 +29,7 @@ By shifting from simple content collection to **Intelligent Data Integration**, 
 
 #### 🚀 Performance & Intelligence
 - **Transient Caching**: High-speed data retrieval using the WordPress Transient API, reducing database overhead and accelerating backend response.
-- **AI Quality Self-Check**: An integrated audit tool that scores generated content for SEO, readability, and coherence, providing actionable improvement suggestions.
+- **Quality Self-Check**: A built-in audit tool that scores content for SEO, readability, and structure before editing — local heuristic check, no API token consumed.
 
 ### 📊 Feature Matrix
 
@@ -68,7 +68,7 @@ By shifting from simple content collection to **Intelligent Data Integration**, 
 
 #### 🚀 性能飞跃与智能审计
 - **Transient 缓存加速**：引入 WordPress Transient API 实现高频数据的毫秒级检索，大幅减轻数据库压力，提升后台响应速度。
-- **AI 质量自检**：内置智能审计工具，可对生成内容在 SEO 友好度、可读性和逻辑连贯性方面进行打分，并提供具体的修改建议。
+- **质量自检**：内置智能审计工具，可在编辑前对内容的 SEO 友好度、可读性和结构进行本地打分（不消耗 API），并提供改进建议。
 
 ### 📊 功能对比矩阵
 

@@ -7,7 +7,11 @@ class Skyline_Utils {
     }
 
     /**
-     * AI Quality Assessment
+     * AI Quality Assessment（本地启发式打分，非 LLM 调用）
+     *
+     * 注意：这里只做本地轻量启发式打分（结构 + 关键词 + 长度），
+     * 不消耗 API token，用于"编辑前快速体检"。如需 LLM 深度评审，
+     * 请走 handle_ai_task 的 'polish'/'rewrite' 流程。
      */
     public static function assess_quality($content) {
         $readability = self::calculate_readability($content);
@@ -15,7 +19,8 @@ class Skyline_Utils {
         return [
             'readability' => $readability,
             'seo' => $seo,
-            'overall' => round(($readability + $seo) / 2, 2)
+            'overall' => round(($readability + $seo) / 2, 2),
+            'note' => '本地启发式打分（非 LLM），用于编辑前快速体检。'
         ];
     }
 
@@ -72,18 +77,25 @@ class Skyline_Utils {
 
     public static function create_backup() {
         $backup_data = [
-            'settings' => get_option('skyline_ai_settings', []),
-            'data' => get_option('sky_ai_data', []),
+            'settings'  => get_option('skyline_ai_settings', []),
+            'prompts'   => get_option('skyline_prompt_library', []),
+            'stats'     => get_option('skyline_ai_stats', []),
+            'data'      => get_option('sky_ai_data', []),
             'timestamp' => current_time('mysql')
         ];
-        
+
         global $wpdb;
+        // 清理所有 7 天前的旧备份（之前只删 1 条，会无限堆积）
+        $cutoff = gmdate('Ymd', time() - 7 * 86400);
         $wpdb->query($wpdb->prepare(
-            "DELETE FROM {$wpdb->options} WHERE option_name LIKE %s ORDER BY option_id ASC LIMIT 1",
-            $wpdb->esc_like('skyline_backup_') . '%'
+            "DELETE FROM {$wpdb->options}
+             WHERE option_name LIKE %s
+               AND CAST(SUBSTRING(option_name, 18, 8) AS UNSIGNED) < %d",
+            $wpdb->esc_like('skyline_backup_') . '%',
+            $cutoff
         ));
-        
-        update_option('skyline_backup_' . time(), $backup_data);
+
+        update_option('skyline_backup_' . gmdate('Ymd_His'), $backup_data, false);
         return true;
     }
 

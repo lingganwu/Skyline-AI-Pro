@@ -270,8 +270,18 @@ class Skyline_Admin {
 
         function deletePrompt(id) {
             if (confirm('确定删除此模板？')) {
-                alert('删除功能已支持（可后续扩展）');
-                loadPrompts();
+                jQuery.post(ajaxurl, {
+                    action: 'sky_delete_prompt',
+                    id: id,
+                    _ajax_nonce: '<?php echo wp_create_nonce('sky_prompt_nonce'); ?>'
+                }, function(r) {
+                    if (r.success) {
+                        alert('✅ 模板已删除');
+                        loadPrompts();
+                    } else {
+                        alert('❌ 删除失败: ' + (r.data || '未知错误'));
+                    }
+                }).fail(function() { alert('网络请求失败'); });
             }
         }
 
@@ -463,8 +473,11 @@ class Skyline_Admin {
                 </button>
             </div>
             <pre id="sky-log-content"><?php
-                $log_file = SKY_PATH . 'logs/skyline_ai.log';
-                echo esc_html(file_exists($log_file) ? file_get_contents($log_file) : '暂无日志记录');
+                $log_dir = SKY_PATH . 'logs';
+                $log_files = glob($log_dir . '/skyline_ai*.log') ?: [];
+                // 默认显示今天(最新)的日志
+                $current_log = $log_files ? $log_files[count($log_files) - 1] : '';
+                echo esc_html($current_log && file_exists($current_log) ? file_get_contents($current_log) : '暂无日志记录');
             ?></pre>
         </div>
         <?php
