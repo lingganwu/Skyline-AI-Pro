@@ -109,8 +109,10 @@ class Skyline_Infra {
     // 迁移进来（setnx 保证只迁移一次），看板数字不会归零。
     private $stats_seeded = [];
 
+    // 统计走 redis_try 而不是 redis_safe：INCR/GET 失败只丢弃本次统计，
+    // 绝不能因此把整站 Redis 连接置 null（与锁操作同一规矩，P4）。
     public function stat_incr($key, $val = 1) {
-        return $this->redis_safe(function ($redis) use ($key, $val) {
+        return $this->redis_try(function ($redis) use ($key, $val) {
             $rkey = 'sky:stats:' . $key;
             if (!isset($this->stats_seeded[$key])) {
                 $this->stats_seeded[$key] = true;
@@ -125,7 +127,7 @@ class Skyline_Infra {
     }
 
     public function stat_get_redis($key) {
-        return $this->redis_safe(function ($redis) use ($key) {
+        return $this->redis_try(function ($redis) use ($key) {
             $v = $redis->get('sky:stats:' . $key);
             return $v === false ? null : (int)$v;
         });
@@ -295,11 +297,13 @@ class Skyline_Redis_Mod {
         if ($cached) $this->serve_page_cache($cached);
 
         // 缓存未命中：防惊群。只放一个请求回源生成，其他请求短暂等待
-        // （最多 2 秒），等到了直接用新缓存；等不到也不阻塞访客，自己生成。
+        // （最多 10 秒），等到了直接用新缓存；等不到也不阻塞访客，自己生成。
         // Redis 不可用时 lock_acquire() 返回 null，不等待、直接生成。
-        $lock_token = $infra->lock_acquire($key, 10);
+        // 锁 TTL 30 秒：本站页面生成要 12–14 秒，10 秒锁会在持有者还没
+        // 生成完时过期，等于没锁（P2）；等待上限 10 秒仍短于 FPM 超时。
+        $lock_token = $infra->lock_acquire($key, 30);
         if ($lock_token === false) {
-            for ($i = 0; $i < 10; $i++) {
+            for ($i = 0; $i < 50; $i++) {
                 usleep(200000);
                 $cached = $infra->cache_get($key, null, 3600, false);
                 if ($cached) {

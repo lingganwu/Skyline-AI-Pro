@@ -129,7 +129,10 @@ class Skyline_Core {
             'redis_auth' => ['group'=>'speed', 'type'=>'password', 'label'=>'Redis Password'],
             'redis_db' => ['group'=>'speed', 'type'=>'number', 'label'=>'Database', 'default'=>0],
             'redis_ttl' => ['group'=>'speed', 'type'=>'number', 'label'=>'TTL (秒)', 'default'=>3600],
-            'redis_exclude' => ['group'=>'speed', 'type'=>'textarea', 'label'=>'排除缓存路径', 'default'=>"/wp-json/\n/cart/\n/checkout/\nrest_route\n/feed/\npreview\ns=\namp"],
+            // 注意：不要把 preview / s= / amp 写进默认值——它们是查询参数，
+            // 精确排除在 page_cache() 里做；写成子串会误伤 /camp/、?status=、
+            // ?tags= 这类正常 URL（P1）。路径级排除只保留下面这几行。
+            'redis_exclude' => ['group'=>'speed', 'type'=>'textarea', 'label'=>'排除缓存路径', 'default'=>"/wp-json/\n/cart/\n/checkout/\nrest_route\n/feed/"],
             'redis_serializer' => ['group'=>'speed', 'type'=>'select', 'label'=>'序列化', 'default'=>'php', 'options' => ['php'=>'PHP Default', 'igbinary'=>'Igbinary']],
             'redis_compression' => ['group'=>'speed', 'type'=>'select', 'label'=>'压缩', 'default'=>'none', 'options' => ['none'=>'None', 'zstd'=>'Zstd', 'lzf'=>'LZF']],
             'turbo_disable_emoji' => ['group'=>'speed', 'type'=>'bool', 'label'=>'禁用 Emoji', 'default'=>false],
@@ -151,7 +154,10 @@ class Skyline_Core {
         
         $infra = class_exists('Skyline_Infra') ? Skyline_Infra::instance() : null;
         if ($infra && method_exists($infra, 'cache_get')) {
-            $cached = $infra->cache_get($cache_key);
+            // 配置读不计入缓存命中统计（track=false）：每请求数十次配置读
+            // 若都算命中，cache_hits 会被撑高、失去健康信号意义（P3）。
+            // 页面缓存命中、call_api() 缓存命中仍正常计数，不受影响。
+            $cached = $infra->cache_get($cache_key, null, 3600, false);
             if ($cached !== null) { $this->options[$key] = $cached; return $cached; }
         }
         
