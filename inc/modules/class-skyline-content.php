@@ -117,6 +117,16 @@ class Skyline_Content {
         if ($ip_l === '::1' || $ip_l === '::') return false;
         $bin = @inet_pton($ip);
         if ($bin === false) return false;
+        // IPv4 映射地址 ::ffff:a.b.c.d：内嵌的是一个 IPv4，必须按 IPv4 重新校验，
+        // 否则 ::ffff:127.0.0.1 这类地址会绕过检查（cURL 连接时仍走到内网 IPv4）。
+        if (substr($bin, 0, 10) === str_repeat("\x00", 10) && substr($bin, 10, 2) === "\xff\xff") {
+            $v4 = @inet_ntop(substr($bin, 12, 4));
+            return $v4 !== false && (bool)filter_var($v4, FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE);
+        }
+        // 内嵌 IPv4 的过渡前缀：目标实际仍由内嵌 IPv4 决定，一律拒绝。
+        if (substr($bin, 0, 12) === "\x00\x64\xff\x9b\x00\x00\x00\x00\x00\x00\x00\x00") return false; // 64:ff9b::/96 NAT64
+        if (substr($bin, 0, 2) === "\x20\x02") return false; // 2002::/16 6to4
+        if (substr($bin, 0, 4) === "\x20\x01\x00\x00") return false; // 2001::/32 Teredo
         if ((ord($bin[0]) & 0xfe) === 0xfc) return false; // fc00::/7 唯一本地
         if (ord($bin[0]) === 0xfe && (ord($bin[1]) & 0xc0) === 0x80) return false; // fe80::/10
         if (substr($bin, 0, 4) === "\x20\x01\x0d\xb8") return false; // 2001:db8::/32 文档

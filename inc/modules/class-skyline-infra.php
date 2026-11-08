@@ -310,8 +310,11 @@ if (!class_exists('Skyline_OSS_Mod')) {
         }
 
         // WP-Cron 回调：二次校验待删清单，全部通过才删本地文件。
-        // 任一校验失败（COS 对象缺失/大小或 ETag 不一致/本地文件已不在）：
-        // 清除 _sky_oss_synced（让系统不再误以为已同步）、保留本地文件并写错误日志。
+        // 校验失败（COS 对象缺失/大小或 ETag 不一致）：清除 _sky_oss_synced
+        // （让系统不再误以为已同步）、保留本地文件并写错误日志。
+        // 注意：本地文件已不在 ≠ 校验失败——本地文件可能被其他途径删掉，
+        // 此时只核查 COS 对象是否存在；COS 对象完好就视为已同步，只删待删
+        // 清单、不清除 _sky_oss_synced。
         public function purge_pending_deletes($attachment_id) {
             $attachment_id = (int)$attachment_id;
             $pending = get_post_meta($attachment_id, self::PENDING_DELETE_META, true);
@@ -331,7 +334,15 @@ if (!class_exists('Skyline_OSS_Mod')) {
                 $all_ok = true;
                 foreach ($pending['files'] as $entry) {
                     if (!is_array($entry) || empty($entry['path']) || empty($entry['key'])) { $all_ok = false; break; }
-                    if (!file_exists($entry['path']) || !$client->verifyFile($entry['key'], $entry['path'])) { $all_ok = false; break; }
+                    if (file_exists($entry['path'])) {
+                        // 本地文件还在：用强校验（大小 + ETag）核对 COS 对象。
+                        if (!$client->verifyFile($entry['key'], $entry['path'])) { $all_ok = false; break; }
+                    } else {
+                        // 本地文件已不在：verifyFile 需要本地文件做比对，用不上；
+                        // 只核查 COS 对象是否存在。COS 对象完好即视为已同步，
+                        // 这一项算通过（不清除 _sky_oss_synced），仅从待删清单里去掉。
+                        if (!$client->remoteExists($entry['key'])) { $all_ok = false; break; }
+                    }
                 }
 
                 if (!$all_ok) {
@@ -396,6 +407,23 @@ if (!class_exists('Sky_Official_COS_Client')) {
                 'schema'          => 'https',
                 'credentials'     => ['secretId' => trim($ak), 'secretKey' => trim($sk)],
             ]);
+        }
+
+        // 仅核查 COS 上对象是否存在（不依赖本地文件）。
+        // 用于本地文件已缺失时的二次校验：COS 对象在，就说明同步是完好的，
+        // 不能因此清除 _sky_oss_synced——否则前台 URL 会从能打开的 COS 地址
+        // 翻回不存在的本地路径。
+        public function remoteExists($key) {
+            $key = ltrim($key, '/');
+            try {
+                $this->client->headObject([
+                    'Bucket' => $this->bucket,
+                    'Key'    => $key
+                ]);
+                return true;
+            } catch (\Throwable $e) {
+                return false;
+            }
         }
 
         // 强校验：COS 上的对象必须与本地文件逐字节一致才算上传成功。
