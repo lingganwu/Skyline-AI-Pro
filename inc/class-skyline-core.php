@@ -129,7 +129,7 @@ class Skyline_Core {
             'redis_auth' => ['group'=>'speed', 'type'=>'password', 'label'=>'Redis Password'],
             'redis_db' => ['group'=>'speed', 'type'=>'number', 'label'=>'Database', 'default'=>0],
             'redis_ttl' => ['group'=>'speed', 'type'=>'number', 'label'=>'TTL (秒)', 'default'=>3600],
-            'redis_exclude' => ['group'=>'speed', 'type'=>'textarea', 'label'=>'排除缓存路径', 'default'=>"/wp-json/\n/cart/\n/checkout/"],
+            'redis_exclude' => ['group'=>'speed', 'type'=>'textarea', 'label'=>'排除缓存路径', 'default'=>"/wp-json/\n/cart/\n/checkout/\nrest_route\n/feed/\npreview\ns=\namp"],
             'redis_serializer' => ['group'=>'speed', 'type'=>'select', 'label'=>'序列化', 'default'=>'php', 'options' => ['php'=>'PHP Default', 'igbinary'=>'Igbinary']],
             'redis_compression' => ['group'=>'speed', 'type'=>'select', 'label'=>'压缩', 'default'=>'none', 'options' => ['none'=>'None', 'zstd'=>'Zstd', 'lzf'=>'LZF']],
             'turbo_disable_emoji' => ['group'=>'speed', 'type'=>'bool', 'label'=>'禁用 Emoji', 'default'=>false],
@@ -161,8 +161,11 @@ class Skyline_Core {
         $db_opts = get_option('skyline_ai_settings', []);
         $val = $db_opts[$key] ?? ($this->get_config_schema()[$key]['default'] ?? $default);
         
-        set_transient($cache_key, $val, 86400);
-        if ($infra) $infra->cache_set($cache_key, $val, 86400);
+        // 配置缓存 TTL 从 86400 缩到 3600 秒：管理员在后台改了配置，
+        // 最长 1 小时生效，而不是等一天；代价是一天最多多几次 get_option，
+        // 相对 24 小时旧配置的风险可以忽略。
+        set_transient($cache_key, $val, 3600);
+        if ($infra) $infra->cache_set($cache_key, $val, 3600);
         $this->options[$key] = $val;
         
         return $val;
@@ -186,6 +189,18 @@ class Skyline_Core {
     }
 
     public function stat_inc($key, $val=1) {
+        // 统计改走 Redis INCR：旧版每次调用都 get_option + update_option
+        // 写 wp_options，高并发下两个请求读到同一旧值、后写的覆盖先写的，
+        // 统计会丢；而且每次缓存命中都写一次数据库太贵。
+        // Redis 不可用时退回旧的 wp_options 写法（不丢功能）。
+        $infra = class_exists('Skyline_Infra') ? Skyline_Infra::instance() : null;
+        if ($infra && method_exists($infra, 'stat_incr')) {
+            $new = $infra->stat_incr($key, (float)$val);
+            if ($new !== null) {
+                $this->stat_cache[$key] = $new;
+                return;
+            }
+        }
         $stats = get_option('skyline_ai_stats', []);
         if (!is_array($stats)) $stats = [];
         $current = isset($stats[$key]) ? floatval($stats[$key]) : 0;
@@ -196,6 +211,17 @@ class Skyline_Core {
     
     public function stat_get($key) {
         if (isset($this->stat_cache[$key])) return $this->stat_cache[$key];
+        // 看板统计优先读 Redis 计数器（stat_incr 写入的位置），Redis 不可用
+        // 或计数器不存在时退回 wp_options 的旧统计。注意：Redis 计数器是
+        // 从旧 wp_options 值一次性播种的，升级后看板数字不会归零。
+        $infra = class_exists('Skyline_Infra') ? Skyline_Infra::instance() : null;
+        if ($infra && method_exists($infra, 'stat_get_redis')) {
+            $val = $infra->stat_get_redis($key);
+            if ($val !== null) {
+                $this->stat_cache[$key] = $val;
+                return $val;
+            }
+        }
         $stats = get_option('skyline_ai_stats', []);
         if (!is_array($stats)) $stats = [];
         $val = isset($stats[$key]) ? $stats[$key] : 0;
@@ -255,7 +281,8 @@ class Skyline_Core {
 
         $res = $d['choices'][0]['message']['content'] ?? 'API Error: Empty Response';
         if (strpos($res, 'Error') === false && $infra) {
-            $infra->cache_set($hash_key, $res, 3600);
+            // API 缓存 TTL 统一走 redis_ttl，不再写死 3600 秒。
+            $infra->cache_set($hash_key, $res, (int)$this->get_opt('redis_ttl', 3600));
         }
         return $res;
     }
