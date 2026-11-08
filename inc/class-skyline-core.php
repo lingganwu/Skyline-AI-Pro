@@ -18,12 +18,41 @@ class Skyline_Core {
     public function __construct() {
         // 使用 SKY_PATH 常量定义日志路径，更稳定
         $this->log_file = SKY_PATH . 'logs/skyline_ai.log';
-        
+
         $log_dir = dirname($this->log_file);
         if (!file_exists($log_dir)) {
             wp_mkdir_p($log_dir);
+        }
+        // 日志目录防护（nginx 不解析 .htaccess，单靠它等于裸奔）：
+        // 1) .htaccess 继续为 Apache 兜底；2) index.php / index.html 防目录浏览；
+        // 3) 真正起作用的是日志文件名里的本站随机后缀（见 log_token()），不知道
+        // 后缀就猜不到日志 URL。后台日志查看是服务端直接读文件、不拼 URL，所以
+        // 改名不影响看板；旧版无后缀的日志仍按 7 天轮转清理。
+        if (!file_exists($log_dir . '/.htaccess')) {
             @file_put_contents($log_dir . '/.htaccess', 'Deny from all');
         }
+        if (!file_exists($log_dir . '/index.php')) {
+            @file_put_contents($log_dir . '/index.php', "<?php\n// Silence is golden.\n");
+        }
+        if (!file_exists($log_dir . '/index.html')) {
+            @file_put_contents($log_dir . '/index.html', '');
+        }
+    }
+
+    // 本站日志文件名随机后缀（16 位 hex，存于 skyline_ai_log_token）。
+    private function log_token() {
+        $token = get_option('skyline_ai_log_token', '');
+        if (!is_string($token) || !preg_match('/^[0-9a-f]{16}$/', $token)) {
+            $token = function_exists('random_bytes')
+                ? bin2hex(random_bytes(8))
+                : substr(md5(uniqid('sky_', true)), 0, 16);
+            update_option('skyline_ai_log_token', $token, false);
+        }
+        return $token;
+    }
+
+    private function today_log_file() {
+        return dirname($this->log_file) . '/skyline_ai-' . current_time('Ymd') . '-' . $this->log_token() . '.log';
     }
 
     public function setup() {
@@ -141,11 +170,11 @@ class Skyline_Core {
 
     public function log($msg, $type = 'info', $context = 'System') {
         $timestamp = current_time('Y-m-d H:i:s');
-        // 日志轮转：按天切分（skyline_ai-YYYYMMDD.log），只保留最近 7 天，防无限膨胀
+        // 日志轮转：按天切分（skyline_ai-YYYYMMDD-<随机后缀>.log），只保留最近 7 天，防无限膨胀
         $dir = dirname($this->log_file);
-        $today = $dir . '/skyline_ai-' . current_time('Ymd') . '.log';
+        $today = $this->today_log_file();
         if (!file_exists($today) && file_exists($this->log_file)) {
-            @rename($this->log_file, $dir . '/skyline_ai-' . gmdate('Ymd', filemtime($this->log_file)) . '.log');
+            @rename($this->log_file, $dir . '/skyline_ai-' . gmdate('Ymd', filemtime($this->log_file)) . '-' . $this->log_token() . '.log');
         }
         @file_put_contents($today, sprintf("[%s] [%s] [%s] %s\n", $timestamp, strtoupper($type), $context, $msg), FILE_APPEND);
 
@@ -400,8 +429,8 @@ class Skyline_Core {
         foreach (glob($dir . '/skyline_ai*.log') ?: [] as $f) {
             @unlink($f);
         }
-        // 重建空的今日日志文件
-        @file_put_contents($dir . '/skyline_ai-' . current_time('Ymd') . '.log', '');
+        // 重建空的今日日志文件（带随机后缀，与 log() 保持一致）
+        @file_put_contents($this->today_log_file(), '');
         wp_send_json_success('Logs cleared');
     }
 

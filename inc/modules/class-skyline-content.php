@@ -73,6 +73,66 @@ class Skyline_Content {
             return $content;
         }
 
+    // 校验一个 URL 的目标主机是否可公开访问：解析全部 A/AAAA 记录，任一 IP
+    // 是内网/保留地址即拒绝。返回 null 表示通过，返回字符串表示错误原因。
+    // 注意：这只能防“解析时就是内网”的情况，检查与实际请求之间仍存在 DNS
+    // 重绑定（TOCTOU）窗口，无法仅靠应用层彻底消除。
+    private function validate_remote_host($url) {
+        $parsed = wp_parse_url($url);
+        if (!$parsed || empty($parsed['host'])) return '无效的URL格式';
+        $host = strtolower($parsed['host']);
+
+        // 目标本身就是 IP 字面量时直接校验
+        if (filter_var($host, FILTER_VALIDATE_IP)) {
+            return $this->is_public_ip($host) ? null : '不允许访问内部网络地址';
+        }
+
+        $ips = [];
+        if (function_exists('gethostbynamel')) {
+            $v4 = gethostbynamel($host);
+            if (is_array($v4)) $ips = array_merge($ips, $v4);
+        }
+        if (function_exists('dns_get_record')) {
+            $aaaa = @dns_get_record($host, DNS_AAAA);
+            if (is_array($aaaa)) {
+                foreach ($aaaa as $rec) {
+                    if (!empty($rec['ipv6'])) $ips[] = $rec['ipv6'];
+                }
+            }
+        }
+        if (empty($ips)) return '域名解析失败';
+        foreach ($ips as $ip) {
+            if (!$this->is_public_ip($ip)) return '不允许访问内部网络地址';
+        }
+        return null;
+    }
+
+    private function is_public_ip($ip) {
+        if (!filter_var($ip, FILTER_VALIDATE_IP)) return false;
+        if (filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4)) {
+            return (bool)filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE);
+        }
+        // IPv6：显式拒绝回环、未指定、链路本地、唯一本地、文档地址
+        $ip_l = strtolower($ip);
+        if ($ip_l === '::1' || $ip_l === '::') return false;
+        $bin = @inet_pton($ip);
+        if ($bin === false) return false;
+        // IPv4 映射地址 ::ffff:a.b.c.d：内嵌的是一个 IPv4，必须按 IPv4 重新校验，
+        // 否则 ::ffff:127.0.0.1 这类地址会绕过检查（cURL 连接时仍走到内网 IPv4）。
+        if (substr($bin, 0, 10) === str_repeat("\x00", 10) && substr($bin, 10, 2) === "\xff\xff") {
+            $v4 = @inet_ntop(substr($bin, 12, 4));
+            return $v4 !== false && (bool)filter_var($v4, FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE);
+        }
+        // 内嵌 IPv4 的过渡前缀：目标实际仍由内嵌 IPv4 决定，一律拒绝。
+        if (substr($bin, 0, 12) === "\x00\x64\xff\x9b\x00\x00\x00\x00\x00\x00\x00\x00") return false; // 64:ff9b::/96 NAT64
+        if (substr($bin, 0, 2) === "\x20\x02") return false; // 2002::/16 6to4
+        if (substr($bin, 0, 4) === "\x20\x01\x00\x00") return false; // 2001::/32 Teredo
+        if ((ord($bin[0]) & 0xfe) === 0xfc) return false; // fc00::/7 唯一本地
+        if (ord($bin[0]) === 0xfe && (ord($bin[1]) & 0xc0) === 0x80) return false; // fe80::/10
+        if (substr($bin, 0, 4) === "\x20\x01\x0d\xb8") return false; // 2001:db8::/32 文档
+        return true;
+    }
+
     private function download_image($url, $pid) {
         if (!function_exists('wp_generate_attachment_metadata')) {
             require_once(ABSPATH . 'wp-admin/includes/image.php');
@@ -101,28 +161,50 @@ class Skyline_Content {
             return ['id' => $global_id, 'status' => 'cached_global'];
         }
 
-        $parsed = wp_parse_url($url);
-        if (!$parsed || !isset($parsed['host'])) return ['error' => '无效的URL格式'];
-        $host = strtolower($parsed['host']);
-        $ip = gethostbyname($host);
-        if ($ip && !filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE)) {
-            return ['error' => '不允许访问内部网络地址'];
-        }
+        // SSRF 防护：每次请求前都校验目标主机解析出的全部 IP（A + AAAA 记录），
+        // 拒绝内网/保留地址。之前只用 gethostbyname() 查一个 IPv4，且 wp_remote_get
+        // 默认跟随重定向——外站回 302 跳到 169.254.169.254 或内网地址时检查完全失效。
+        $err = $this->validate_remote_host($url);
+        if ($err) return ['error' => $err];
 
         $args = [
-            'timeout' => 25, 
+            'timeout' => 25,
             'sslverify' => $core->get_opt('spider_ssl_verify', true),
+            'redirection' => 0, // 不自动跟随重定向，改为下面手动处理，每跳都重新校验目标 IP
             'user-agent' => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
         ];
-        
+
         if($core->get_opt('spider_allow_wechat') && (strpos($url,'qpic.cn')!==false || strpos($url,'mmbiz')!==false)) {
-            $args['headers']['Referer'] = 'https://mp.weixin.qq.com/'; 
+            $args['headers']['Referer'] = 'https://mp.weixin.qq.com/';
         } else {
-            $args['headers']['Referer'] = $url; 
+            $args['headers']['Referer'] = $url;
         }
 
-        $res = wp_remote_get($url, $args);
-        if(is_wp_error($res)) return ['error' => '网络错误: ' . $res->get_error_message()];
+        // 手动跟随重定向（最多 3 跳），每一跳都重新校验目标主机，防止 302 跳内网。
+        $res = null;
+        $current_url = $url;
+        for ($hop = 0; $hop <= 3; $hop++) {
+            $res = wp_remote_get($current_url, $args);
+            if(is_wp_error($res)) return ['error' => '网络错误: ' . $res->get_error_message()];
+            $code = wp_remote_retrieve_response_code($res);
+            if ($code >= 300 && $code < 400) {
+                $location = trim((string)wp_remote_retrieve_header($res, 'location'));
+                if ($location === '' || $hop === 3) return ['error' => "HTTP状态 $code"];
+                // 相对 Location 按当前 URL 补全（协议相对地址 //host/path 只补 scheme）
+                if (strpos($location, '//') === 0) {
+                    $base = wp_parse_url($current_url);
+                    $location = ($base['scheme'] ?? 'https') . ':' . $location;
+                } elseif (!preg_match('#^https?://#i', $location)) {
+                    $base = wp_parse_url($current_url);
+                    $location = ($base['scheme'] ?? 'https') . '://' . ($base['host'] ?? '') . (strpos($location, '/') === 0 ? $location : '/' . $location);
+                }
+                $err = $this->validate_remote_host($location);
+                if ($err) return ['error' => $err];
+                $current_url = $location;
+                continue;
+            }
+            break;
+        }
         $code = wp_remote_retrieve_response_code($res);
         if($code != 200) return ['error' => "HTTP状态 $code"];
 
@@ -176,16 +258,34 @@ class Skyline_Content {
 
         $site_domain = parse_url(get_site_url(), PHP_URL_HOST);
         $success = 0;
-        
+
         $core = Skyline_Core::instance();
         $max_img = intval($core->get_opt('spider_max_img', 20));
         $processed_count = 0;
 
+        // 已同步到 COS 的图片不再当作外站图：否则每次保存文章都会把 COS 图重新
+        // 下载回本地、重新上传 COS，白白再走一遍“上传→删本地”循环。
+        $oss_hosts = [];
+        if ($core->get_opt('oss_enable')) {
+            $oss_domain = trim((string)$core->get_opt('oss_domain'));
+            if ($oss_domain !== '') {
+                $h = parse_url($oss_domain, PHP_URL_HOST);
+                if (!$h) $h = preg_replace('#^https?://#i', '', $oss_domain);
+                $h = strtolower(trim(explode('/', $h)[0]));
+                if ($h !== '') $oss_hosts[] = $h;
+            }
+            $bucket = trim((string)$core->get_opt('oss_bucket'));
+            $endpoint = trim((string)$core->get_opt('oss_endpoint'));
+            if ($bucket !== '' && $endpoint !== '') $oss_hosts[] = strtolower($bucket . '.' . $endpoint);
+        }
+
         foreach($m[2] as $url_raw) {
             if ($processed_count >= $max_img) break;
-            
+
             $url_real = html_entity_decode($url_raw);
             if(strpos($url_real, $site_domain)!==false || strpos($url_real, 'data:image')!==false) continue;
+            $url_host = strtolower(parse_url($url_real, PHP_URL_HOST) ?: '');
+            if ($url_host !== '' && in_array($url_host, $oss_hosts, true)) continue;
             
             $res = $this->download_image($url_real, $pid);
             if(isset($res['id'])) {
@@ -225,9 +325,41 @@ class Skyline_Content {
         global $wpdb;
 
         if ($do_polish) {
-            $prompt = "请修正以下文章内容的错别字、标点符号错误和语病，保持原意不变，直接返回修正后的 Markdown 内容：\n\n" . mb_substr($post->post_content, 0, 3000);
-            $polished = $core->call_api([['role'=>'user', 'content'=>$prompt]]);
-            if ($polished && stripos($polished, 'Error') === false && strlen($polished) > 100) {
+            // 之前只把前 3000 字发给 AI，却用返回结果替换全文，3000 字以后的正文
+            // 会被直接丢掉，且写库绕过 wp_update_post、不产生修订版，丢了找不回来。
+            $full_content = $post->post_content;
+            $content_len = mb_strlen($full_content);
+            $polished = false;
+
+            if ($content_len <= 3000) {
+                $prompt = "请修正以下文章内容的错别字、标点符号错误和语病，保持原意不变，直接返回修正后的 Markdown 内容：\n\n" . $full_content;
+                $res = $core->call_api([['role'=>'user', 'content'=>$prompt]]);
+                if ($res && stripos($res, 'Error') === false && strlen($res) > 100) $polished = $res;
+            } else {
+                // 全文超过 3000 字：按 3000 字分段润色，全部成功才拼接替换；
+                // 任一段失败则不替换正文（只记日志），避免用半截结果覆盖全文。
+                $chunks = [];
+                for ($offset = 0; $offset < $content_len; $offset += 3000) {
+                    $chunks[] = mb_substr($full_content, $offset, 3000);
+                }
+                $polished_parts = [];
+                $polish_failed = false;
+                foreach ($chunks as $chunk) {
+                    $prompt = "请修正以下文章内容的错别字、标点符号错误和语病，保持原意不变，直接返回修正后的 Markdown 内容：\n\n" . $chunk;
+                    $part = $core->call_api([['role'=>'user', 'content'=>$prompt]]);
+                    if (!$part || stripos($part, 'Error') !== false || strlen($part) < 10) { $polish_failed = true; break; }
+                    $polished_parts[] = $part;
+                }
+                if (!$polish_failed && !empty($polished_parts)) {
+                    $polished = implode('', $polished_parts);
+                } else {
+                    $core->log("AI 润色分段失败 [$pid]，已跳过正文替换", 'warn', 'SEO');
+                }
+            }
+
+            if ($polished !== false) {
+                // 替换前先留一个修订版，润色结果异常时可从修订版恢复。
+                if (function_exists('wp_save_post_revision')) wp_save_post_revision($pid);
                 $updates['post_content'] = $polished;
                 $core->log("AI 润色成功 [$pid]", 'info', 'SEO');
             }
