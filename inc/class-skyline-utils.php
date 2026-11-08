@@ -86,11 +86,14 @@ class Skyline_Utils {
 
         global $wpdb;
         // 清理所有 7 天前的旧备份（之前只删 1 条，会无限堆积）
+        // 注意：option 名是 'skyline_backup_' . gmdate('Ymd_His')，前缀 'skyline_backup_'
+        // 只有 15 个字符，日期从第 16 位开始（之前误写成第 18 位，截出来的是
+        // '261108_1' 这类字符串，CAST 后恒小于 cutoff，每次备份都会删掉全部历史备份）。
         $cutoff = gmdate('Ymd', time() - 7 * 86400);
         $wpdb->query($wpdb->prepare(
             "DELETE FROM {$wpdb->options}
              WHERE option_name LIKE %s
-               AND CAST(SUBSTRING(option_name, 18, 8) AS UNSIGNED) < %d",
+               AND CAST(SUBSTRING(option_name, 16, 8) AS UNSIGNED) < %d",
             $wpdb->esc_like('skyline_backup_') . '%',
             $cutoff
         ));
