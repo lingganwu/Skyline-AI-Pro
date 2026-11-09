@@ -4,7 +4,7 @@ Tags: ai, deepseek, content-automation, seo, productivity
 Requires at least: 5.8
 Tested up to: 7.1
 Requires PHP: 7.4
-Stable tag: 2.2.0
+Stable tag: 2.2.1
 License: GPLv2 or later
 License URI: http://www.gnu.org/licenses/gpl-2.0.html
 
@@ -30,6 +30,14 @@ Skyline AI Pro 是一款为专业内容创作者设计的 WordPress 智能中台
 3. Go to the 'Skyline Pro' settings page to configure your API keys.
 
 == Changelog ==
+
+= 2.2.1 =
+* 新功能：批量进度实时显示——WebP 转换、图片同步、SEO 补全共用一个批量进度组件：发每批前显示“正在处理第 N/M 批”，停止立即中断在途请求；失败与跳过的文章逐条列出原因，不再只写“补全失败”
+* 新功能：独立的“生图 API Key”（api_img_key），留空时跟随主 API Key；对话与生图分属不同厂商时可各用各的密钥，整站切同一家时留空即可
+* 修复：浏览器自动填充不再污染配置——密码框默认禁用（勾选“更改”才启用提交）、autocomplete 提示收紧；URL 字段提交无 scheme 的假值时拒绝保存并保留原值
+* 修复：厂商切换不再清空生图配置——切“自定义”时不改任何已存值，切无生图模型的厂商时只清空生图模型名，生图根地址与生图密钥保留
+* 修复：对话端点支持只填裸根地址（如 https://www.lgwu.de:3001/v1，以 /v1 结尾时自动补 /chat/completions）；生图根地址留空时界面显示真实生效值
+* 优化：Prompt 模板库移到“最近聊天记录”卡片正上方；S1 成本说明的全站篇数改为动态取数
 
 = 2.2.0 =
 * 新功能：API Endpoint 改厂商预设下拉——硅基流动、OpenRouter、DeepSeek、OpenAI、智谱AI、Moonshot、通义千问，末位自定义；选定厂商自动填入地址，对话模型、绘图模型联动列出该厂商可用模型（可打字下拉，也能手填新模型）；已存配置按 Endpoint host 反推厂商，未知地址落自定义并保留原值
