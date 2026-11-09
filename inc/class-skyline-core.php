@@ -743,8 +743,8 @@ class Skyline_Core {
             . ($has_img
                 ? '<img src="' . esc_url($img_url) . '" alt="AI Assistant">'
                 : '<span class="sky-waifu-fallback" role="img" aria-label="AI Assistant">💬</span>')
-            . '</div>
-        <div id="sky-waifu-tips" class="show">你好！我是灵感屋 AI 助手，有什么可以帮您？</div>
+            . '<div id="sky-waifu-tips" class="show">你好！我是灵感屋 AI 助手，有什么可以帮您？</div>
+        </div>
         <div id="sky-chat-box">
             <div class="sky-head">'
                 . $head_avatar .
