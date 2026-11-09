@@ -1233,8 +1233,12 @@ if (!class_exists('Skyline_OSS_Mod')) {
 
         // M22：把本地文件移入回收站（wp-content/uploads/.trash/），返回
         // 移入后的路径，失败返回 false。回收站就在 uploads 目录内，与原
-        // 文件同一文件系统，rename 是同盘移动、不走跨盘复制；同名时加
-        // 时间戳 + 哈希后缀，不覆盖已有文件。
+        // 文件同一文件系统，rename 是同盘移动、不走跨盘复制。
+        // N-D1 安全：uploads/ 是 web 直服目录，回收站文件名必须不可猜——
+        // 每次移入都加 16 位随机 token（不知道 token 就拼不出 URL）；再按
+        // 日志目录的做法补 .htaccess + index.php + index.html 三件套
+        // （nginx 不解析 .htaccess，真正起作用的是 token，三件套只防
+        // Apache 与目录浏览）。cleanup_trash() 会跳过这三个保护文件。
         private function trash_local_file($path) {
             $upload_dir = function_exists('wp_upload_dir') ? wp_upload_dir() : null;
             $basedir = (is_array($upload_dir) && !empty($upload_dir['basedir'])) ? $upload_dir['basedir'] : dirname($path);
@@ -1247,14 +1251,29 @@ if (!class_exists('Skyline_OSS_Mod')) {
                 }
             }
             if (!is_dir($trash_dir)) return false;
-            $base = basename($path);
-            $dest = $trash_dir . '/' . $base;
-            if (file_exists($dest)) {
-                $stem = pathinfo($base, PATHINFO_FILENAME);
-                $ext = pathinfo($base, PATHINFO_EXTENSION);
-                $dest = $trash_dir . '/' . $stem . '-' . time() . '-' . substr(md5($path . microtime(true)), 0, 6)
-                    . ($ext !== '' ? '.' . $ext : '');
+            // 回收站目录防护文件（缺失时补写；cleanup_trash 会跳过它们）。
+            if (!file_exists($trash_dir . '/.htaccess')) {
+                @file_put_contents($trash_dir . '/.htaccess', 'Deny from all');
             }
+            if (!file_exists($trash_dir . '/index.php')) {
+                @file_put_contents($trash_dir . '/index.php', "<?php\n// Silence is golden.\n");
+            }
+            if (!file_exists($trash_dir . '/index.html')) {
+                @file_put_contents($trash_dir . '/index.html', '');
+            }
+            // 文件名恒加随机 token：原名直接可用是 N-D1 的根因。
+            // 64 位随机空间下重名可忽略；万一 rename 失败返回 false，
+            // 调用方把该项留入待重试清单，文件不会丢。
+            $base = basename($path);
+            $stem = pathinfo($base, PATHINFO_FILENAME);
+            $ext = pathinfo($base, PATHINFO_EXTENSION);
+            try {
+                $token = bin2hex(random_bytes(8));
+            } catch (Throwable $e) {
+                $token = substr(md5($path . microtime(true)), 0, 16);
+            }
+            $dest = $trash_dir . '/' . $stem . '-' . $token
+                . ($ext !== '' ? '.' . $ext : '');
             if (!@rename($path, $dest)) return false;
             return $dest;
         }
@@ -1270,6 +1289,10 @@ if (!class_exists('Skyline_OSS_Mod')) {
             $removed = 0;
             foreach ((array)glob($trash_dir . '/*') as $f) {
                 if (!is_file($f)) continue;
+                // N-D1：跳过回收站自身的保护文件（index.php/index.html；
+                // .htaccess 是点文件，本来就不会被 glob('*') 命中）。
+                $bn = basename($f);
+                if ($bn === 'index.php' || $bn === 'index.html') continue;
                 $mtime = filemtime($f);
                 if ($mtime !== false && $mtime < $cutoff && @unlink($f)) $removed++;
             }
