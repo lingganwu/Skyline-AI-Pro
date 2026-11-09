@@ -23,25 +23,33 @@ jobs:
 
       - name: 🐞 Parse failed runs
         id: parse_failed
+        env:
+          # 跨 step 不能用 shell 变量：上一步的输出必须经 steps 上下文传入，
+          # 旧代码引用的 $response 在全新 shell 里恒为空，failed_ids 也恒为空。
+          RESPONSE: ${{ steps.fetch_runs.outputs.response }}
         run: |
           # Extract failed run IDs
-          FAILED_IDS=$(echo "$response" | jq -r '.workflow_runs[] | select(.conclusion=="failure" or .conclusion=="cancelled") | .id' | tr '\n' ' ')
+          FAILED_IDS=$(echo "$RESPONSE" | jq -r '.workflow_runs[] | select(.conclusion=="failure" or .conclusion=="cancelled") | .id' | tr '\n' ' ')
           echo "failed_ids=$FAILED_IDS" >> $GITHUB_OUTPUT
 
       - name: ♻️ Retry failed workflows
-        if: env.failed_ids != ''
+        if: steps.parse_failed.outputs.failed_ids != ''
+        env:
+          FAILED_IDS: ${{ steps.parse_failed.outputs.failed_ids }}
         run: |
-          for ID in $failed_ids; do
+          for ID in $FAILED_IDS; do
             echo "🔁 Retrying run $ID"
             curl -s -X POST               -H "Authorization: token $GITHUB_TOKEN"               "https://api.github.com/repos/$REPO_NAME/actions/runs/$ID/rerun"               -o /dev/null
           done
 
       - name: 📝 Create issue for manual check if needed
-        if: env.failed_ids != ''
-        uses: actions/github-script@v6
+        if: steps.parse_failed.outputs.failed_ids != ''
+        uses: actions/github-script@v9
+        env:
+          FAILED_IDS: ${{ steps.parse_failed.outputs.failed_ids }}
         with:
           script: |
-            const failedIds = process.env.failed_ids.split(' ').filter(Boolean);
+            const failedIds = process.env.FAILED_IDS.split(' ').filter(Boolean);
             if (failedIds.length > 0) {
               const issueTitle = `⚠️ Auto-Heal CI: ${failedIds.length} workflow(s) failed`;
               const issueBody = `The following workflow runs failed and were automatically retried:\n${failedIds.map(id => `- https://github.com/${process.env.GITHUB_REPOSITORY}/actions/runs/${id}`).join('\n')}`;

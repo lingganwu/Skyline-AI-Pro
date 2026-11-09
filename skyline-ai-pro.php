@@ -1,20 +1,15 @@
 <?php
 /*
 Plugin Name: Skyline AI Pro
-Description: 灵感屋(lgwu.net) 专属智能运营中台。集成 DeepSeek V3、可视化无感同步系统、智能去水印、AI 润色与 Redis 智能缓存。[V2.0.1 安全加固 + 多层缓存]
-Version: 2.0.1
+Description: 灵感屋(lgwu.net) 专属智能运营中台。集成 DeepSeek V3、可视化无感同步系统、智能去水印、AI 润色与 Redis 智能缓存。[V2.1.0 聊天面板美化 + WebP + 审核 61 项全修]
+Version: 2.1.0
 Author:      LingGanWu
 Text Domain: skyline-ai-pro
 */
 
 if (!defined('ABSPATH')) exit;
 
-define('SKY_VERSION', '2.0.0');
-
-// Batch Processing Settings
-define('SKY_BATCH_SIZE', 10);
-define('SKY_MAX_RETRIES', 3);
-define('SKY_CACHE_TIMEOUT', 3600); // 1 hour
+define('SKY_VERSION', '2.1.0');
 
 define('SKY_PATH', plugin_dir_path(__FILE__));
 define('SKY_URL', plugin_dir_url(__FILE__));
@@ -66,23 +61,14 @@ if (!function_exists('skyline_ai_assess_quality')) {
 if (!function_exists('skyline_batch_process')) {
     function skyline_batch_process($posts, $model = 'deepseek-v3') { return Skyline_Utils::batch_process($posts, $model); }
 }
-if (!function_exists('skyline_export_data')) {
-    function skyline_export_data($format = 'json', $filters = []) { return Skyline_Utils::export_data($format, $filters); }
-}
 if (!function_exists('skyline_create_backup')) {
     function skyline_create_backup() { return Skyline_Utils::create_backup(); }
 }
 if (!function_exists('skyline_translate_content')) {
     function skyline_translate_content($content, $target_lang = 'en') { return Skyline_Utils::translate_content($content, $target_lang); }
 }
-if (!function_exists('skyline_deduplicate_content')) {
-    function skyline_deduplicate_content($content) { return Skyline_Utils::deduplicate_content($content); }
-}
 if (!function_exists('skyline_manage_cache')) {
     function skyline_manage_cache() { return Skyline_Utils::manage_cache(); }
-}
-if (!function_exists('skyline_webhook_handler')) {
-    function skyline_webhook_handler($data) { return Skyline_Utils::webhook_handler($data); }
 }
 if (!function_exists('skyline_help_docs')) {
     function skyline_help_docs() { return Skyline_Utils::get_help_docs(); }

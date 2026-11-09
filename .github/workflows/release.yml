@@ -12,7 +12,7 @@ jobs:
     
     steps:
       - name: 检出代码 (Checkout code)
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: 配置 PHP 环境 (Setup PHP)
         uses: shivammathur/setup-php@v2

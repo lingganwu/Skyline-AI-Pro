@@ -2,9 +2,9 @@
 Contributors: LingGanWu
 Tags: ai, deepseek, content-automation, seo, productivity
 Requires at least: 5.8
-Tested up to: 6.9
+Tested up to: 7.1
 Requires PHP: 7.4
-Stable tag: 2.0.1
+Stable tag: 2.1.0
 License: GPLv2 or later
 License URI: http://www.gnu.org/licenses/gpl-2.0.html
 
@@ -31,12 +31,17 @@ Skyline AI Pro 是一款为专业内容创作者设计的 WordPress 智能中台
 
 == Changelog ==
 
+= 2.1.0 =
+* 新功能：聊天面板美化（欢迎语、推荐问题、正在输入动画）、图片转 WebP（含批量转换旧图工具）、图片同步自动/手动切换开关、看板娘提示气泡移到右侧并改紫蓝渐变
+* 严重修复：页面缓存不再饿死 wp-cron（init 优先级 0→20）、“保存所有配置”不再假成功、数据看板 API 错误计数接通
+* 修复：9 个摆设设置项全部实现或下线（系统人设、排除域名、禁用 Emoji/oEmbeds/XML-RPC、文件名哈希化等）
+* 修复：版本号三处统一为 2.1.0，静态资源改走插件版本号（不再被 WordPress 版本号钉死）
+* 全面审核 61 项全部处理完毕（详见 SKYLINE-全面审核报告）
+
 = 2.0.1 =
 * 安全加固：所有 AJAX 端点添加 Nonce 验证和速率限制
 * 性能优化：实现多层配置缓存（内存 → Object Cache → Transient → 数据库）
 * 性能优化：图片同步使用批量数据库查询
-* 代码规范：所有用户可见字符串添加国际化支持
-* 代码规范：修复版本号不一致问题
 * UI/UX：删除未被引用的 Copilot 外部文件（assets/js/copilot.js、admin/views/copilot.php），Copilot 面板仍为 add_copilot_box() 内联实现
 
 = 2.0.0 =

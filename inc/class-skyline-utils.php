@@ -3,7 +3,8 @@ if (!defined('ABSPATH')) exit;
 
 class Skyline_Utils {
     public static function sdk_integration() {
-        return "SDK Integration verified and active.";
+        // 未实现：不要返回假成功。SDK 集成尚未接入，调用方应按 WP_Error 处理。
+        return new WP_Error('not_implemented', 'SDK 集成尚未实现。');
     }
 
     /**
@@ -55,29 +56,24 @@ class Skyline_Utils {
         return $results;
     }
 
-    public static function export_data($format = 'json', $filters = []) {
-        $data = get_option('sky_ai_data', []);
-        switch ($format) {
-            case 'json': return json_encode($data, JSON_PRETTY_PRINT);
-            case 'csv': return self::convert_to_csv($data);
-            default: return json_encode($data);
-        }
-    }
-
-    private static function convert_to_csv($data) {
-        if (empty($data)) return '';
-        $output = fopen('php://temp', 'r+');
-        fputcsv($output, array_keys(reset($data)));
-        foreach ($data as $row) fputcsv($output, $row);
-        rewind($output);
-        $csv = stream_get_contents($output);
-        fclose($output);
-        return $csv;
-    }
-
     public static function create_backup() {
+        $settings = get_option('skyline_ai_settings', []);
+        // 备份不存密钥：api_key / oss_ak / oss_sk / redis_auth 是明文凭据，
+        // 写进 skyline_backup_* option 会随数据库备份或 option 导出外泄。
+        // 备份里只记被剔除的键名（不记值）；用备份恢复后需在设置页重新填写这几项。
+        $sensitive_keys = ['api_key', 'oss_ak', 'oss_sk', 'redis_auth'];
+        $removed_keys = [];
+        if (is_array($settings)) {
+            foreach ($sensitive_keys as $k) {
+                if (array_key_exists($k, $settings)) {
+                    unset($settings[$k]);
+                    $removed_keys[] = $k;
+                }
+            }
+        }
         $backup_data = [
-            'settings'  => get_option('skyline_ai_settings', []),
+            'settings'              => $settings,
+            'settings_keys_removed' => $removed_keys,
             'prompts'   => get_option('skyline_prompt_library', []),
             'stats'     => get_option('skyline_ai_stats', []),
             'data'      => get_option('sky_ai_data', []),
@@ -85,10 +81,11 @@ class Skyline_Utils {
         ];
 
         global $wpdb;
-        // 清理所有 7 天前的旧备份（之前只删 1 条，会无限堆积）
-        // 注意：option 名是 'skyline_backup_' . gmdate('Ymd_His')，前缀 'skyline_backup_'
-        // 只有 15 个字符，日期从第 16 位开始（之前误写成第 18 位，截出来的是
-        // '261108_1' 这类字符串，CAST 后恒小于 cutoff，每次备份都会删掉全部历史备份）。
+        // 清理 7 天前的旧备份。注意：旧代码 SUBSTRING(option_name, 18, 8) 的
+        // 偏移是错的——前缀 'skyline_backup_' 只有 15 个字符，日期从第 16 位
+        // 开始，之前误写成第 18 位，截出来的是 '261108_1' 这类字符串，CAST
+        // 后恒小于 cutoff，所以每次备份都会删掉全部历史备份；现已修正为
+        // 从第 16 位截 8 位，只删 7 天前的旧备份。
         $cutoff = gmdate('Ymd', time() - 7 * 86400);
         $wpdb->query($wpdb->prepare(
             "DELETE FROM {$wpdb->options}
@@ -103,12 +100,8 @@ class Skyline_Utils {
     }
 
     public static function translate_content($content, $target_lang = 'en') {
-        return "Translation feature pending API integration.";
-    }
-
-    public static function deduplicate_content($content) {
-        $existing = get_posts(['s' => $content, 'posts_per_page' => 1]);
-        return empty($existing);
+        // 未实现：不要返回假成功。翻译功能尚未接入 API，调用方应按 WP_Error 处理。
+        return new WP_Error('not_implemented', '翻译功能尚未实现。');
     }
 
     public static function manage_cache() {
@@ -116,12 +109,9 @@ class Skyline_Utils {
         return true;
     }
 
-    public static function webhook_handler($data) {
-        $url = get_option('sky_webhook_url');
-        if ($url) wp_remote_post($url, ['body' => json_encode($data), 'headers' => ['Content-Type' => 'application/json']]);
-    }
-
     public static function get_help_docs() {
-        return "Skyline AI Pro Documentation: Please refer to the official README.txt for details.";
+        // 未实现：不要返回一句指向 README 的假成功。帮助文档尚未接入，
+        // 调用方应按 WP_Error 处理（正式文档见 readme.txt）。
+        return new WP_Error('not_implemented', '帮助文档尚未实现，请查看 readme.txt。');
     }
 }

@@ -2,6 +2,9 @@
 if (!defined('ABSPATH')) exit;
 
 class Skyline_Content {
+    // M5：爬虫下载单张图片的大小上限（10MB）。超过直接拒绝，不读进内存。
+    private const SPIDER_MAX_IMAGE_BYTES = 10485760;
+
     public function __construct() {
         add_action('save_post', [$this, 'trigger_async_tasks'], 20, 2);
         add_action('skyline_async_spider', [$this, 'auto_spider']);
@@ -40,37 +43,61 @@ class Skyline_Content {
         }
     }
 
+    // M7/M14：内链替换的公共方法，auto_internal_links()（前台 the_content）
+    // 与 ajax_link_now()（编辑器“自动内链（写回）”按钮）两处共用。
+    // 切分后替换：只在标签外的纯文本段里替换，且跳过已在 <a>…</a> 内的
+    // 文本，避免产出 <a><a> 嵌套链接（旧 lookahead 正则的毛病）。
+    private function link_keyword_in_parts(array $parts, $kw, $url) {
+        $in_a = false;
+        foreach ($parts as $i => $part) {
+            if ($part === '') continue;
+            if ($part[0] === '<') {
+                if (preg_match('#^<\s*a[\s>]#i', $part)) $in_a = true;
+                elseif (preg_match('#^<\s*/\s*a\s*>#i', $part)) $in_a = false;
+                continue;
+            }
+            if ($in_a) continue;
+            if (mb_stripos($part, $kw) === false) continue;
+            // M14①：/i 大小写不敏感查找 + preg_replace_callback 保留原文
+            // 大小写（链接文字用原文匹配到的写法，不用关键词的写法）；
+            // M7：title 用 esc_attr() 转义，关键词里的引号不再破坏属性。
+            // M14②：补 rel="noopener"（与 target="_blank" 一起）。
+            $new = preg_replace_callback(
+                '/' . preg_quote($kw, '/') . '/iu',
+                function ($m) use ($url) {
+                    return '<a href="' . esc_url($url) . '" title="' . esc_attr($m[0]) . '" target="_blank" rel="noopener" class="sky-link">' . $m[0] . '</a>';
+                },
+                $part,
+                1
+            );
+            if ($new !== null && $new !== $part) {
+                $parts[$i] = $new;
+                return [$parts, 1];
+            }
+            break; // 每个关键词最多替换 1 处（与旧行为一致）
+        }
+        return [$parts, 0];
+    }
+
     public function auto_internal_links($content) {
             $core = Skyline_Core::instance();
             if(!$core->get_opt('link_enable') || is_admin()) return $content;
             $links_str = $core->get_opt('link_pairs');
             if(!$links_str) return $content;
 
+            // M14③：全文只切分一次，循环关键词复用同一份切分结果——
+            // 旧写法每个关键词都对全文做一次 preg_split，长文渲染变慢。
+            $parts = preg_split('/(<[^>]+>)/u', $content, -1, PREG_SPLIT_DELIM_CAPTURE);
+            if (!is_array($parts)) return $content;
             $pairs = explode("\n", $links_str);
             foreach($pairs as $pair) {
                 $p = explode('|', trim($pair));
                 if(count($p) < 2) continue;
                 $kw = trim($p[0]); $url = trim($p[1]);
                 if(!$kw || !$url) continue;
-
-                // 修复：只在"标签外的纯文本段"里替换，避免把已链接的关键词再次包一层
-                // （原 regex 的 lookahead 形同虚设，会产出 <a><a> 嵌套链接）
-                $parts = preg_split('/(<[^>]+>)/u', $content, -1, PREG_SPLIT_DELIM_CAPTURE);
-                foreach ($parts as $i => $part) {
-                    if ($part === '' || $part[0] === '<') continue;
-                    if (mb_stripos($part, $kw) !== false) {
-                        $parts[$i] = preg_replace(
-                            '/' . preg_quote($kw, '/') . '/u',
-                            '<a href="' . esc_url($url) . '" title="' . esc_attr($kw) . '" target="_blank" class="sky-link">' . $kw . '</a>',
-                            $part,
-                            1
-                        );
-                        break; // 每个关键词最多替换 1 处
-                    }
-                }
-                $content = implode('', $parts);
+                list($parts) = $this->link_keyword_in_parts($parts, $kw, $url);
             }
-            return $content;
+            return implode('', $parts);
         }
 
     // 校验一个 URL 的目标主机是否可公开访问：解析全部 A/AAAA 记录，任一 IP
@@ -92,14 +119,13 @@ class Skyline_Content {
             $v4 = gethostbynamel($host);
             if (is_array($v4)) $ips = array_merge($ips, $v4);
         }
-        if (function_exists('dns_get_record')) {
-            $aaaa = @dns_get_record($host, DNS_AAAA);
-            if (is_array($aaaa)) {
-                foreach ($aaaa as $rec) {
-                    if (!empty($rec['ipv6'])) $ips[] = $rec['ipv6'];
-                }
-            }
-        }
+        // L32⑤：AAAA 走 CNAME 链解析（见 resolve_aaaa_chain）：$host 本身
+        // 只有 CNAME 记录时，AAAA 在 CNAME 目标上，直接查 $host 的 AAAA
+        // 查不到，会漏判目标的内网 AAAA。链上每一跳的 AAAA 都收集到 $ips，
+        // 下面统一经 is_public_ip() 校验，任一内网地址即拒绝。
+        $aaaa = $this->resolve_aaaa_chain($host);
+        if ($aaaa === null) return '域名解析失败'; // CNAME 循环
+        $ips = array_merge($ips, $aaaa);
         if (empty($ips)) return '域名解析失败';
         foreach ($ips as $ip) {
             if (!$this->is_public_ip($ip)) return '不允许访问内部网络地址';
@@ -107,31 +133,94 @@ class Skyline_Content {
         return null;
     }
 
+    // DNS 查询的可替身入口：生产走 dns_get_record；测试用子类覆盖本
+    // 方法注入脚本化记录——全局命名空间的 dns_get_record 是内置函数，
+    // 无法在测试里重定义，故走这层间接调用。返回 dns_get_record 的
+    // 原样结果（记录数组 / false），调用方按 is_array 判断。
+    protected function dns_query($host, $type) {
+        if (!function_exists('dns_get_record')) return false;
+        return @dns_get_record($host, $type);
+    }
+
+    // L32⑤：沿 CNAME 链查 AAAA。dns_get_record($host, DNS_AAAA) 不跟
+    // CNAME：$host 本身只有 CNAME 记录时，AAAA 在 CNAME 目标上，直接
+    // 查 $host 的 AAAA 查不到目标的内网 AAAA，会漏判。逐跳查 AAAA 再
+    // 查 CNAME、跳到目标主机继续查（上限 5 跳，含 $host 本身；目标
+    // 主机名统一小写、去尾点再比对，防循环）。返回收集到的全部 IPv6
+    // 地址数组（调用方逐个经 is_public_ip() 校验）；检测到 CNAME 循环
+    // 时返回 null（拒绝，不死循环）。
+    // 注意：A 记录不用走这条链——gethostbynamel() 由系统解析器跟 CNAME，
+    // 本来就能拿到目标的 A 记录，只有 AAAA 有这个缺口。
+    // 诚实记录：本机无法验证真 DNS（本机 dns_get_record /
+    // gethostbynamel 均返回 false），该路径只用测试替身验证过，真 DNS
+    // 行为须在服务器上核对。
+    private function resolve_aaaa_chain($host) {
+        $ips = [];
+        $seen = [];
+        $current = $host;
+        for ($hop = 0; $hop < 5; $hop++) {
+            $current = strtolower(rtrim($current, '.'));
+            if (isset($seen[$current])) return null; // CNAME 循环
+            $seen[$current] = true;
+            $aaaa = $this->dns_query($current, DNS_AAAA);
+            if (is_array($aaaa)) {
+                foreach ($aaaa as $rec) {
+                    if (!empty($rec['ipv6'])) $ips[] = $rec['ipv6'];
+                }
+            }
+            $cname = $this->dns_query($current, DNS_CNAME);
+            $target = null;
+            if (is_array($cname)) {
+                foreach ($cname as $rec) {
+                    if (!empty($rec['target'])) { $target = (string)$rec['target']; break; }
+                }
+            }
+            if ($target === null || $target === '') break;
+            $current = $target;
+        }
+        return $ips;
+    }
+
+    // IPv4 公网校验（主分支与 ::ffff: 映射 / ::/96 兼容分支共用）：
+    // L29：CGNAT 100.64.0.0/10 显式拒绝（FILTER_FLAG_NO_PRIV_RANGE |
+    // NO_RES_RANGE 不覆盖该段）；L32③：TEST-NET 文档段 192.0.2.0/24、
+    // 198.51.100.0/24、203.0.113.0/24 与基准测试段 198.18.0.0/15 显式
+    // 拒绝（同样不在两 flag 覆盖范围内，公网不可路由，仅当宿主内网恰好
+    // 使用这些段时才可达——拒绝是安全方向）。
+    private function is_public_ipv4($ip) {
+        if (!filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4)) return false;
+        $ip_long = ip2long($ip);
+        if ($ip_long === false) return false;
+        if (($ip_long & 0xffc00000) === 0x64400000) return false; // 100.64.0.0/10 CGNAT
+        if (($ip_long & 0xffffff00) === 0xc0000200) return false; // 192.0.2.0/24 TEST-NET-1
+        if (($ip_long & 0xffffff00) === 0xc6336400) return false; // 198.51.100.0/24 TEST-NET-2
+        if (($ip_long & 0xffffff00) === 0xcb007100) return false; // 203.0.113.0/24 TEST-NET-3
+        if (($ip_long & 0xfffe0000) === 0xc6120000) return false; // 198.18.0.0/15 基准测试
+        return (bool)filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE);
+    }
+
     private function is_public_ip($ip) {
         if (!filter_var($ip, FILTER_VALIDATE_IP)) return false;
         if (filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4)) {
-            // R1：CGNAT 共享地址 100.64.0.0/10——FILTER_FLAG_NO_PRIV_RANGE |
-            // NO_RES_RANGE 不覆盖该段，部分云厂商用它做内部服务地址，显式拒绝。
-            $ip_long = ip2long($ip);
-            if ($ip_long !== false && ($ip_long & 0xffc00000) === 0x64400000) return false;
-            return (bool)filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE);
+            return $this->is_public_ipv4($ip);
         }
         // IPv6：显式拒绝回环、未指定、链路本地、唯一本地、文档地址
         $ip_l = strtolower($ip);
         if ($ip_l === '::1' || $ip_l === '::') return false;
         $bin = @inet_pton($ip);
         if ($bin === false) return false;
-        // IPv4 映射地址 ::ffff:a.b.c.d：内嵌的是一个 IPv4，必须按 IPv4 重新校验，
-        // 否则 ::ffff:127.0.0.1 这类地址会绕过检查（cURL 连接时仍走到内网 IPv4）。
-        if (substr($bin, 0, 10) === str_repeat("\x00", 10) && substr($bin, 10, 2) === "\xff\xff") {
+        // IPv4 内嵌地址：后 32 位就是内嵌的 IPv4，必须按 IPv4 重校验，
+        // 否则 cURL 连接时仍走到内网 IPv4。覆盖三种写法（前 96 位只含
+        // 0 与一段 ffff）：::/96 兼容地址（如 ::127.0.0.1）、::ffff:/96
+        // 映射地址（如 ::ffff:127.0.0.1）、::ffff:0:/96 SIIT 翻译地址
+        // （如 ::ffff:0:127.0.0.1，ffff 在第 8–9 字节，旧的两分支都
+        // 够不着它，会误判为公网——L32⑤核查清单里的用例）。
+        // L29：重校验走 is_public_ipv4()，CGNAT 与 TEST-NET 段同样拒绝。
+        $prefix = substr($bin, 0, 12);
+        $nonzero = str_replace("\x00", '', $prefix);
+        if ($nonzero === '' || $nonzero === "\xff\xff") {
             $v4 = @inet_ntop(substr($bin, 12, 4));
-            return $v4 !== false && (bool)filter_var($v4, FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE);
-        }
-        // R1：IPv4 兼容地址 ::/96（如 ::127.0.0.1）：前 12 字节全 0、后 4 字节
-        // 为 IPv4，不走映射分支，必须同样取后 4 字节按 IPv4 重校验。
-        if (substr($bin, 0, 12) === str_repeat("\x00", 12)) {
-            $v4 = @inet_ntop(substr($bin, 12, 4));
-            return $v4 !== false && (bool)filter_var($v4, FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE);
+            return $v4 !== false && $this->is_public_ipv4($v4);
         }
         // R1：NAT64 前缀 64:ff9b::/32——公认前缀 64:ff9b::/96 与本地部署前缀
         // 64:ff9b:1::/48 等都在此段内，目标实际由内嵌 IPv4 决定，一律拒绝。
@@ -142,6 +231,55 @@ class Skyline_Content {
         if (ord($bin[0]) === 0xfe && (ord($bin[1]) & 0xc0) === 0x80) return false; // fe80::/10
         if (substr($bin, 0, 4) === "\x20\x01\x0d\xb8") return false; // 2001:db8::/32 文档
         return true;
+    }
+
+    // M5：用 HEAD 取 Content-Length。返回 int（已知长度）或 null
+    // （HEAD 失败 / 无该头 / 服务器不支持 HEAD——调用方走流式路径）。
+    private function remote_content_length($url, $args) {
+        if (!function_exists('wp_remote_head')) return null;
+        $head = wp_remote_head($url, $args);
+        if (is_wp_error($head)) return null;
+        $len = wp_remote_retrieve_header($head, 'content-length');
+        if ($len === '' || $len === null || !is_numeric($len)) return null;
+        return (int)$len;
+    }
+
+    // L32①②：按 RFC 3986 合并重定向 Location。返回完整 http(s) URL；
+    // 目标带非 http(s) scheme（如 ftp:）时返回 null（调用方直接拒绝，
+    // 不拼成 https://host/ftp://...）。相对路径与当前 URL 的目录合并
+    // （不是拼到 host 根），并做 dot-segment 归一化；协议相对 //host/path
+    // 只补 scheme；?query / #fragment 只换查询/片段、保留原路径；端口保留。
+    private function resolve_redirect_url($current_url, $location) {
+        if (preg_match('#^([a-z][a-z0-9+.-]*):#i', $location, $m)) {
+            $scheme = strtolower($m[1]);
+            if ($scheme !== 'http' && $scheme !== 'https') return null;
+            return $location;
+        }
+        $base = wp_parse_url($current_url);
+        $scheme = $base['scheme'] ?? 'https';
+        $host = $base['host'] ?? '';
+        $port = isset($base['port']) ? ':' . (int)$base['port'] : '';
+        if (strpos($location, '//') === 0) return $scheme . ':' . $location;
+        $base_path = $base['path'] ?? '/';
+        if (strpos($location, '/') === 0) return $scheme . '://' . $host . $port . $location;
+        if (strpos($location, '?') === 0 || strpos($location, '#') === 0) {
+            return $scheme . '://' . $host . $port . $base_path . $location;
+        }
+        $dir = substr($base_path, 0, strrpos($base_path, '/') + 1);
+        $merged = $dir . $location;
+        $suffix = '';
+        if (($q = strpos($merged, '?')) !== false || ($f = strpos($merged, '#')) !== false) {
+            $cut = min($q !== false ? $q : PHP_INT_MAX, $f !== false ? $f : PHP_INT_MAX);
+            $suffix = substr($merged, $cut);
+            $merged = substr($merged, 0, $cut);
+        }
+        $out = [];
+        foreach (explode('/', $merged) as $seg) {
+            if ($seg === '' || $seg === '.') continue;
+            if ($seg === '..') { array_pop($out); continue; }
+            $out[] = $seg;
+        }
+        return $scheme . '://' . $host . $port . '/' . implode('/', $out) . $suffix;
     }
 
     private function download_image($url, $pid) {
@@ -192,34 +330,65 @@ class Skyline_Content {
         }
 
         // 手动跟随重定向（最多 3 跳），每一跳都重新校验目标主机，防止 302 跳内网。
+        // M5：每跳先 HEAD 取 Content-Length，超 10MB 直接拒绝；拿不到长度
+        // 时该跳走流式（stream 到临时文件、按文件大小计，超限即中断），
+        // 不把未知大小的响应全量读进内存。
         $res = null;
         $current_url = $url;
+        $file_data = null;
         for ($hop = 0; $hop <= 3; $hop++) {
-            $res = wp_remote_get($current_url, $args);
-            if(is_wp_error($res)) return ['error' => '网络错误: ' . $res->get_error_message()];
+            $known_len = $this->remote_content_length($current_url, $args);
+            if ($known_len !== null && $known_len > self::SPIDER_MAX_IMAGE_BYTES) {
+                return ['error' => '文件过大(>10MB)'];
+            }
+            $tmp = null;
+            $is_stream = ($known_len === null);
+            if ($is_stream) {
+                $tmp = function_exists('wp_tempnam') ? wp_tempnam('sky_spider_') : tempnam(sys_get_temp_dir(), 'sky_spider_');
+                $stream_args = $args;
+                $stream_args['stream'] = true;
+                if ($tmp) $stream_args['filename'] = $tmp;
+                $res = wp_remote_get($current_url, $stream_args);
+            } else {
+                $res = wp_remote_get($current_url, $args);
+            }
+            if(is_wp_error($res)) { if ($tmp) @unlink($tmp); return ['error' => '网络错误: ' . $res->get_error_message()]; }
             $code = wp_remote_retrieve_response_code($res);
             if ($code >= 300 && $code < 400) {
                 $location = trim((string)wp_remote_retrieve_header($res, 'location'));
+                if ($tmp) @unlink($tmp);
                 if ($location === '' || $hop === 3) return ['error' => "HTTP状态 $code"];
-                // 相对 Location 按当前 URL 补全（协议相对地址 //host/path 只补 scheme）
-                if (strpos($location, '//') === 0) {
-                    $base = wp_parse_url($current_url);
-                    $location = ($base['scheme'] ?? 'https') . ':' . $location;
-                } elseif (!preg_match('#^https?://#i', $location)) {
-                    $base = wp_parse_url($current_url);
-                    $location = ($base['scheme'] ?? 'https') . '://' . ($base['host'] ?? '') . (strpos($location, '/') === 0 ? $location : '/' . $location);
-                }
-                $err = $this->validate_remote_host($location);
+                $resolved = $this->resolve_redirect_url($current_url, $location);
+                if ($resolved === null) return ['error' => '重定向目标不是 http(s) 地址'];
+                $err = $this->validate_remote_host($resolved);
                 if ($err) return ['error' => $err];
-                $current_url = $location;
+                $current_url = $resolved;
                 continue;
+            }
+            if ($code != 200) { if ($tmp) @unlink($tmp); return ['error' => "HTTP状态 $code"]; }
+            if ($is_stream && $tmp && file_exists($tmp)) {
+                $sz = filesize($tmp);
+                if ($sz !== false && $sz > self::SPIDER_MAX_IMAGE_BYTES) { @unlink($tmp); return ['error' => '文件过大(>10MB)']; }
+                if ($sz !== false && $sz < 500) { @unlink($tmp); return ['error' => '文件太小(<500B)']; }
+                $file_data = file_get_contents($tmp);
+                @unlink($tmp);
+                if ($file_data === false) return ['error' => '读取下载文件失败'];
             }
             break;
         }
-        $code = wp_remote_retrieve_response_code($res);
-        if($code != 200) return ['error' => "HTTP状态 $code"];
-
-        $file_data = wp_remote_retrieve_body($res);
+        if ($file_data === null) {
+            // 正常 GET 路径：再按响应头 Content-Length 兜底一次（防 HEAD
+            // 与 GET 不一致），超限不取 body；取到 body 后仍按实际长度
+            // 验一道（传输层未走流式时的最后一道闸）。
+            $clen = wp_remote_retrieve_header($res, 'content-length');
+            if (is_numeric($clen) && (int)$clen > self::SPIDER_MAX_IMAGE_BYTES) {
+                return ['error' => '文件过大(>10MB)'];
+            }
+            $file_data = wp_remote_retrieve_body($res);
+            if (strlen($file_data) > self::SPIDER_MAX_IMAGE_BYTES) {
+                return ['error' => '文件过大(>10MB)'];
+            }
+        }
         if(strlen($file_data) < 500) return ['error' => '文件太小(<500B)'];
 
         $filename = 'sp_' . date('YmdHis') . '_' . substr($img_hash, 0, 6) . '.jpg'; 
@@ -317,6 +486,23 @@ class Skyline_Content {
         }
 
         $has_more = false;
+        // M1：spider_domains（排除域名，一行一个）真正生效：按行解析，
+        // 图片 URL 的 host 精确命中或为其子域名时跳过、不同步。
+        $excluded_domains = [];
+        $domains_raw = trim((string)$core->get_opt('spider_domains', ''));
+        if ($domains_raw !== '') {
+            foreach (explode("\n", $domains_raw) as $line) {
+                $d = strtolower(trim($line));
+                if ($d === '') continue;
+                if (strpos($d, '://') !== false) $d = (string)parse_url($d, PHP_URL_HOST);
+                $d = strtolower(trim(explode('/', $d)[0]));
+                $d = ltrim($d, '*.');
+                $d = ltrim($d, '.');
+                if (strpos($d, ':') !== false) $d = explode(':', $d)[0];
+                if ($d !== '') $excluded_domains[] = $d;
+            }
+            $excluded_domains = array_values(array_unique($excluded_domains));
+        }
         foreach($candidates as $url_raw) {
             if ($processed_count >= $max_img) { $has_more = true; break; }
 
@@ -324,6 +510,14 @@ class Skyline_Content {
             if(strpos($url_real, $site_domain)!==false || strpos($url_real, 'data:image')!==false) continue;
             $url_host = strtolower(parse_url($url_real, PHP_URL_HOST) ?: '');
             if ($url_host !== '' && in_array($url_host, $oss_hosts, true)) continue;
+            // M1：命中排除域名（精确或后缀匹配）就跳过不同步、不占名额。
+            if ($url_host !== '' && !empty($excluded_domains)) {
+                $excluded = false;
+                foreach ($excluded_domains as $ed) {
+                    if ($url_host === $ed || substr($url_host, -strlen($ed) - 1) === '.' . $ed) { $excluded = true; break; }
+                }
+                if ($excluded) continue;
+            }
             
             $res = $this->download_image($url_real, $pid);
             if(isset($res['id'])) {
@@ -336,8 +530,13 @@ class Skyline_Content {
         
         if($success > 0 && $content !== $post->post_content) {
             remove_action('save_post', [$this, 'trigger_async_tasks'], 20);
-            global $wpdb; 
-            $wpdb->update($wpdb->posts, ['post_content'=>$content], ['ID'=>$pid]);
+            global $wpdb;
+            // M6：直接写库替换正文前先留一个修订版，同步改坏正文时可恢复。
+            if (function_exists('wp_save_post_revision')) {
+                $rev = wp_save_post_revision((int)$pid);
+                if ($rev === false) $core->log("图片同步写库前留修订版失败 [$pid]，本次替换没有修订版备份", 'warn', 'Spider');
+            }
+            $wpdb->update($wpdb->posts, ['post_content'=>$content], ['ID'=>(int)$pid]);
             clean_post_cache($pid);
             add_action('save_post', [$this, 'trigger_async_tasks'], 20, 2);
         }
@@ -420,7 +619,12 @@ class Skyline_Content {
 
             if ($polished !== false) {
                 // 替换前先留一个修订版，润色结果异常时可从修订版恢复。
-                if (function_exists('wp_save_post_revision')) wp_save_post_revision($pid);
+                // L4：检查返回值，返回 false 时记 warn 日志——说明本次替换
+                // 没有修订版备份（站点禁用修订版或文章类型不支持时）。
+                if (function_exists('wp_save_post_revision')) {
+                    $rev = wp_save_post_revision((int)$pid);
+                    if ($rev === false) $core->log("AI 润色替换前留修订版失败 [$pid]，本次替换没有修订版备份", 'warn', 'SEO');
+                }
                 $updates['post_content'] = $polished;
                 $any_success = true;
                 $core->log("AI 润色成功 [$pid]", 'info', 'SEO');
@@ -454,7 +658,7 @@ class Skyline_Content {
         }
 
         if (!empty($updates)) {
-            $wpdb->update($wpdb->posts, $updates, ['ID' => $pid]);
+            $wpdb->update($wpdb->posts, $updates, ['ID' => (int)$pid]);
             clean_post_cache($pid);
         }
 
@@ -472,8 +676,54 @@ class Skyline_Content {
             if ($fails >= 3) {
                 update_post_meta($pid, '_sky_seo_done', 1);
                 $core->log("自动 SEO 连续失败满 3 次 [$pid]，已停止重试", 'warn', 'SEO');
+            } else {
+                // S4 附录：失败后 1 小时重排期重试，与 Zero-Disk 的
+                // reschedule_purge() 同款模式（上限 3 次——_sky_seo_fail_count
+                // 满 3 次即标记完成、上面分支不再排期）。只靠“下次保存再
+                // 触发”时，定时任务发布的文章发布后无人再保存，一次瞬时
+                // API 失败就等于永久停摆。
+                if (!wp_next_scheduled('skyline_async_seo', [(int)$pid])) {
+                    wp_schedule_single_event(time() + 3600, 'skyline_async_seo', [(int)$pid]);
+                    $core->log("自动 SEO 全部失败 [$pid]（第 {$fails} 次），已重排 1 小时后重试", 'warn', 'SEO');
+                }
             }
         }
+    }
+
+    // L13：检测底部 40px 是否像一条水印带（底色近乎均匀的色带）。
+    // 采样统计：底部色带的主导色（按 16 级量化）占比 >=85%，且其上方
+    // 40px 色带主导色占比 <85% 或平均亮度相差 >25，才判定为水印带。
+    // 正常照片底部也是内容、主导色占比低——检测不到时返回 0、不裁。
+    // 保守方向：判不准时不裁，宁可留水印、不误删正文底部内容。
+    private function detect_watermark_band_height($src, $w, $h) {
+        $band = 40;
+        if ($h < 150 || $w < 10) return 0;
+        $sample = function ($y0, $y1) use ($src, $w) {
+            $counts = [];
+            $total = 0;
+            $bright = 0;
+            $step_x = max(1, (int)($w / 50));
+            for ($y = $y0; $y < $y1; $y += 4) {
+                for ($x = 0; $x < $w; $x += $step_x) {
+                    $rgb = imagecolorat($src, $x, $y);
+                    $r = ($rgb >> 16) & 0xff;
+                    $g = ($rgb >> 8) & 0xff;
+                    $b = $rgb & 0xff;
+                    $key = (($r >> 4) << 8) | (($g >> 4) << 4) | ($b >> 4);
+                    $counts[$key] = ($counts[$key] ?? 0) + 1;
+                    $bright += ($r + $g + $b) / 3;
+                    $total++;
+                }
+            }
+            if ($total === 0) return ['dominant' => 0, 'mean' => 0];
+            return ['dominant' => max($counts) / $total, 'mean' => $bright / $total];
+        };
+        $bottom = $sample($h - $band, $h);
+        $above = $sample($h - 2 * $band, $h - $band);
+        if ($bottom['dominant'] >= 0.85 && ($above['dominant'] < 0.85 || abs($bottom['mean'] - $above['mean']) > 25)) {
+            return $band;
+        }
+        return 0;
     }
 
     private function remove_watermark_crop($path, $mime) {
@@ -483,10 +733,20 @@ class Skyline_Content {
         if($h < 150) return;
         $src = ($mime == 'image/jpeg') ? @imagecreatefromjpeg($path) : @imagecreatefrompng($path);
         if(!$src) return;
-        $crop_h = 40; if($h - $crop_h < 50) $crop_h = 20;
+        // L13：先检测底部水印区域再裁，检测不到水印时不裁（旧写法无条件裁 40px，
+        // 会误删正文底部内容；“智能去除水印”名不副实）。
+        $crop_h = $this->detect_watermark_band_height($src, $w, $h);
+        if ($crop_h <= 0) { imagedestroy($src); return; }
+        if($h - $crop_h < 50) $crop_h = 20;
         $dst = imagecreatetruecolor($w, $h - $crop_h);
+        // L13：alpha 处理——透明 PNG 不变黑底。
+        imagealphablending($dst, false);
+        imagesavealpha($dst, true);
+        $transparent = imagecolorallocatealpha($dst, 0, 0, 0, 127);
+        imagefill($dst, 0, 0, $transparent);
         imagecopy($dst, $src, 0, 0, 0, 0, $w, $h - $crop_h);
-        if($mime == 'image/jpeg') imagejpeg($dst, $path, 90); else imagepng($dst, $path, 9);
+        $quality = max(0, min(100, (int)Skyline_Core::instance()->get_opt('turbo_quality', 85)));
+        if($mime == 'image/jpeg') imagejpeg($dst, $path, $quality); else imagepng($dst, $path, 9);
         imagedestroy($src); imagedestroy($dst);
     }
 
@@ -519,7 +779,11 @@ class Skyline_Content {
             $y = imagesy($im) - 20;
             imagestring($im, $font, max(10,$x), max(10,$y), $txt, $color);
         }
-        if($i['mime']=='image/jpeg') imagejpeg($im, $path, 90); else imagepng($im, $path, 9);
+        // L13：水印质量跟随 turbo_quality（旧写法写死 90，无视配置的 85）；
+        // PNG 保存前 imagesavealpha(true)，透明通道不丢失。
+        $quality = max(0, min(100, (int)Skyline_Core::instance()->get_opt('turbo_quality', 85)));
+        if($i['mime']=='image/jpeg') imagejpeg($im, $path, $quality);
+        else { imagesavealpha($im, true); imagepng($im, $path, 9); }
         imagedestroy($im);
     }
 
@@ -533,16 +797,21 @@ class Skyline_Content {
         if(!$links_str) wp_send_json_error('未配置内链关键词，请去设置页添加');
         $pairs = explode("\n", $links_str);
         $total_replaced = 0;
+        // M7：不再用旧 lookahead 正则，复用 auto_internal_links() 的切分后
+        // 替换逻辑（link_keyword_in_parts，两处共用），不再产出 <a><a>
+        // 嵌套链接；替换串里的 title 由公共方法经 esc_attr() 转义。
+        // M14③：全文只切分一次，循环关键词复用同一份切分结果。
+        $parts = preg_split('/(<[^>]+>)/u', $content, -1, PREG_SPLIT_DELIM_CAPTURE);
+        if (!is_array($parts)) wp_send_json_error('内容解析失败');
         foreach($pairs as $pair) {
             $p = explode('|', trim($pair));
             if(count($p) < 2) continue;
             $kw = trim($p[0]); $url = trim($p[1]);
             if(!$kw || !$url) continue;
-            $pattern = '/(?!(?:[^<]+>|[^>]+<\/a>))(' . preg_quote($kw, '/') . ')/u';
-            $replace = '<a href="'.esc_url($url).'" title="$1" target="_blank" class="sky-link">$1</a>';
-            $content = preg_replace($pattern, $replace, $content, 1, $count);
+            list($parts, $count) = $this->link_keyword_in_parts($parts, $kw, $url);
             $total_replaced += $count;
         }
+        $content = implode('', $parts);
         if($total_replaced > 0) wp_send_json_success(['content' => $content, 'msg' => "成功添加 {$total_replaced} 个内链"]);
         else wp_send_json_error('没有找到可替换的关键词，或关键词已存在链接');
     }
@@ -725,8 +994,12 @@ class Skyline_Content {
                     },
 
                     log: function(msg, type='normal') {
-                        var c = type==='ok'?'color:#10b981':(type==='err'?'color:#ef4444':'color:#64748b');
-                        var d = document.createElement('div'); d.innerHTML = '<span style=\"'+c+'\">'+msg+'</span>';
+                        // M8：msg 含服务器返回的错误串（不可信输入），用
+                        // textContent 插入，不再用 innerHTML 拼串。
+                        var color = type==='ok'?'#10b981':(type==='err'?'#ef4444':'#64748b');
+                        var d = document.createElement('div');
+                        d.textContent = msg;
+                        d.style.color = color;
                         var box = document.getElementById('sky-sp-log');
                         if(box) { box.appendChild(d); box.scrollTop = box.scrollHeight; }
                     },
@@ -853,11 +1126,16 @@ class Skyline_Content {
                                                 var html = '<p><b>🤖 AI 提供了多个标题，请选择一个替换：</b></p>';
                                                 lines.forEach(function(line){
                                                     var clean = line.replace(/^\d+[\.\、]\s*/, '').replace(/^["']|["']$/g, '').trim();
-                                                    var safe = clean.replace(/"/g, '&quot;');
-                                                    html += '<button type="button" class="sky-btn-cp" style="margin-bottom:5px;text-align:left" onclick="SkylineEditor.setTitle(\''+safe+'\')">👉 '+clean+'</button>';
+                                                    // M8：AI 标题先转义再拼 HTML（按钮文字与
+                                                    // data-title 都转义）；不再把标题拼进
+                                                    // onclick='...' JS 字符串（引号可逃逸注入），
+                                                    // 改用 data-title + 事件绑定取值。
+                                                    var esc = SkylineEditor.escapeHtml(clean);
+                                                    html += '<button type="button" class="sky-btn-cp sky-title-choice" style="margin-bottom:5px;text-align:left" data-title="'+esc+'">👉 '+esc+'</button>';
                                                 });
                                                 html += '<button type="button" class="sky-btn-cp" style="margin-top:5px;color:#666" onclick="jQuery(\'#sky-res-box\').hide()">❌ 取消</button>';
                                                 SkylineEditor.showResult(html);
+                                                $('#sky-res-content').find('.sky-title-choice').on('click', function(){ SkylineEditor.setTitle($(this).attr('data-title')); });
                                                 return;
                                             }
                                             var cleanRes = res.replace(/^["']|["']$/g, '');
@@ -872,16 +1150,19 @@ class Skyline_Content {
                                         else if(t==='rewrite' || t==='polish' || t==='continue' || t==='expand') {
                                             var btns = '<button type="button" class="sky-btn-cp primary" onclick="SkylineEditor.applyReplace()">🔄 立即替换全文</button>';
                                             btns += '<button type="button" class="sky-btn-cp" onclick="SkylineEditor.insert()">📥 插入光标处</button>';
-                                            SkylineEditor.showResult(res, res, btns);
+                                            SkylineEditor.showResult(null, res, btns);
                                         }
-                                        else if(t==='tags') { SkylineEditor.showResult('<b>建议标签:</b><br>'+res); }
+                                        // M8：AI 返回的标签走 rawText 分支（.text() 插入），
+                                        // 不再拼进 '<b>…</b><br>'+res 的 .html() 串里。
+                                        else if(t==='tags') { SkylineEditor.showResult(null, '建议标签：\n' + res); }
                                         else if(t==='desc') {
                                             if(SkylineEditor.isGutenberg()) wp.data.dispatch("core/editor").editPost({excerpt:res});
                                             else { $('#excerpt').val(res); }
                                             alert('摘要已更新');
                                         }
                                         else if(t==='rewrite_full') { if(confirm('确认覆盖全文？')) SkylineEditor.setContent(res); }
-                                        else { SkylineEditor.showResult(res); } 
+                                        // M8：其余 AI 任务的原文走 rawText 分支（.text() 插入）。
+                                        else { SkylineEditor.showResult(null, res); } 
                                     } else alert('Error: ' + r.data); 
                                 },
                                 error: function(e) { $('#sky-loading').hide(); alert('Request Failed: ' + e.statusText); }
@@ -893,7 +1174,19 @@ class Skyline_Content {
                         $('#sky-loading').show();
                         $.post(skyAjaxUrl, { action: 'sky_gen_img', prompt: p, _ajax_nonce: '<?php echo $esc_nonce; ?>' }, function(r){
                             $('#sky-loading').hide();
-                            if(r.success) SkylineEditor.showResult('<img src="'+r.data+'" style="max-width:100%">'); else alert(r.data);
+                            // M8：返回 URL 先校验为 http(s) 且不含引号/尖括号/
+                            // 空白，再用 DOM 建 <img>（.attr('src', …)），不拼
+                            // '<img src="'+url+'">' 字符串插进 .html()。
+                            if(r.success) {
+                                var imgUrl = String(r.data || '');
+                                if (!/^https?:\/\/[^"'<>\s]+$/i.test(imgUrl)) { alert('生图返回了无效的图片地址'); return; }
+                                var $box = $('#sky-res-content');
+                                $box.empty();
+                                $('<img>').attr('src', imgUrl).css('max-width', '100%').appendTo($box);
+                                $box.removeData('raw');
+                                $('#sky-res-actions').hide().empty();
+                                $('#sky-res-box').show();
+                            } else alert(r.data);
                         });
                     },
                     insert: function() {
@@ -920,12 +1213,28 @@ class Skyline_Content {
                              if(r.success) SkylineEditor.showResult('<b>SEO 得分: '+r.data.score+'</b><br>'+r.data.advice.join('<br>'));
                         });
                     },
-                    showResult: function(html, rawText, buttonsHtml) { 
-                        var displayHtml = rawText ? rawText.replace(/\n/g, '<br>') : html;
-                        $('#sky-res-content').html(displayHtml); 
-                        if(rawText) $('#sky-res-content').data('raw', rawText); else $('#sky-res-content').removeData('raw');
+                    // M8：AI 派生片段拼 HTML 前的转义（& < > " ' 全转）。
+                    escapeHtml: function(s) {
+                        return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+                    },
+                    showResult: function(html, rawText, buttonsHtml) {
+                        // M8：AI 原文一律走 rawText 分支，用 .text() 插入
+                        // （#sky-res-content 已是 white-space:pre-wrap，换行
+                        // 直接保留，不用再转 <br>）。html 分支只接受本文件
+                        // 内部拼接的可信标记（标题选择按钮/SEO 得分/操作按钮），
+                        // 其中所有 AI 派生片段在拼接前已转义；直接插 AI 原文
+                        // 的调用已全部改为传 rawText。buttonsHtml 同样只接受
+                        // 内部静态按钮串。
+                        var $box = $('#sky-res-content');
+                        if (rawText !== undefined && rawText !== null) {
+                            $box.text(rawText);
+                            $box.data('raw', rawText);
+                        } else {
+                            $box.html(html || '');
+                            $box.removeData('raw');
+                        }
                         if(buttonsHtml) $('#sky-res-actions').html(buttonsHtml).show(); else $('#sky-res-actions').hide().empty();
-                        $('#sky-res-box').show(); 
+                        $('#sky-res-box').show();
                     }
                 };
             })(jQuery);

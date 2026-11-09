@@ -7,6 +7,10 @@ class Skyline_Core {
     private $stat_cache = [];
     private $log_file;
 
+    // M13：前台聊天限流阈值（默认值，暂无后台设置项，改这里即可）。
+    const CHAT_RATE_PER_MINUTE = 20;
+    const CHAT_RATE_PER_DAY = 500;
+
     public static function instance() {
         if (self::$instance === null) {
             self::$instance = new self();
@@ -37,6 +41,43 @@ class Skyline_Core {
         if (!file_exists($log_dir . '/index.html')) {
             @file_put_contents($log_dir . '/index.html', '');
         }
+        // L33：已装站点的 skyline_ai_settings 行仍是 autoload=yes——
+        // admin.php 的 update_option(..., false) 只对新建行生效，已有行
+        // 的 autoload 不会被改写。这里在 core 初始化时做一次版本化
+        // 一次性迁移（见 maybe_migrate_settings_autoload），已迁移标记
+        // 防重复；插件无现成的版本/迁移机制，故用独立标记，不另起版本表。
+        $this->maybe_migrate_settings_autoload();
+    }
+
+    // L33：把已装站点现有的 'skyline_ai_settings' option 行的 autoload
+    // 改成 no（密钥不再随每个请求读进内存）。只改 autoload 列，不动
+    // option 值；可重复跑（幂等）；失败不致命（返回 false，下次请求再试）。
+    // 实现：直接 $wpdb->update() 只写 autoload 列——update_option() 同值
+    // 重写在部分 WP 版本下会因“值未变”提前返回、改不到 autoload，且会
+    // 重写整个值；$wpdb 路径则与值无关。无行可迁（从未保存过配置）时也
+    // 记标记：后续新建行由 admin.php 的 update_option(..., false) 直接
+    // 写成 no。无 $wpdb 的极端环境退回 update_option() 同值 + false
+    // 尽力而为，不记标记、不抛错。
+    public function maybe_migrate_settings_autoload() {
+        if (!function_exists('get_option') || !function_exists('update_option')) return false;
+        if (get_option('skyline_ai_settings_autoload_migrated', false)) return false;
+        try {
+            $existing = get_option('skyline_ai_settings', null);
+            if ($existing === null) {
+                update_option('skyline_ai_settings_autoload_migrated', 1, false);
+                return false;
+            }
+            global $wpdb;
+            if (isset($wpdb) && is_object($wpdb) && method_exists($wpdb, 'update') && isset($wpdb->options)) {
+                $wpdb->update($wpdb->options, ['autoload' => 'no'], ['option_name' => 'skyline_ai_settings']);
+                update_option('skyline_ai_settings_autoload_migrated', 1, false);
+                return true;
+            }
+            update_option('skyline_ai_settings', $existing, false);
+        } catch (Throwable $e) {
+            return false;
+        }
+        return false;
     }
 
     // 本站日志文件名随机后缀（16 位 hex，存于 skyline_ai_log_token）。
@@ -79,39 +120,46 @@ class Skyline_Core {
         if (class_exists('Skyline_Infra')) {
             try { Skyline_Infra::instance(); } catch(Throwable $e) { error_log('Skyline Infra Load Error: '.$e->getMessage()); }
         }
-        if (class_exists('Skyline_API_Gateway')) new Skyline_API_Gateway();
         if (is_admin() && class_exists('Skyline_Admin')) new Skyline_Admin();
     }
 
     public function get_config_schema() {
         return [
             'api_base' => ['group'=>'ai', 'type'=>'url', 'label'=>'API Endpoint', 'default'=>'https://api.siliconflow.cn/v1/chat/completions'],
+            // 生图端点根地址（L8）：handle_gen_img() 优先用这里拼 /images/generations；
+            // 留空时回退到从 api_base 推导（/chat/completions → /images/generations）并记日志。
+            'api_img_base' => ['group'=>'ai', 'type'=>'url', 'label'=>'生图 API 根地址', 'desc'=>'例如 https://api.siliconflow.cn/v1；留空时从上方 API Endpoint 推导生图端点。', 'default'=>''],
             'api_key' => ['group'=>'ai', 'type'=>'password', 'label'=>'API Key', 'desc'=>'你的 API 密钥 (sk-...)', 'required'=>true],
             'chat_model' => ['group'=>'ai', 'type'=>'text', 'label'=>'对话模型', 'default'=>'deepseek-ai/DeepSeek-V3'],
             'image_model' => ['group'=>'ai', 'type'=>'text', 'label'=>'绘图模型', 'default'=>'black-forest-labs/FLUX.1-schnell'],
-            'system_prompt' => ['group'=>'ai', 'type'=>'textarea', 'label'=>'系统人设', 'default'=>"你是由灵感屋(lgwu.net)训练的专业内容创作助手。"],
+            'system_prompt' => ['group'=>'ai', 'type'=>'textarea', 'label'=>'系统人设', 'default'=>"你是灵感屋（lgwu.net）的 AI 助手，专注景观设计：园林方案、施工图与节点详图、植物配置、铺装与工程做法、设计软件与学习资源。用准确的景观专业术语，中文回答，简洁实用。"],
             'robot_enable' => ['group'=>'ai', 'type'=>'bool', 'label'=>'启用前台悬浮助手', 'default'=>true],
             'robot_only_logged' => ['group'=>'ai', 'type'=>'bool', 'label'=>'仅登录用户可见', 'default'=>false],
-            'robot_img' => ['group'=>'ai', 'type'=>'url', 'label'=>'自定义图标 URL'],
+            'robot_img' => ['group'=>'ai', 'type'=>'url', 'label'=>'自定义图标 URL', 'desc'=>'请用方形图片（非方形图会被裁成圆形显示）。'],
             // 聊天限流用的可信代理清单（R6）：EdgeOne 回源时 REMOTE_ADDR 是边缘
             // 节点 IP，真实访客 IP 在 X-Forwarded-For 首位；但只有 REMOTE_ADDR
             // 落在下面配置的 EdgeOne 回源 IP 段内时才信任该头，否则任何人都能
             // 伪造 XFF 绕过限流。留空 = 永不信任 XFF（回退到 REMOTE_ADDR 的旧
             // 行为，安全但限流仍按边缘节点 IP 计）。EdgeOne 回源 IP 段见控制台
             // “回源配置 / 回源 IP 段”提供的列表，粘贴进来即可（每行一个 IP 或 CIDR）。
-            'trusted_proxy_ips' => ['group'=>'ai', 'type'=>'textarea', 'label'=>'可信代理 IP（EdgeOne 回源段）', 'desc'=>'每行一个 IP 或 CIDR；仅当 REMOTE_ADDR 在此列表中时，才信任 X-Forwarded-For 首个 IP 作为访客真实 IP。留空则永不信任。'],
+            'trusted_proxy_ips' => ['group'=>'ai', 'type'=>'textarea', 'label'=>'可信代理 IP（EdgeOne 回源段）', 'desc'=>'每行一个 IP 或 CIDR；仅当 REMOTE_ADDR 在此列表中时，才信任 X-Forwarded-For 首个 IP 作为访客真实 IP。留空则永不信任。警告：留空且站点接了 CDN/EdgeOne 时，全站访客共享一个限流桶，20 次/分钟后全站聊天会被限流，请填入回源 IP 段。'],
             
             'spider_enable' => ['group'=>'spider', 'type'=>'bool', 'label'=>'启用内容同步', 'default'=>true],
-            'spider_auto' => ['group'=>'spider', 'type'=>'bool', 'label'=>'发布时自动同步', 'default'=>true],
+            // 图片同步方式：用 spider_auto 这个已有键存值，不新增字段。
+            // 存值语义与原来完全一致——true/'1'/1 = 自动，false/'0'/0 = 手动，
+            // 线上数据库里现在存的是 b:0（手动）。类型从 bool 改成 spider_mode
+            // 只是换控件（复选框→两个单选项），不是换含义：① 复选框太容易
+            // 被忽略，用户明确要一个看得见的自动/手动开关；② bool 保存分支
+            // 是 isset($posted[$key])，单选值 '0' 提交上来也会被存成 true，
+            // 必须走 spider_mode 自己的保存分支才不会把“手动”存成“自动”。
+            'spider_auto' => ['group'=>'spider', 'type'=>'spider_mode', 'label'=>'图片同步方式', 'desc'=>'自动：发布文章时自动把外链图片同步到本地/COS；手动：发布时不同步，只在编辑器里点“一键同步图片”按钮时同步。', 'default'=>true],
             'spider_max_img' => ['group'=>'spider', 'type'=>'number', 'label'=>'单篇最大同步数', 'default'=>20],
             'spider_allow_wechat' => ['group'=>'spider', 'type'=>'bool', 'label'=>'允许微信图片', 'default'=>true],
             'spider_ssl_verify' => ['group'=>'spider', 'type'=>'bool', 'label'=>'验证 SSL 证书', 'default'=>true],
             'spider_domains' => ['group'=>'spider', 'type'=>'textarea', 'label'=>'排除域名 (一行一个)'],
             'spider_wm_enable' => ['group'=>'spider', 'type'=>'bool', 'label'=>'启用添加水印', 'default'=>false],
-            'spider_rm_wm' => ['group'=>'spider', 'type'=>'bool', 'label'=>'智能去除水印 (裁剪底部)', 'default'=>false],
+            'spider_rm_wm' => ['group'=>'spider', 'type'=>'bool', 'label'=>'智能去除水印 (裁剪底部)', 'desc'=>'无条件裁掉图片底部 40px（矮于 150px 的图跳过），不是智能检测水印位置；没有水印的图片也会被裁掉底部内容。', 'default'=>false],
             'spider_wm_text' => ['group'=>'spider', 'type'=>'text', 'label'=>'文字水印内容', 'default'=>'@Skyline'],
-            'spider_wm_img_url' => ['group'=>'spider', 'type'=>'text', 'label'=>'图片水印 URL'],
-            'spider_wm_pos' => ['group'=>'spider', 'type'=>'text', 'label'=>'水印位置', 'default'=>'bottom-right'],
             
             'oss_enable' => ['group'=>'oss', 'type'=>'bool', 'label'=>'启用 OSS 云存储', 'default'=>false],
             'oss_endpoint' => ['group'=>'oss', 'type'=>'text', 'label'=>'Endpoint'],
@@ -119,13 +167,12 @@ class Skyline_Core {
             'oss_ak' => ['group'=>'oss', 'type'=>'text', 'label'=>'Access Key'],
             'oss_sk' => ['group'=>'oss', 'type'=>'password', 'label'=>'Secret Key'],
             'oss_domain' => ['group'=>'oss', 'type'=>'text', 'label'=>'自定义域名'],
-            'oss_ssl_verify' => ['group'=>'oss', 'type'=>'bool', 'label'=>'验证 SSL', 'default'=>true],
-            'oss_delete_local' => ['group'=>'oss', 'type'=>'bool', 'label'=>'Zero-Disk (同步后删除本地文件)', 'default'=>false],
+            'oss_delete_local' => ['group'=>'oss', 'type'=>'bool', 'label'=>'Zero-Disk (同步后删除本地文件)', 'desc'=>'开启后，本地文件在同步成功 24 小时后、由 WP-Cron 二次校验通过才删除；关掉开关后，已登记的待删任务作废，本地文件保留。', 'default'=>false],
             
-            'auto_tags' => ['group'=>'seo', 'type'=>'bool', 'label'=>'自动生成标签', 'default'=>true],
-            'auto_slug' => ['group'=>'seo', 'type'=>'bool', 'label'=>'自动生成英文 Slug', 'default'=>true],
-            'auto_excerpt' => ['group'=>'seo', 'type'=>'bool', 'label'=>'自动生成摘要', 'default'=>true],
-            'auto_polish' => ['group'=>'seo', 'type'=>'bool', 'label'=>'发布前 AI 智能润色', 'default'=>false],
+            'auto_tags' => ['group'=>'seo', 'type'=>'bool', 'label'=>'自动生成标签', 'desc'=>'开启后每次自动生成单独调用一次 API（计一次 api_calls）。', 'default'=>true],
+            'auto_slug' => ['group'=>'seo', 'type'=>'bool', 'label'=>'自动生成英文 Slug', 'desc'=>'开启后每次自动生成单独调用一次 API（计一次 api_calls）。', 'default'=>true],
+            'auto_excerpt' => ['group'=>'seo', 'type'=>'bool', 'label'=>'自动生成摘要', 'desc'=>'开启后每次自动生成单独调用一次 API（计一次 api_calls）。', 'default'=>true],
+            'auto_polish' => ['group'=>'seo', 'type'=>'bool', 'label'=>'发布前 AI 智能润色', 'desc'=>'含 Gutenberg 区块标记的文章会跳过润色；长文分段润色后拼接，段落边界处可能有轻微不连贯。', 'default'=>false],
             'link_enable' => ['group'=>'seo', 'type'=>'bool', 'label'=>'自动内链', 'default'=>false],
             'link_pairs' => ['group'=>'seo', 'type'=>'textarea', 'label'=>'内链关键词 (词|链接)'],
             
@@ -139,15 +186,28 @@ class Skyline_Core {
             // 注意：不要把 preview / s= / amp 写进默认值——它们是查询参数，
             // 精确排除在 page_cache() 里做；写成子串会误伤 /camp/、?status=、
             // ?tags= 这类正常 URL（P1）。路径级排除只保留下面这几行。
-            'redis_exclude' => ['group'=>'speed', 'type'=>'textarea', 'label'=>'排除缓存路径', 'default'=>"/wp-json/\n/cart/\n/checkout/\nrest_route\n/feed/"],
+            'redis_exclude' => ['group'=>'speed', 'type'=>'textarea', 'label'=>'排除缓存路径', 'desc'=>'内置排除（/wp-json/、/cart/、/checkout/、rest_route、/feed/）已在代码里硬编码，此处只追加额外路径；填了也不影响内置排除。', 'default'=>"/wp-json/\n/cart/\n/checkout/\nrest_route\n/feed/"],
             'redis_serializer' => ['group'=>'speed', 'type'=>'select', 'label'=>'序列化', 'default'=>'php', 'options' => ['php'=>'PHP Default', 'igbinary'=>'Igbinary']],
             'redis_compression' => ['group'=>'speed', 'type'=>'select', 'label'=>'压缩', 'default'=>'none', 'options' => ['none'=>'None', 'zstd'=>'Zstd', 'lzf'=>'LZF']],
             'turbo_disable_emoji' => ['group'=>'speed', 'type'=>'bool', 'label'=>'禁用 Emoji', 'default'=>false],
             'turbo_disable_embeds' => ['group'=>'speed', 'type'=>'bool', 'label'=>'禁用 oEmbeds', 'default'=>false],
             'turbo_disable_xmlrpc' => ['group'=>'speed', 'type'=>'bool', 'label'=>'禁用 XML-RPC', 'default'=>false],
             'turbo_sanitize_names' => ['group'=>'speed', 'type'=>'bool', 'label'=>'文件名哈希化', 'default'=>false],
-            'turbo_lazy_load' => ['group'=>'speed', 'type'=>'bool', 'label'=>'强制图片懒加载', 'default'=>true],
-            'turbo_enable_image_opt' => ['group'=>'speed', 'type'=>'bool', 'label'=>'上传图片压缩', 'default'=>false],
+            'turbo_lazy_load' => ['group'=>'speed', 'type'=>'bool', 'label'=>'强制图片懒加载', 'desc'=>'开启后首屏大图也会被加 loading="lazy"，可能拖慢 LCP；默认关闭，需要时手动开启。', 'default'=>false],
+            'turbo_enable_image_opt' => ['group'=>'speed', 'type'=>'bool', 'label'=>'上传图片压缩', 'desc'=>'>10MB 的文件整个跳过不压缩；原图与缩略图分别压缩。', 'default'=>false],
+            // WebP 转换开关组：默认关闭（opt-in）。理由：① 转格式会改变新上传
+            // 图片的文件扩展名与前台 URL，升级后静默开启等于改全站媒体管线
+            // （P12 的教训：turbo_lazy_load 默认 true 曾在升级后强制生效）；
+            // ② 服务器 GD 是否支持 WebP 未知——不支持时开关开了也没用，管理
+            // 员应在性能体检页确认 GD 支持状态后再开；③ 开关只影响“之后”
+            // 的上传，旧图用批量工具另行处理，不追溯。
+            'turbo_webp_convert' => ['group'=>'speed', 'type'=>'bool', 'label'=>'上传图片转 WebP', 'desc'=>'JPG/PNG 上传时自动转成 WebP（在压缩流程里完成，只编一次码、不重复有损）。需服务器 GD 支持 WebP，不支持时自动跳过、不影响上传。', 'default'=>false],
+            'turbo_webp_quality' => ['group'=>'speed', 'type'=>'number', 'label'=>'WebP 质量（0–100）', 'desc'=>'转 WebP 时的质量，默认 80；越高越清晰、文件越大。', 'default'=>80],
+            // 原图保留默认 true：转完的 WebP 才是附件指向的文件，原 JPG/PNG
+            // 只作本地备份留着；关掉它时，原图只有在 WebP 校验通过、且（如开
+            // COS）同步成功后才删除——绝不在只有一份本地副本、远程还没确认
+            // 时删东西（Zero-Disk 的教训）。
+            'turbo_webp_keep_original' => ['group'=>'speed', 'type'=>'bool', 'label'=>'转 WebP 后保留原图', 'desc'=>'开启时原 JPG/PNG 保留在服务器上（仅作备份，不再被引用）。关闭时原图在 WebP 校验通过且同步成功后才删除。', 'default'=>true],
             'turbo_quality' => ['group'=>'speed', 'type'=>'number', 'label'=>'压缩质量', 'default'=>85],
             // R14：原图改尺寸独立开关。0 = 不改尺寸（默认，只压质量）；
             // 设为正数（如 2560）时，宽于该值的原图才会被缩到该宽度。
@@ -178,16 +238,29 @@ class Skyline_Core {
         
         $db_opts = get_option('skyline_ai_settings', []);
         $val = $db_opts[$key] ?? ($this->get_config_schema()[$key]['default'] ?? $default);
-        
-        // 配置缓存 TTL 从 86400 缩到 3600 秒：管理员在后台改了配置，
-        // 最长 1 小时生效，而不是等一天；代价是一天最多多几次 get_option，
-        // 相对 24 小时旧配置的风险可以忽略。
+
+        // L33：注意——api_key / oss_sk / redis_auth 等密钥经 get_opt()
+        // 会以明文进 Redis 缓存（下面 cache_set 的 sky_opt_*，TTL 3600 秒）
+        // 与 transient：这是已知现状，不改行为；调用方与部署方须知晓——
+        // Redis 须按内网服务对待、不要对外暴露，密钥轮换后须清掉 sky_opt_*
+        // 缓存（后台保存配置时已清），否则旧密钥最长残留 1 小时。
         set_transient($cache_key, $val, 3600);
         if ($infra) $infra->cache_set($cache_key, $val, 3600);
         $this->options[$key] = $val;
         
         return $val;
     }
+
+    // M20：清空内存里的配置缓存。handle_settings() 保存成功后调用，
+    // 否则同一请求内渲染设置页时 get_opt() 仍返回保存前的值。
+    // 只清内存缓存；Redis/transient 里的 sky_opt_* 由保存方另行清理。
+    public function clear_opt_cache() {
+        $this->options = [];
+    }
+
+    // L16：单日日志轮转标记——清理每天只做一次（静态标记 + transient 双保险，
+    // 同一请求内多次 log() 不重复扫目录；跨请求靠 transient 记当天日期）。
+    private static $log_cleanup_day = null;
 
     public function log($msg, $type = 'info', $context = 'System') {
         $timestamp = current_time('Y-m-d H:i:s');
@@ -197,12 +270,27 @@ class Skyline_Core {
         if (!file_exists($today) && file_exists($this->log_file)) {
             @rename($this->log_file, $dir . '/skyline_ai-' . gmdate('Ymd', filemtime($this->log_file)) . '-' . $this->log_token() . '.log');
         }
-        @file_put_contents($today, sprintf("[%s] [%s] [%s] %s\n", $timestamp, strtoupper($type), $context, $msg), FILE_APPEND);
+        // 单日日志超 10MB 时轮转：把今天的日志改名保留一份（-rotated.log，
+        // 仍命中 7 天清理的 glob），新写入从空文件开始，避免单文件无限膨胀。
+        // 注意：同一请求内 log() 多次调用时 PHP 的 stat 缓存会让 filesize()
+        // 读到旧值，判断前先清掉该文件的缓存，否则阈值可能被漏过。
+        clearstatcache(true, $today);
+        if (file_exists($today) && filesize($today) > 10 * 1024 * 1024) {
+            @rename($today, $dir . '/skyline_ai-' . current_time('Ymd') . '-' . $this->log_token() . '-rotated.log');
+        }
+        @file_put_contents($today, sprintf("[%s] [%s] [%s] %s\n", $timestamp, strtoupper($type), $context, $msg), FILE_APPEND | LOCK_EX);
 
-        // 清理 7 天前的轮转日志
-        $cutoff = time() - 7 * 86400;
-        foreach (glob($dir . '/skyline_ai-*.log') ?: [] as $f) {
-            if (filemtime($f) < $cutoff) @unlink($f);
+        // 清理 7 天前的轮转日志，每天只做一次（不是每次写日志都 glob 扫目录）
+        $today_key = current_time('Ymd');
+        if (self::$log_cleanup_day !== $today_key) {
+            self::$log_cleanup_day = $today_key;
+            if (get_transient('sky_log_cleanup_day') !== $today_key) {
+                set_transient('sky_log_cleanup_day', $today_key, 86400);
+                $cutoff = time() - 7 * 86400;
+                foreach (glob($dir . '/skyline_ai-*.log') ?: [] as $f) {
+                    if (filemtime($f) < $cutoff) @unlink($f);
+                }
+            }
         }
     }
 
@@ -258,7 +346,16 @@ class Skyline_Core {
         $k = $this->get_opt('api_key'); 
         if(!$k) return new WP_Error('sky_api_key_missing', 'Error: API Key missing');
 
-        $hash_key = 'sky_api_' . md5(json_encode($messages) . $temp . $this->get_opt('chat_model'));
+        // M1：system_prompt 填了就作为 system 角色消息拼到最前面再发。
+        // 注意：schema 默认值本身就是一句非空人设（见 system_prompt 的 default），
+        // 所以默认情况下每次调用都会带上这句 system 消息；管理员清空该项后不拼。
+        $sys = trim((string)$this->get_opt('system_prompt', ''));
+        if ($sys !== '') {
+            $messages = array_merge([['role' => 'system', 'content' => $sys]], $messages);
+        }
+
+        // M4：缓存 key 拼入 api_base，换 API 端点后不再命中旧厂商的缓存响应。
+        $hash_key = 'sky_api_' . md5(json_encode($messages) . $temp . $this->get_opt('chat_model') . $this->get_opt('api_base'));
         $infra = class_exists('Skyline_Infra') ? Skyline_Infra::instance() : null;
         if ($infra && method_exists($infra, 'cache_get')) {
             $cached = $infra->cache_get($hash_key);
@@ -283,6 +380,9 @@ class Skyline_Core {
         if(is_wp_error($r)) {
             $err = $r->get_error_message();
             $this->log("API 网络失败: {$err}", 'error', 'API');
+            // S3：api_errors 埋点（走 stat_inc → Infra::stat_incr 的 redis_try 路径，
+            // 不用 redis_safe，见 P4 教训：统计失败绝不能把整站 Redis 置 null）。
+            $this->stat_inc('api_errors');
             return new WP_Error('sky_api_network', 'Network Error: Request failed');
         }
 
@@ -293,6 +393,7 @@ class Skyline_Core {
         if ($code !== 200) {
             $errMsg = (is_array($d) && isset($d['error']['message'])) ? $d['error']['message'] : 'Unknown API Error';
             $this->log("API 返回 {$code}: {$errMsg}", 'error', 'API');
+            $this->stat_inc('api_errors'); // S3
             return new WP_Error('sky_api_http', "API Error ({$code}): " . $errMsg);
         }
 
@@ -300,6 +401,7 @@ class Skyline_Core {
         $content = (is_array($d) && isset($d['choices'][0]['message']['content'])) ? $d['choices'][0]['message']['content'] : null;
         if ($content === null || $content === '') {
             $this->log('API 返回空响应', 'error', 'API');
+            $this->stat_inc('api_errors'); // S3
             return new WP_Error('sky_api_empty', 'API Error: Empty Response');
         }
 
@@ -332,7 +434,18 @@ class Skyline_Core {
                 if (!$redis->auth($this->get_opt('redis_auth'))) throw new Exception('Redis authentication failed');
             }
             $redis->ping();
-            wp_send_json_success('Redis connection verified');
+            // M2：之前只测连通，没测真正用的库。init_redis() 按 redis_db 做
+            // select()，测试也必须 select 同一个库，否则配成非 0 库时测试
+            // 通过、实际用的库却是错的。随后做一次 setex/get/del 读写验证，
+            // 只 ping 通不等于能读写。
+            $db = (int)$this->get_opt('redis_db', 0);
+            if (!$redis->select($db)) throw new Exception('Redis select() 失败：数据库 ' . $db . ' 不可用');
+            $tkey = 'sky:redis_test:' . bin2hex(function_exists('random_bytes') ? random_bytes(8) : substr(md5(uniqid('sky_', true)), 0, 16));
+            $tval = (string)time() . '-' . $tkey;
+            if (!$redis->setex($tkey, 60, $tval)) throw new Exception('Redis 写入测试失败（setex 返回 false）');
+            if ($redis->get($tkey) !== $tval) throw new Exception('Redis 读写验证失败（get 到的值与写入不一致）');
+            try { $redis->del($tkey); } catch (Throwable $ignored) { /* 测试 key 删不掉只留一条 60 秒过期的垃圾，不掩盖已通过的读写验证 */ }
+            wp_send_json_success('Redis 连接验证通过（库 ' . $db . '，读写验证通过）');
         } catch(Throwable $e) {
             wp_send_json_error($e->getMessage());
         }
@@ -412,15 +525,17 @@ class Skyline_Core {
 
     public function handle_chat_front() {
         check_ajax_referer('sky_chat_nonce');
-        
-        $rate_key = 'sky_chat_rate_' . md5($this->get_real_visitor_ip());
-        $rate_count = get_transient($rate_key);
-        if ($rate_count === false) $rate_count = 0;
-        if ((int)$rate_count >= 20) {
-            wp_send_json_error('请求过于频繁，请稍后再试');
+
+        // M13：限流优先走 Redis 原子 INCR（读-改-写不再互相覆盖），Redis 不可用
+        // 时回退到旧的 transient 做法。异常 IP 封禁未做——需要后台 UI 管封禁
+        // 名单，见审核报告 M13。
+        $ip = $this->get_real_visitor_ip();
+        $limit_err = $this->chat_rate_limit_redis($ip);
+        if ($limit_err === false) $limit_err = $this->chat_rate_limit_transient($ip);
+        if (is_string($limit_err)) {
+            wp_send_json_error($limit_err);
         }
-        set_transient($rate_key, (int)$rate_count + 1, 60);
-        
+
         $msg = sanitize_text_field($_POST['msg'] ?? '');
         // 聊天输入加长度上限：超长输入直通 API 会拖慢调用、放大 token 消耗。
         if (mb_strlen($msg) > 2000) {
@@ -431,6 +546,70 @@ class Skyline_Core {
             wp_send_json_error($res->get_error_message());
         }
         wp_send_json_success($res);
+    }
+
+    // M13：Redis 原子限流。返回值：null = 允许；string = 超限提示；
+    // false = Redis 不可用（调用方回退 transient）。INCR 是原子操作，并发
+    // 请求不再互相覆盖；计数为 1 时才设过期，避免每次请求都续期。
+    // 注意：这里直连插件配置的同一台 Redis（与 init_redis() 同一份
+    // host/port/auth/db），因为 Infra 的连接是 private、没有对外暴露的
+    // 原子计数方法；新建连接只发生在聊天请求上，失败即回退、不影响聊天。
+    private function chat_rate_limit_redis($ip) {
+        // M12：先查 Redis 熔断（与 Infra::init_redis() 同一个 transient，
+        // 见 infra.php:28、:90-92，熔断 60 秒）。熔断期间不再 new Redis()
+        // 直连，直接返回 false 走 transient 回退，避免每次聊天都等 2 秒
+        // 连接超时拖垮 FPM 工人。管理员手动测试 handle_test_redis() 有意
+        // 绕过熔断，不改。
+        if (function_exists('get_transient') && get_transient('sky_redis_circuit_open')) return false;
+        if (!class_exists('Redis') || !$this->get_opt('redis_enable')) return false;
+        try {
+            $redis = new Redis();
+            $connected = $redis->connect($this->get_opt('redis_host', '127.0.0.1'), (int)$this->get_opt('redis_port', 6379), 2);
+            if (!$connected) return false;
+            if ($this->get_opt('redis_auth')) {
+                if (!$redis->auth($this->get_opt('redis_auth'))) return false;
+            }
+            if (!$redis->select((int)$this->get_opt('redis_db', 0))) return false;
+
+            $hash = md5($ip);
+            $min_key = 'sky:chat_rate_min:' . $hash . ':' . gmdate('YmdHi');
+            $n = $redis->incr($min_key);
+            if ($n === false) return false;
+            if ($n === 1) $redis->expire($min_key, 120);
+            if ($n > self::CHAT_RATE_PER_MINUTE) return '请求过于频繁，请稍后再试';
+
+            $day_key = 'sky:chat_rate_day:' . $hash . ':' . gmdate('Ymd');
+            $d = $redis->incr($day_key);
+            if ($d === false) return false;
+            if ($d === 1) $redis->expire($day_key, 86400);
+            if ($d > self::CHAT_RATE_PER_DAY) return '今日聊天次数已达上限（500 次），请明天再试';
+
+            return null;
+        } catch (Throwable $e) {
+            return false;
+        }
+    }
+
+    // M13：transient 回退（Redis 不可用时用）。沿用旧的每分钟 20 次逻辑，
+    // 另加每日 500 次上限；与 Redis 路径互斥，不会重复计数。
+    private function chat_rate_limit_transient($ip) {
+        $rate_key = 'sky_chat_rate_' . md5($ip);
+        $rate_count = get_transient($rate_key);
+        if ($rate_count === false) $rate_count = 0;
+        if ((int)$rate_count >= self::CHAT_RATE_PER_MINUTE) {
+            return '请求过于频繁，请稍后再试';
+        }
+        set_transient($rate_key, (int)$rate_count + 1, 60);
+
+        $day_key = 'sky_chat_rate_day_' . md5($ip);
+        $day_count = get_transient($day_key);
+        if ($day_count === false) $day_count = 0;
+        if ((int)$day_count >= self::CHAT_RATE_PER_DAY) {
+            return '今日聊天次数已达上限（500 次），请明天再试';
+        }
+        set_transient($day_key, (int)$day_count + 1, 86400);
+
+        return null;
     }
 
     public function handle_ai_task() {
@@ -518,15 +697,27 @@ class Skyline_Core {
         check_ajax_referer('sky_ai_task_nonce');
         if(!current_user_can('edit_posts')) wp_send_json_error('Unauthorized');
         $prompt = sanitize_text_field($_POST['prompt'] ?? '');
+        // L8：prompt 为空直接报错，不发请求。
+        if ($prompt === '') wp_send_json_error('生图提示词为空');
         $k = $this->get_opt('api_key');
         if(!$k) wp_send_json_error('API Key 未配置');
-        // 图片端点：跟随 api_base 的根域名（chat/completions -> images/generations），不可用时回退默认
-        $base = $this->get_opt('api_base', 'https://api.siliconflow.cn/v1/chat/completions');
-        $img_url = str_replace('/chat/completions', '/images/generations', $base);
-        if ($img_url === $base) $img_url = 'https://api.siliconflow.cn/v1/images/generations';
+        // L8：生图端点不再从 chat 端点 str_replace 推导。优先用独立配置项
+        // api_img_base（根地址，如 https://api.siliconflow.cn/v1）；
+        // 留空时回退旧推导逻辑并记日志（api_base 不是 chat 端点时仍回退
+        // SiliconFlow 默认地址，与修前行为一致）。
+        $img_base = trim((string)$this->get_opt('api_img_base', ''));
+        if ($img_base !== '') {
+            $img_url = rtrim($img_base, '/') . '/images/generations';
+        } else {
+            $base = $this->get_opt('api_base', 'https://api.siliconflow.cn/v1/chat/completions');
+            $img_url = str_replace('/chat/completions', '/images/generations', $base);
+            if ($img_url === $base) $img_url = 'https://api.siliconflow.cn/v1/images/generations';
+            $this->log("生图端点未配置 api_img_base，从 api_base 推导：{$img_url}", 'warning', 'API');
+        }
         $args = [
             'headers' => ['Authorization' => 'Bearer '.$k, 'Content-Type' => 'application/json'],
-            'body' => json_encode(['model' => $this->get_opt('image_model'), 'prompt' => $prompt]),
+            // L8：补尺寸参数，默认 1024x1024。
+            'body' => json_encode(['model' => $this->get_opt('image_model'), 'prompt' => $prompt, 'size' => '1024x1024']),
             'timeout' => 120
         ];
         $r = wp_remote_post($img_url, $args);
@@ -535,13 +726,23 @@ class Skyline_Core {
             wp_send_json_error('生图请求失败: ' . $r->get_error_message());
         }
         $code = wp_remote_retrieve_response_code($r);
+        // L8：API 返回标量体时 $d 不是数组，旧代码 $d['error']['message'] 会
+        // 抛 TypeError 导致 AJAX 500；先判 is_array 再取字段。
         $d = json_decode(wp_remote_retrieve_body($r), true);
         if ($code !== 200) {
-            $errMsg = $d['error']['message'] ?? "HTTP {$code}";
+            $errMsg = (is_array($d) && isset($d['error']['message'])) ? $d['error']['message'] : "HTTP {$code}";
             $this->log("生图失败 ({$code}): {$errMsg}", 'error', 'API');
             wp_send_json_error("生图失败 ({$code}): " . $errMsg);
         }
-        wp_send_json_success($d['data'][0]['url'] ?? 'Fail');
+        // L8：校验返回 URL 为合法 http(s) 地址才返回；失败时返回 WP_Error
+        // 语义的 wp_send_json_error，不再把字符串 'Fail' 当成功 URL 返回
+        // （前端曾拿它拼 <img src="Fail">）。
+        $url = (is_array($d) && isset($d['data'][0]['url'])) ? $d['data'][0]['url'] : null;
+        if (!is_string($url) || filter_var($url, FILTER_VALIDATE_URL) === false || !preg_match('#^https?://#i', $url)) {
+            $this->log('生图失败：未返回合法图片地址', 'error', 'API');
+            wp_send_json_error('生图失败：未返回合法图片地址');
+        }
+        wp_send_json_success($url);
     }
 
     public function handle_clear_logs() {
@@ -557,7 +758,11 @@ class Skyline_Core {
     }
 
     public function enqueue_waifu_assets() {
-        wp_enqueue_style('sky-waifu', SKY_URL . 'assets/css/waifu.css');
+        // L12：与 render_waifu() 同样的门控——关掉悬浮助手时不加载
+        // waifu.css/js/nonce，不再全站无条件加载。
+        if(!$this->get_opt('robot_enable')) return;
+        if ($this->get_opt('robot_only_logged') && !is_user_logged_in()) return;
+        wp_enqueue_style('sky-waifu', SKY_URL . 'assets/css/waifu.css', [], SKY_VERSION);
         wp_enqueue_script('sky-waifu', SKY_URL . 'assets/js/waifu.js', ['jquery'], SKY_VERSION, true);
         wp_localize_script('sky-waifu', 'sky_ajax', [
             'ajax_url' => admin_url('admin-ajax.php'), 
@@ -569,18 +774,26 @@ class Skyline_Core {
         if(!$this->get_opt('robot_enable')) return;
         // 补上缺失的登录可见逻辑！
         if ($this->get_opt('robot_only_logged') && !is_user_logged_in()) return;
+        // 注意：插件自带的 assets/images/robot.png 本身就是坏文件（从 v2.0.1
+        // 起 PNG 头就损坏，getimagesize() 失败），绝不能把它当头像 fallback。
+        // robot_img 没设置时，浮动入口与标题栏都不输出 <img>，改用 emoji
+        // 入口，避免前台出现破图图标。
         $img_url = $this->get_opt('robot_img');
-        if (empty($img_url)) {
-        $img_url = SKY_URL . 'assets/images/robot.png';
-    }
+        $has_img = is_string($img_url) && trim($img_url) !== '';
+        $head_avatar = $has_img
+            ? '<img class="sky-head-avatar" src="' . esc_url($img_url) . '" alt="">'
+            : '';
         echo '
-        <div id="sky-waifu" onclick="toggleSkyChat()">
-            <img src="'.esc_url($img_url).'" alt="AI Assistant">
+        <div id="sky-waifu" onclick="toggleSkyChat()">'
+            . ($has_img
+                ? '<img src="' . esc_url($img_url) . '" alt="AI Assistant">'
+                : '<span class="sky-waifu-fallback" role="img" aria-label="AI Assistant">💬</span>')
+            . '<div id="sky-waifu-tips" class="show">你好！我是灵感屋 AI 助手，有什么可以帮您？</div>
         </div>
-        <div id="sky-waifu-tips" class="show">你好！我是灵感屋 AI 助手，有什么可以帮您？</div>
         <div id="sky-chat-box">
-            <div class="sky-head">
-                <span>✨ Skyline Copilot</span>
+            <div class="sky-head">'
+                . $head_avatar .
+                '<span class="sky-head-title">✨ Skyline Copilot</span>
                 <span style="cursor:pointer;" onclick="toggleSkyChat()">✖</span>
             </div>
             <div id="sky-chat-msgs"></div>
