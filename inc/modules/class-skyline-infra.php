@@ -290,7 +290,7 @@ class Skyline_Redis_Mod {
         }
 
         $infra = Skyline_Infra::instance();
-        $key = $infra->page_cache_key($uri);
+        $key = $this->page_cache_key($uri);
 
         $cached = $infra->cache_get($key);
         if ($cached) $this->serve_page_cache($cached);
