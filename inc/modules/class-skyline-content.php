@@ -37,7 +37,20 @@ class Skyline_Content {
         $do_polish = $core->get_opt('auto_polish');
         
         if ($do_tags || $do_slug || $do_excerpt || $do_polish) {
-            if (!get_post_meta($pid, '_sky_seo_done', true) && !wp_next_scheduled('skyline_async_seo', [$pid])) {
+            // v2.1.1：失败满 3 次后 _sky_seo_done 被置 1、自动重试链停止；
+            // 但手动点“更新”保存时应给一次复活机会——否则日志里“下次保存
+            // 时重试”的承诺永远兑现不了（2026-11-09 实测：70753/70754 三次
+            // 401 后被标记完成，API 恢复后重新保存也不再触发 SEO）。
+            // 区分“成功完成”和“放弃”：成功时 _sky_seo_fail_count 会被删掉，
+            // 放弃时它留在 >=3；只有后者才在保存时清掉重排。
+            $seo_done = get_post_meta($pid, '_sky_seo_done', true);
+            if ($seo_done && (int)get_post_meta($pid, '_sky_seo_fail_count', true) >= 3) {
+                delete_post_meta($pid, '_sky_seo_done');
+                delete_post_meta($pid, '_sky_seo_fail_count');
+                $seo_done = false;
+                $core->log("自动 SEO 曾因连续失败满 3 次停止重试，本次保存已重置、重新排期 [$pid]", 'info', 'SEO');
+            }
+            if (!$seo_done && !wp_next_scheduled('skyline_async_seo', [$pid])) {
                 wp_schedule_single_event(time() + 5, 'skyline_async_seo', [$pid]);
             }
         }
@@ -425,6 +438,43 @@ class Skyline_Content {
         return ['error' => '数据库插入失败'];
     }
 
+    // N-A2：spider_domains（排除域名，一行一个）的解析与匹配抽成公共
+    // 方法，自动同步与手动单张同步共用——之前只自动同步查，手动入口
+    // ajax_spider_single 直接调 download_image，可绕过排除。
+    private function get_spider_excluded_domains() {
+        $core = Skyline_Core::instance();
+        $excluded_domains = [];
+        $domains_raw = trim((string)$core->get_opt('spider_domains', ''));
+        if ($domains_raw !== '') {
+            foreach (explode("\n", $domains_raw) as $line) {
+                $d = strtolower(trim($line));
+                if ($d === '') continue;
+                if (strpos($d, '://') !== false) $d = (string)parse_url($d, PHP_URL_HOST);
+                $d = strtolower(trim(explode('/', $d)[0]));
+                $d = ltrim($d, '*.');
+                $d = ltrim($d, '.');
+                if (strpos($d, ':') !== false) $d = explode(':', $d)[0];
+                if ($d !== '') $excluded_domains[] = $d;
+            }
+            $excluded_domains = array_values(array_unique($excluded_domains));
+        }
+        return $excluded_domains;
+    }
+
+    private function is_host_spider_excluded($host, $excluded_domains) {
+        if ($host === '' || empty($excluded_domains)) return false;
+        foreach ($excluded_domains as $ed) {
+            if ($host === $ed || substr($host, -strlen($ed) - 1) === '.' . $ed) return true;
+        }
+        return false;
+    }
+
+    // 手动单张同步的入口检查：URL 的 host 精确命中或为排除域名的子域名时跳过。
+    public function is_spider_excluded_url($url) {
+        $host = strtolower((string)(parse_url((string)$url, PHP_URL_HOST) ?: ''));
+        return $this->is_host_spider_excluded($host, $this->get_spider_excluded_domains());
+    }
+
     public function auto_spider($pid) {
         $post = get_post($pid);
         if (!$post) return;
@@ -488,21 +538,9 @@ class Skyline_Content {
         $has_more = false;
         // M1：spider_domains（排除域名，一行一个）真正生效：按行解析，
         // 图片 URL 的 host 精确命中或为其子域名时跳过、不同步。
-        $excluded_domains = [];
-        $domains_raw = trim((string)$core->get_opt('spider_domains', ''));
-        if ($domains_raw !== '') {
-            foreach (explode("\n", $domains_raw) as $line) {
-                $d = strtolower(trim($line));
-                if ($d === '') continue;
-                if (strpos($d, '://') !== false) $d = (string)parse_url($d, PHP_URL_HOST);
-                $d = strtolower(trim(explode('/', $d)[0]));
-                $d = ltrim($d, '*.');
-                $d = ltrim($d, '.');
-                if (strpos($d, ':') !== false) $d = explode(':', $d)[0];
-                if ($d !== '') $excluded_domains[] = $d;
-            }
-            $excluded_domains = array_values(array_unique($excluded_domains));
-        }
+        // 解析与匹配见 get_spider_excluded_domains() / is_host_spider_excluded()，
+        // 与手动单张同步共用同一份逻辑（N-A2）。
+        $excluded_domains = $this->get_spider_excluded_domains();
         foreach($candidates as $url_raw) {
             if ($processed_count >= $max_img) { $has_more = true; break; }
 
@@ -511,13 +549,7 @@ class Skyline_Content {
             $url_host = strtolower(parse_url($url_real, PHP_URL_HOST) ?: '');
             if ($url_host !== '' && in_array($url_host, $oss_hosts, true)) continue;
             // M1：命中排除域名（精确或后缀匹配）就跳过不同步、不占名额。
-            if ($url_host !== '' && !empty($excluded_domains)) {
-                $excluded = false;
-                foreach ($excluded_domains as $ed) {
-                    if ($url_host === $ed || substr($url_host, -strlen($ed) - 1) === '.' . $ed) { $excluded = true; break; }
-                }
-                if ($excluded) continue;
-            }
+            if ($this->is_host_spider_excluded($url_host, $excluded_domains)) continue;
             
             $res = $this->download_image($url_real, $pid);
             if(isset($res['id'])) {
@@ -640,7 +672,9 @@ class Skyline_Content {
         if ($do_slug) {
             $prompt = "Generate a concise English URL slug for this title (max 5-8 words). STRICTLY OUTPUT ONLY THE SLUG (lowercase, hyphens). Title: " . $post->post_title;
             $any_attempted = true;
-            $slug = $core->call_api([['role'=>'user', 'content'=>$prompt]]);
+            // N-D2：slug 要求只输出英文，system 人设里的“中文回答”会与之
+            // 冲突——这类纯英文输出任务不拼 system 消息（call_api 第 3 参数）。
+            $slug = $core->call_api([['role'=>'user', 'content'=>$prompt]], 0.7, false);
             if ($slug && !is_wp_error($slug)) {
                 $slug = sanitize_title(strip_tags(preg_replace('/^(Here.*?:\s*)/i', '', $slug)));
                 if ($slug) { $updates['post_name'] = substr(trim(preg_replace('/-+/', '-', $slug), '-'), 0, 60); $any_success = true; }
@@ -822,6 +856,8 @@ class Skyline_Content {
         $url = isset($_POST['url']) ? esc_url_raw(wp_unslash($_POST['url'])) : '';
         $pid = isset($_POST['pid']) ? intval($_POST['pid']) : 0;
         if(!$url) wp_send_json_error('URL为空');
+        // N-A2：手动单张同步同样遵守 spider_domains 排除（与自动同步一致）。
+        if ($this->is_spider_excluded_url($url)) wp_send_json_error('该域名在排除列表中，不同步');
         $result = $this->download_image($url, $pid);
         if(isset($result['id'])) {
             $local_url = wp_get_attachment_url($result['id']);
@@ -952,7 +988,11 @@ class Skyline_Content {
                             var regex = /<img[^>]+(?:data-src|src)=['"]([^'"]+)['"]/g;
                             var matches = [], found;
                             var seen = new Set();
-                            var previewHtml = '';
+                            // N-A1：预览缩略图用 DOM 建节点（.attr('src', …)），
+                            // 不拼 '<img src="'+url+'">' 字符串插进 .html()——
+                            // real 是经 HTML 实体解码后的 URL，可含引号，拼串
+                            // 会跳出 src 属性造成后台 XSS（与 M8 同款修法）。
+                            var previewNodes = [];
                             var tempContent = content;
                             var counter = 0;
                             
@@ -965,7 +1005,7 @@ class Skyline_Content {
                                         var placeholder = 'sky-pending-' + counter + '-' + Math.floor(Math.random()*1000);
                                         matches.push({ raw: raw, real: real, holder: placeholder }); 
                                         seen.add(key);
-                                        previewHtml += '<img src="'+real+'" class="sky-sp-thumb" id="sp-thumb-'+counter+'">';
+                                        previewNodes.push($('<img>').attr('src', real).addClass('sky-sp-thumb').attr('id', 'sp-thumb-'+counter));
                                         counter++;
                                     }
                                 }
@@ -982,7 +1022,7 @@ class Skyline_Content {
                             SkylineEditor.setContent(tempContent);
 
                             $('#sky-spider-status').slideDown();
-                            $('#sky-sp-preview').html(previewHtml);
+                            $('#sky-sp-preview').empty().append(previewNodes);
                             $('#btn-spider-start').prop('disabled', true).text('同步进行中...');
                             $('#sp-total').text(matches.length);
                             $('#sp-cur').text(0);

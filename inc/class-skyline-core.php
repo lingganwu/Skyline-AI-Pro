@@ -128,7 +128,7 @@ class Skyline_Core {
             'api_base' => ['group'=>'ai', 'type'=>'url', 'label'=>'API Endpoint', 'default'=>'https://api.siliconflow.cn/v1/chat/completions'],
             // 生图端点根地址（L8）：handle_gen_img() 优先用这里拼 /images/generations；
             // 留空时回退到从 api_base 推导（/chat/completions → /images/generations）并记日志。
-            'api_img_base' => ['group'=>'ai', 'type'=>'url', 'label'=>'生图 API 根地址', 'desc'=>'例如 https://api.siliconflow.cn/v1；留空时从上方 API Endpoint 推导生图端点。', 'default'=>''],
+            'api_img_base' => ['group'=>'ai', 'type'=>'url', 'label'=>'生图 API 根地址', 'desc'=>'例如 https://api.siliconflow.cn/v1；默认与上方 API Endpoint 同厂商（硅基流动）。留空时从 API Endpoint 推导（仅当它以 /chat/completions 结尾时）；推导不出请填写。', 'default'=>'https://api.siliconflow.cn/v1'],
             'api_key' => ['group'=>'ai', 'type'=>'password', 'label'=>'API Key', 'desc'=>'你的 API 密钥 (sk-...)', 'required'=>true],
             'chat_model' => ['group'=>'ai', 'type'=>'text', 'label'=>'对话模型', 'default'=>'deepseek-ai/DeepSeek-V3'],
             'image_model' => ['group'=>'ai', 'type'=>'text', 'label'=>'绘图模型', 'default'=>'black-forest-labs/FLUX.1-schnell'],
@@ -208,7 +208,7 @@ class Skyline_Core {
             // COS）同步成功后才删除——绝不在只有一份本地副本、远程还没确认
             // 时删东西（Zero-Disk 的教训）。
             'turbo_webp_keep_original' => ['group'=>'speed', 'type'=>'bool', 'label'=>'转 WebP 后保留原图', 'desc'=>'开启时原 JPG/PNG 保留在服务器上（仅作备份，不再被引用）。关闭时原图在 WebP 校验通过且同步成功后才删除。', 'default'=>true],
-            'turbo_quality' => ['group'=>'speed', 'type'=>'number', 'label'=>'压缩质量', 'default'=>85],
+            'turbo_quality' => ['group'=>'speed', 'type'=>'number', 'label'=>'压缩质量', 'desc'=>'💡 取值 0–100，越高画质越好、文件越大。', 'default'=>85],
             // R14：原图改尺寸独立开关。0 = 不改尺寸（默认，只压质量）；
             // 设为正数（如 2560）时，宽于该值的原图才会被缩到该宽度。
             // 之前无条件缩到 2560px 是静默不可逆行为，与 Zero-Disk 叠加会
@@ -342,15 +342,36 @@ class Skyline_Core {
     // R7：去掉 sleep() 重试与 120 秒超时——单次请求、30 秒超时、失败即返，
     // 不再占着 PHP-FPM 工人重试；重试与否由调用方决定。stat_inc('api_calls')
     // 只在单次调用里计一次，不再因递归重试重复计数。
-    public function call_api($messages, $temp = 0.7) {
+    // v2.1.1：接口错误体有多种形状——OpenAI 风格 error.message、硅基
+    // 流动风格顶层 message、error 直接是字符串——逐个取，取不到才报
+    // fallback。只取 message 字段，绝不原样倾倒响应体（体里可能含密钥）。
+    // 2026-11-09 实测：09:28 与 12:32 的 401 在日志/弹窗里只显示
+    // “Unknown API Error”，因为当时那次 401 的体不是 error.message 形状。
+    private function extract_api_error_message($d, $fallback = 'Unknown API Error') {
+        if (is_array($d)) {
+            if (isset($d['error']['message']) && is_string($d['error']['message']) && $d['error']['message'] !== '') {
+                return $d['error']['message'];
+            }
+            if (isset($d['error']) && is_string($d['error']) && $d['error'] !== '') {
+                return $d['error'];
+            }
+            if (isset($d['message']) && is_string($d['message']) && $d['message'] !== '') {
+                return $d['message'];
+            }
+        }
+        return $fallback;
+    }
+    public function call_api($messages, $temp = 0.7, $with_system = true) {
         $k = $this->get_opt('api_key'); 
         if(!$k) return new WP_Error('sky_api_key_missing', 'Error: API Key missing');
 
         // M1：system_prompt 填了就作为 system 角色消息拼到最前面再发。
         // 注意：schema 默认值本身就是一句非空人设（见 system_prompt 的 default），
         // 所以默认情况下每次调用都会带上这句 system 消息；管理员清空该项后不拼。
+        // N-D2：$with_system=false 时不拼——纯英文输出任务（如 slug_en）
+        // 与人设里的“中文回答”冲突，拼了会让模型输出中文、再被 sanitize_title 清空。
         $sys = trim((string)$this->get_opt('system_prompt', ''));
-        if ($sys !== '') {
+        if ($with_system && $sys !== '') {
             $messages = array_merge([['role' => 'system', 'content' => $sys]], $messages);
         }
 
@@ -391,7 +412,7 @@ class Skyline_Core {
         $d = json_decode($body, true);
 
         if ($code !== 200) {
-            $errMsg = (is_array($d) && isset($d['error']['message'])) ? $d['error']['message'] : 'Unknown API Error';
+            $errMsg = $this->extract_api_error_message($d);
             $this->log("API 返回 {$code}: {$errMsg}", 'error', 'API');
             $this->stat_inc('api_errors'); // S3
             return new WP_Error('sky_api_http', "API Error ({$code}): " . $errMsg);
@@ -578,7 +599,11 @@ class Skyline_Core {
             if ($n === 1) $redis->expire($min_key, 120);
             if ($n > self::CHAT_RATE_PER_MINUTE) return '请求过于频繁，请稍后再试';
 
-            $day_key = 'sky:chat_rate_day:' . $hash . ':' . gmdate('Ymd');
+            // N-D3：每日上限按本地天（站点时区）重置——gmdate 是 UTC 天，
+            // 北京时间 08:00 才翻天，上午 8 点前仍算前一天的额度。
+            // current_time() 走站点时区设置；分钟桶不受天边界影响，仍用 gmdate。
+            $day = function_exists('current_time') ? (string)current_time('Ymd') : gmdate('Ymd');
+            $day_key = 'sky:chat_rate_day:' . $hash . ':' . $day;
             $d = $redis->incr($day_key);
             if ($d === false) return false;
             if ($d === 1) $redis->expire($day_key, 86400);
@@ -636,7 +661,9 @@ class Skyline_Core {
 
         $prompt = isset($prompts[$t]) ? $prompts[$t] : "AI Task: $t. Input: $i";
         
-        $res = $this->call_api([['role'=>'user', 'content'=>$prompt]]);
+        // N-D2：slug_en 要求只输出英文 slug，system 人设里的“中文回答”
+        // 会与之冲突——该任务不拼 system 消息（call_api 第 3 参数）。
+        $res = $this->call_api([['role'=>'user', 'content'=>$prompt]], 0.7, $t !== 'slug_en');
         
         // R2：call_api 失败返回 WP_Error，不再是含 "Error" 的字符串。
         if (is_wp_error($res)) {
@@ -701,18 +728,22 @@ class Skyline_Core {
         if ($prompt === '') wp_send_json_error('生图提示词为空');
         $k = $this->get_opt('api_key');
         if(!$k) wp_send_json_error('API Key 未配置');
-        // L8：生图端点不再从 chat 端点 str_replace 推导。优先用独立配置项
-        // api_img_base（根地址，如 https://api.siliconflow.cn/v1）；
-        // 留空时回退旧推导逻辑并记日志（api_base 不是 chat 端点时仍回退
-        // SiliconFlow 默认地址，与修前行为一致）。
+        // L8：生图端点优先用独立配置项 api_img_base（根地址，schema 默认
+        // 与 API Endpoint 同厂商：https://api.siliconflow.cn/v1）。
+        // 留空时只从以 /chat/completions 结尾的 api_base 推导；推导不出
+        // 时直接报错，不再静默回退 SiliconFlow 默认地址——api_base 换了
+        // 厂商时，偷偷把提示词发给另一家既鉴权失败、也不符合用户预期。
         $img_base = trim((string)$this->get_opt('api_img_base', ''));
         if ($img_base !== '') {
             $img_url = rtrim($img_base, '/') . '/images/generations';
         } else {
-            $base = $this->get_opt('api_base', 'https://api.siliconflow.cn/v1/chat/completions');
-            $img_url = str_replace('/chat/completions', '/images/generations', $base);
-            if ($img_url === $base) $img_url = 'https://api.siliconflow.cn/v1/images/generations';
-            $this->log("生图端点未配置 api_img_base，从 api_base 推导：{$img_url}", 'warning', 'API');
+            $base = trim((string)$this->get_opt('api_base', 'https://api.siliconflow.cn/v1/chat/completions'));
+            if (substr($base, -17) === '/chat/completions') {
+                $img_url = str_replace('/chat/completions', '/images/generations', $base);
+                $this->log("生图端点未配置 api_img_base，从 api_base 推导：{$img_url}", 'warning', 'API');
+            } else {
+                wp_send_json_error('生图端点未配置：请在智能核心设置里填写“生图 API 根地址”，或把 API Endpoint 改为以 /chat/completions 结尾的地址');
+            }
         }
         $args = [
             'headers' => ['Authorization' => 'Bearer '.$k, 'Content-Type' => 'application/json'],
@@ -730,7 +761,7 @@ class Skyline_Core {
         // 抛 TypeError 导致 AJAX 500；先判 is_array 再取字段。
         $d = json_decode(wp_remote_retrieve_body($r), true);
         if ($code !== 200) {
-            $errMsg = (is_array($d) && isset($d['error']['message'])) ? $d['error']['message'] : "HTTP {$code}";
+            $errMsg = $this->extract_api_error_message($d, "HTTP {$code}");
             $this->log("生图失败 ({$code}): {$errMsg}", 'error', 'API');
             wp_send_json_error("生图失败 ({$code}): " . $errMsg);
         }

@@ -7,7 +7,7 @@
 <a id="english"></a>
 ## 🇬🇧 English Version
 
-[![WordPress Version](https://img.shields.io/badge/WordPress-v2.0.1-blue.svg)](https://github.com/lingganwu/Skyline-AI-Pro/releases)
+[![WordPress Version](https://img.shields.io/badge/WordPress-v2.1.1-blue.svg)](https://github.com/lingganwu/Skyline-AI-Pro/releases)
 [![License](https://img.shields.io/badge/License-GPLv2%2B-green.svg)](https://creativecommons.org/licenses/by/2.0/)
 [![Security](https://img.shields.io/badge/Security-WP.org%20Standard-brightgreen.svg)]()
 
@@ -76,7 +76,7 @@ By shifting from simple content collection to **Intelligent Data Integration**, 
 | :--- | :---: | :---: | :--- |
 | **词汇合规性** | ⚠️ 基础 | ✅ 完全合规 | 确保能顺利上架官方商店 |
 | **安全等级** | ⚠️ 标准 | ✅ 深度加固 | 彻底消除 XSS/CSRF 风险 |
-| **数据加载速度** | 🐢 直接读库 | ⚡ Transient 缓存 | 极致的后台操作流畅度 |
+| **数据加载速度** | 🐢 直接读库 | ⚡ Transient 缓存 | 后台操作更流畅 |
 | **质量控制** | ❌ 人工检查 | ✅ AI 自动审计 | 保证产出内容的高质量 |
 
 ### 🛠️ 安装指南
