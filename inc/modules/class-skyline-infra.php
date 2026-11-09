@@ -69,12 +69,19 @@ class Skyline_Infra {
             }
             // L2：选了压缩但常量不存在时记一条 warn 日志，不要静默失效——
             // phpredis 6.x 起不再定义 COMPRESSION_LZF，升级后站上选中的
-            // LZF 会悄悄回退为不压缩，后台应有提示。
+            // LZF 会悄悄回退为不压缩，后台应有提示。但 init_redis 每个请
+            // 求都跑，同一句警告不能每请求写一行：每天只记一次（transient
+            // 去重，键里带压缩名、换了选项会重新提示），其余请求静默回退。
             if (isset($opts['redis_compression']) && in_array($opts['redis_compression'], ['zstd', 'lzf'], true)) {
                 $const = $opts['redis_compression'] === 'zstd' ? 'Redis::COMPRESSION_ZSTD' : 'Redis::COMPRESSION_LZF';
                 if (!defined($const)) {
-                    error_log('Skyline Redis: compression ' . $opts['redis_compression'] . ' unavailable (constant ' . $const . ' not defined), falling back to no compression');
-                    $this->log_redis_error('Redis 压缩 ' . $opts['redis_compression'] . ' 不可用（phpredis 未提供该常量），已回退为不压缩');
+                    $warn_key = 'sky_redis_compression_warned_' . $opts['redis_compression'];
+                    $warned = function_exists('get_transient') ? get_transient($warn_key) : false;
+                    if (!$warned) {
+                        if (function_exists('set_transient')) set_transient($warn_key, 1, DAY_IN_SECONDS);
+                        error_log('Skyline Redis: compression ' . $opts['redis_compression'] . ' unavailable (constant ' . $const . ' not defined), falling back to no compression');
+                        $this->log_redis_error('Redis 压缩 ' . $opts['redis_compression'] . ' 不可用（phpredis 未提供该常量），已回退为不压缩');
+                    }
                 }
             }
             $this->redis = $redis;
@@ -784,7 +791,8 @@ class Skyline_Turbo_Mod {
         if (is_array($metadata) && !empty($metadata['sizes'])) {
             foreach ($metadata['sizes'] as $size_info) {
                 if (empty($size_info['file'])) continue;
-                $size_file = dirname($file) . '/' . $size_info['file'];
+                // WebP：拼路径前过 basename()，防元数据里的 ../ 穿越（与 L30 同款）。
+                $size_file = dirname($file) . '/' . basename($size_info['file']);
                 if (!file_exists($size_file)) continue;
                 $ftype = wp_check_filetype($size_file);
                 if (in_array($ftype['type'], ['image/jpeg', 'image/png'], true)) {
@@ -862,7 +870,8 @@ class Skyline_Turbo_Mod {
             $base_dir = dirname($file);
             foreach ($metadata['sizes'] as $size_name => $size_info) {
                 if (empty($size_info['file'])) continue;
-                $size_file = $base_dir . '/' . $size_info['file'];
+                // WebP：拼路径前过 basename()，防元数据里的 ../ 穿越（与 L30 同款）。
+                $size_file = $base_dir . '/' . basename($size_info['file']);
                 if (!file_exists($size_file)) continue;
                 if (isset($done[$size_name]) && $done[$size_name] === md5_file($size_file)) continue;
                 $ftype = wp_check_filetype($size_file);
@@ -1570,7 +1579,9 @@ if (!class_exists('Skyline_OSS_Mod')) {
         private function delete_webp_originals($attachment_id) {
             $pending = get_post_meta($attachment_id, '_sky_webp_orig_pending', true);
             if (!is_array($pending) || empty($pending)) return;
-            delete_post_meta($attachment_id, '_sky_webp_orig_pending');
+            // N-D5：原来先删登记再删文件，删失败就丢了重试记录。改为逐个删：
+            // 成功的从清单里去掉，失败的留在清单里（下次 upload_all_sizes
+            // 成功分支再调本方法时重试；清单本身就是重试记录）。
             $current = get_attached_file($attachment_id);
             $metadata = get_post_meta($attachment_id, '_wp_attachment_metadata', true);
             $live = [];
@@ -1582,6 +1593,7 @@ if (!class_exists('Skyline_OSS_Mod')) {
                 }
             }
             $core = Skyline_Core::instance();
+            $remaining = [];
             foreach ($pending as $path) {
                 if (!is_string($path) || $path === '' || isset($live[$path])) continue;
                 $ext = strtolower(pathinfo($path, PATHINFO_EXTENSION));
@@ -1590,8 +1602,14 @@ if (!class_exists('Skyline_OSS_Mod')) {
                 if (@unlink($path)) {
                     $core->log("🗑️ [WebP] 原图已删除（WebP 已校验 + COS 已同步）：{$path}", 'info', 'Turbo');
                 } else {
-                    $core->log("⚠️ [WebP] 原图删除失败，已保留：{$path}", 'warn', 'Turbo');
+                    $core->log("⚠️ [WebP] 原图删除失败，已保留待重试：{$path}", 'warn', 'Turbo');
+                    $remaining[] = $path;
                 }
+            }
+            if (empty($remaining)) {
+                delete_post_meta($attachment_id, '_sky_webp_orig_pending');
+            } else {
+                update_post_meta($attachment_id, '_sky_webp_orig_pending', array_values(array_unique($remaining)));
             }
         }
 

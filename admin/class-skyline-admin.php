@@ -533,6 +533,7 @@ class Skyline_Admin {
             <div class="sky-card">
                 <div class="sky-card-title">📜 更新历史</div>
                 <div style="font-size: 13px; color: var(--sky-text-muted); line-height: 1.8;">
+                    <b>v2.1.1</b> - 审核遗留小尾巴全修：预览防 XSS、手动同步补排除检查、英文 Slug 不带中文人设、每日上限按本地天重置、WebP 原图删失败可重试、生图端点安全默认值；重新保存复活已放弃的自动 SEO、接口报错带出真实 message<br>
                     <b>v2.1.0</b> - 聊天面板美化 + WebP 转换 + 图片同步自动/手动切换 + 看板娘气泡重做；审核 61 项全修（wp-cron 饿死、保存假成功、API 错误统计、9 个摆设开关等）<br>
                     <b>v2.0.0</b> - 旗舰级架构重建，引入企业级视觉语言<br>
                     <b>v1.5.0</b> - 视觉架构升维，增强合规性<br>
@@ -983,12 +984,6 @@ class Skyline_Admin {
                 echo '<div class="sky-field-input" style="width:100%;">';
                 echo '<input type="number" name="skyline_settings[' . esc_attr($key) . ']" value="' . esc_attr($val) . '" min="' . $num_min . '"' . ($num_max !== null ? ' max="' . $num_max . '"' : '') . ' step="1">';
                 echo '</div>';
-                // turbo_quality 的 desc 在 core.php 的 schema 里（另一位修复
-                // 员负责）；schema 没写 desc 时这里补一行 0–100 的说明，
-                // 避免与 schema 的 desc 重复出现。
-                if ($key === 'turbo_quality' && empty($cfg['desc'])) {
-                    echo '<div class="sky-field-desc">💡 取值 0–100，越高画质越好、文件越大。</div>';
-                }
                 break;
 
             case 'url':
