@@ -22,6 +22,10 @@ class Skyline_Infra {
         $opts = get_option('skyline_ai_settings', []);
         if (!is_array($opts)) $opts = [];
         if (empty($opts['redis_enable'])) return;
+        // M12：短期熔断——上次连接失败后 60 秒内不再尝试连接。标记存在
+        // transient（落 wp_options，不依赖 Redis 自身）；到期自动恢复，
+        // 避免 Redis 宕机时每个请求都等 2 秒连接超时、拖垮 FPM 工人。
+        if (function_exists('get_transient') && get_transient('sky_redis_circuit_open')) return;
 
         try {
             $redis = new Redis();
@@ -31,18 +35,21 @@ class Skyline_Infra {
             $connected = $redis->connect($opts['redis_host'] ?? '127.0.0.1', (int)($opts['redis_port'] ?? 6379), 2);
             if (!$connected) {
                 $this->redis = null;
+                $this->open_redis_circuit();
                 error_log('Skyline Redis: connect() failed');
                 $this->log_redis_error('Redis 连接失败（connect 返回 false）');
                 return;
             }
             if (!empty($opts['redis_auth']) && !$redis->auth($opts['redis_auth'])) {
                 $this->redis = null;
+                $this->open_redis_circuit();
                 error_log('Skyline Redis: auth() failed');
                 $this->log_redis_error('Redis 认证失败');
                 return;
             }
             if (!empty($opts['redis_db']) && !$redis->select((int)$opts['redis_db'])) {
                 $this->redis = null;
+                $this->open_redis_circuit();
                 error_log('Skyline Redis: select() failed');
                 $this->log_redis_error('Redis select() 失败');
                 return;
@@ -60,12 +67,28 @@ class Skyline_Infra {
             if (isset($opts['redis_compression']) && $opts['redis_compression'] === 'lzf' && defined('Redis::COMPRESSION_LZF')) {
                 $redis->setOption(Redis::OPT_COMPRESSION, Redis::COMPRESSION_LZF);
             }
+            // L2：选了压缩但常量不存在时记一条 warn 日志，不要静默失效——
+            // phpredis 6.x 起不再定义 COMPRESSION_LZF，升级后站上选中的
+            // LZF 会悄悄回退为不压缩，后台应有提示。
+            if (isset($opts['redis_compression']) && in_array($opts['redis_compression'], ['zstd', 'lzf'], true)) {
+                $const = $opts['redis_compression'] === 'zstd' ? 'Redis::COMPRESSION_ZSTD' : 'Redis::COMPRESSION_LZF';
+                if (!defined($const)) {
+                    error_log('Skyline Redis: compression ' . $opts['redis_compression'] . ' unavailable (constant ' . $const . ' not defined), falling back to no compression');
+                    $this->log_redis_error('Redis 压缩 ' . $opts['redis_compression'] . ' 不可用（phpredis 未提供该常量），已回退为不压缩');
+                }
+            }
             $this->redis = $redis;
         } catch (Throwable $e) {
             $this->redis = null;
+            $this->open_redis_circuit();
             error_log('Skyline Redis init failed: ' . $e->getMessage());
             $this->log_redis_error('Redis 初始化失败：' . $e->getMessage());
         }
+    }
+
+    // M12：打开 Redis 熔断——60 秒内不再尝试连接（见 init_redis 注释）。
+    private function open_redis_circuit() {
+        if (function_exists('set_transient')) set_transient('sky_redis_circuit_open', 1, 60);
     }
 
     // Redis 故障时写插件日志（init 阶段 Skyline_Core 可能尚未就绪，故包一层防护）。
@@ -148,7 +171,9 @@ class Skyline_Infra {
     }
 
     // 只有持有者才能释放（Lua 比对 token），防止误删他人刚拿到的锁。
-    // 释放失败也无妨：锁本身带过期，最多 10 秒后自动失效。
+    // 释放失败也无妨：锁本身带过期，最多 30 秒后自动失效（与 page_cache()
+    // 里 lock_acquire($key, 30) 的 TTL 一致；lock_acquire() 的默认参数
+    // 10 秒只是形参默认值，实际调用方传 30 秒）。
     public function lock_release($key, $token) {
         $this->redis_try(function ($redis) use ($key, $token) {
             $script = "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end";
@@ -213,7 +238,9 @@ class Skyline_Infra {
         }
         if (is_callable($fallback)) {
             $val = $fallback();
-            if ($this->redis) {
+            // L27 同款守卫：ttl<=0 时不写，setex(key, 0) 会抛异常并经
+            // redis_safe() 把整站 Redis 连接置 null（见 cache_set 注释）。
+            if ($this->redis && (int)$ttl > 0) {
                 $this->redis_safe(function ($redis) use ($key, $val, $ttl) {
                     $redis->setex('sky:' . $key, $ttl, $this->cache_encode($val));
                 });
@@ -223,7 +250,13 @@ class Skyline_Infra {
         return null;
     }
 
+    // L27：TTL 钳制——ttl<=0 时直接不写。redis_ttl=0 时 setex(key, 0)
+    // 会被 Redis 拒收、抛异常，redis_safe() 随即将整站 Redis 连接置 null，
+    // 当次请求后续缓存全跳过。注意：page_ttl 下限 60 秒的 max() 仍在
+    // page_cache() 里保留（管理员填更短的页面 TTL 时以 60 秒为准）。
     public function cache_set($key, $val, $ttl = 3600) {
+        $ttl = (int)$ttl;
+        if ($ttl <= 0) return;
         if ($this->redis) {
             $this->redis_safe(function ($redis) use ($key, $val, $ttl) {
                 $redis->setex('sky:' . $key, $ttl, $this->cache_encode($val));
@@ -259,9 +292,20 @@ class Skyline_Infra {
 if (!class_exists('Skyline_Redis_Mod')) {
 class Skyline_Redis_Mod {
     public function __construct() {
-        add_action('init', [$this, 'page_cache'], 0);
+        // S4：init 优先级 0 → 20。WP 核心把 wp_cron() 挂在 init 默认优先级
+        // 10（wp-includes/default-filters.php），wp_cron() 只负责把
+        // _wp_cron() 注册到 shutdown 钩子（WP 6.9+；6.9 之前是注册到
+        // wp_loaded，同样在 init:10 之后）。page_cache() 命中时直接
+        // exit，而 exit 会触发已注册的 shutdown 钩子——优先级 0 时 exit
+        // 发生在 wp_cron() 注册之前，缓存命中请求永远不触发 cron spawn，
+        // 爬虫/自动 SEO/Zero-Disk 删除在低流量时段系统性延后；改到 20
+        // 后 wp_cron() 已在 10 注册，exit 仍会走到 shutdown、触发 _wp_cron。
+        // 仓库里另一处 init 注册是 Turbo 的 apply_turbo_switches（默认优
+        // 先级 10，只做 emoji/embeds/xmlrpc 的移除，不读页面缓存、不依赖
+        // page_cache 在 0 运行）；也不要同时加服务器 crontab（与本修复二选一）。
+        add_action('init', [$this, 'page_cache'], 20);
         add_action('save_post', [$this, 'smart_flush'], 10, 2);
-        add_action('deleted_post', [$this, 'flush_on_delete'], 10, 1);
+        add_action('deleted_post', [$this, 'flush_on_delete'], 10, 2);
     }
 
     public function page_cache() {
@@ -296,13 +340,16 @@ class Skyline_Redis_Mod {
         if ($cached) $this->serve_page_cache($cached);
 
         // 缓存未命中：防惊群。只放一个请求回源生成，其他请求短暂等待
-        // （最多 10 秒），等到了直接用新缓存；等不到也不阻塞访客，自己生成。
+        // （M11：最多 3 秒，15×200ms）。持有者生成要 12–14 秒，等满 3 秒
+        // 还没好就自己生成——等待更久只会白占 FPM 工人（2 核小服务器工人
+        // 本就不多，10 秒等待曾把工人占用放大 5 倍、且仍等不到 12 秒的
+        // 生成结果）。等到了直接用新缓存；等不到也不阻塞访客，自己生成。
         // Redis 不可用时 lock_acquire() 返回 null，不等待、直接生成。
         // 锁 TTL 30 秒：本站页面生成要 12–14 秒，10 秒锁会在持有者还没
-        // 生成完时过期，等于没锁（P2）；等待上限 10 秒仍短于 FPM 超时。
+        // 生成完时过期，等于没锁（P2）。
         $lock_token = $infra->lock_acquire($key, 30);
         if ($lock_token === false) {
-            for ($i = 0; $i < 50; $i++) {
+            for ($i = 0; $i < 15; $i++) {
                 usleep(200000);
                 $cached = $infra->cache_get($key, null, 3600, false);
                 if ($cached) {
@@ -323,11 +370,13 @@ class Skyline_Redis_Mod {
         ob_start(function($buf) use ($infra, $key, $page_ttl, $lock_token) {
             if (strlen($buf) > 200 && http_response_code() === 200 && !is_404()) {
                 // 只缓存 HTML：万一排除规则漏掉 JSON/XML，也不进页面缓存。
-                $ctype = 'text/html; charset=UTF-8';
+                // L10：响应没有 Content-Type 头时不写缓存——不要用 text/html
+                // 兜底，否则非 HTML 响应会被写进页面缓存。
+                $ctype = '';
                 foreach (headers_list() as $h) {
                     if (stripos($h, 'Content-Type:') === 0) { $ctype = trim(substr($h, 13)); break; }
                 }
-                if (stripos($ctype, 'text/html') !== false) {
+                if ($ctype !== '' && stripos($ctype, 'text/html') !== false) {
                     $infra->cache_set($key, ['status' => 200, 'ctype' => $ctype, 'body' => $buf], $page_ttl);
                 }
             }
@@ -336,19 +385,21 @@ class Skyline_Redis_Mod {
         });
     }
 
-    // R10：页面缓存 key 归一化——剥离营销/追踪类查询参数（utm_*、fbclid、
-    // gclid 等），否则任意查询串都会生成独立 key，可被随机串刷爆 Redis。
-    // 只保留影响内容的查询参数，参数按字母序重排（顺序不同也命中同一 key）。
-    // ?s=、?preview=、?amp、rest_route 本就被排除，不受影响。
+    // L25：页面缓存 key 白名单——只保留影响内容的查询参数（分页、
+    // 文章 ID、分类/标签/作者/日期等 WP 核心查询变量），其余查询串一律
+    // 剥离；参数按字母序重排（顺序不同也命中同一 key）。修前任意查询串
+    // 都生成独立 key（?a=1、?a=2… 各一个），600 秒 TTL 内可被随机串
+    // 刷出大量无用 key 挤占 Redis。?s=、?preview=、?amp、rest_route
+    // 本就被排除，不受影响。
     public function page_cache_key($uri) {
         $parsed = parse_url($uri);
         $path = $parsed['path'] ?? '/';
         $query = [];
         if (!empty($parsed['query'])) {
             parse_str($parsed['query'], $query);
-            $tracking = ['fbclid', 'gclid', 'gbraid', 'wbraid', 'msclkid', 'mc_cid', 'mc_eid', 'fb_action_ids', 'fb_source', 'igshid', 'dclid', 'yclid', 'twclid', 'li_fat_id', '_ga', '_gac', 'vero_id', 'vero_conv', 'srsltid'];
+            $allowed = ['paged', 'page', 'p', 'cpage', 'post_type', 'cat', 'category_name', 'tag', 'author', 'year', 'monthnum', 'day'];
             foreach ($query as $k => $v) {
-                if (stripos($k, 'utm_') === 0 || in_array(strtolower($k), $tracking, true)) unset($query[$k]);
+                if (!in_array(strtolower($k), $allowed, true)) unset($query[$k]);
             }
             ksort($query);
         }
@@ -367,7 +418,13 @@ class Skyline_Redis_Mod {
             echo $cached['body'];
             exit;
         }
+        // L26：升级前存的纯字符串旧缓存没有存过 Content-Type/状态码，
+        // 只能恢复成它当初唯一的合法形态——text/html + 200（页面缓存写
+        // 入时只收 text/html 响应）。不要原样输出：不显式设置时响应头
+        // 全靠 PHP 默认值，且状态码可能是上一个请求的残留。
         if (is_string($cached)) {
+            http_response_code(200);
+            header('Content-Type: text/html; charset=UTF-8');
             header('X-Sky-Redis: HIT');
             echo $cached;
             exit;
@@ -375,8 +432,18 @@ class Skyline_Redis_Mod {
         return false;
     }
 
+    // M3：不要每次保存都全清页面缓存。跳过修订版、自动草稿
+    // （DOING_AUTOSAVE，打开写文章页即触发）、附件（wp_insert_attachment
+    // 同样触发 save_post）和 auto-draft（新建文章页创建的草稿）；只有
+    // 文章真正发布/更新/下架/删除时才全清。修前发文/写稿/传图都会让
+    // 全站冷启动，首批访客直面 12–14 秒生成。
     public function smart_flush($pid, $post) {
-        if(wp_is_post_revision($pid)) return;
+        if (wp_is_post_revision($pid)) return;
+        if (defined('DOING_AUTOSAVE') && DOING_AUTOSAVE) return;
+        if (is_object($post)) {
+            if (isset($post->post_type) && $post->post_type === 'attachment') return;
+            if (isset($post->post_status) && $post->post_status === 'auto-draft') return;
+        }
         $core = Skyline_Core::instance();
         $infra = Skyline_Infra::instance();
         // redis_smart_purge 开启（默认 true）：按前缀批量清全部页面缓存，
@@ -391,7 +458,12 @@ class Skyline_Redis_Mod {
         $infra->cache_del('page_' . md5(get_permalink($pid)));
     }
 
-    public function flush_on_delete($pid) {
+    // M3：删修订版时不全清。注意 deleted_post 触发时行已删，wp_is_post_revision()
+    // 查不到类型，故用钩子传进来的 $post 对象判 post_type（WP 在删除前
+    // 抓到的对象会原样传给 deleted_post）。
+    public function flush_on_delete($pid, $post = null) {
+        if (is_object($post) && isset($post->post_type) && $post->post_type === 'revision') return;
+        if ($post === null && wp_is_post_revision($pid)) return;
         if (!Skyline_Core::instance()->get_opt('redis_smart_purge', true)) return;
         Skyline_Infra::instance()->cache_del_prefix('page_');
     }
@@ -415,11 +487,71 @@ class Skyline_Turbo_Mod {
         add_filter('wp_check_filetype_and_ext', [$this, 'check_svg_filetype'], 10, 4);
         add_filter('wp_handle_upload_prefilter', [$this, 'sanitize_svg_upload']);
         add_filter('upload_size_limit', [$this, 'limit_upload_size']);
+        // M1：四个 Turbo 摆设开关逐个实现（之前只在配置表里、代码里没人读）。
+        // 与上面三个死选项同一规矩：这里只注册钩子，开关在回调里再读
+        // get_opt——构造阶段读 get_opt 会触发 Skyline_Infra::instance()
+        // 重入（实例尚未赋值完成），造成无限递归；回调执行时实例早已就绪。
+        // emoji/embeds/xmlrpc 的移除必须在 init 时做（WP 核心在 default-filters
+        // 里先加好这些钩子，init 时移除才赶得上 wp_head/rest_api_init）。
+        add_action('init', [$this, 'apply_turbo_switches']);
+        add_filter('sanitize_file_name', [$this, 'hash_sanitize_filename'], 10, 2);
+        // 批量转 WebP 工具（后台性能体检页）：扫描 + 分批转换。
+        add_action('wp_ajax_sky_webp_scan', [$this, 'ajax_webp_scan']);
+        add_action('wp_ajax_sky_webp_batch', [$this, 'ajax_webp_batch']);
     }
 
     public function force_lazy_load($default, $tag_name, $context) {
         if (!Skyline_Core::instance()->get_opt('turbo_lazy_load')) return $default;
         return true;
+    }
+
+    // M1：四个 Turbo 开关的实际生效点（init 时统一应用）。
+    public function apply_turbo_switches() {
+        $core = Skyline_Core::instance();
+        // turbo_disable_emoji：去掉前后台 emoji 检测脚本/样式与 feed/邮件
+        // 里的 emoji 静态化（WP 核心标准做法）。
+        if ($core->get_opt('turbo_disable_emoji')) {
+            remove_action('wp_head', 'print_emoji_detection_script', 7);
+            remove_action('admin_print_scripts', 'print_emoji_detection_script');
+            remove_action('wp_print_styles', 'print_emoji_styles');
+            remove_action('admin_print_styles', 'print_emoji_styles');
+            remove_filter('the_content_feed', 'wp_staticize_emoji');
+            remove_filter('comment_text_rss', 'wp_staticize_emoji');
+            remove_filter('wp_mail', 'wp_staticize_emoji_for_email');
+            add_filter('tiny_mce_plugins', [$this, 'disable_emoji_tinymce_plugin']);
+        }
+        // turbo_disable_embeds：去掉 oEmbed 发现链接/宿主 JS、不再自动发现
+        // oEmbed、不注册 oEmbed 的 REST 路由。
+        if ($core->get_opt('turbo_disable_embeds')) {
+            remove_action('wp_head', 'wp_oembed_add_discovery_links');
+            remove_action('wp_head', 'wp_oembed_add_host_js');
+            remove_action('rest_api_init', 'wp_oembed_register_route');
+            add_filter('embed_oembed_discover', '__return_false');
+            remove_filter('pre_oembed_result', 'wp_filter_pre_oembed_result', 10);
+        }
+        // turbo_disable_xmlrpc：禁 XML-RPC（安全类开关）+ 去掉 RSD 发现链接。
+        if ($core->get_opt('turbo_disable_xmlrpc')) {
+            add_filter('xmlrpc_enabled', '__return_false');
+            add_filter('xmlrpc_methods', '__return_empty_array');
+            remove_action('wp_head', 'rsd_link');
+        }
+    }
+
+    // tiny_mce_plugins 回调：把 wpemoji 从编辑器插件里摘掉（disable_emoji
+    // 的一部分，单独成方法以便 add_filter 挂上去）。
+    public function disable_emoji_tinymce_plugin($plugins) {
+        if (!is_array($plugins)) return $plugins;
+        return array_values(array_diff($plugins, ['wpemoji']));
+    }
+
+    // M1：turbo_sanitize_names——文件名哈希化（保留扩展名）。用原文件名
+    // 的 md5 前 16 位作新名，同一原名总得到同一哈希；重名时 WP 的
+    // wp_unique_filename 会再加 -1/-2 后缀，不会互相覆盖。
+    public function hash_sanitize_filename($filename, $filename_raw = '') {
+        if (!Skyline_Core::instance()->get_opt('turbo_sanitize_names')) return $filename;
+        $ext = pathinfo($filename, PATHINFO_EXTENSION);
+        $hash = substr(md5($filename_raw !== '' ? $filename_raw : $filename), 0, 16);
+        return $ext !== '' ? $hash . '.' . $ext : $hash;
     }
 
     public function allow_svg_mime($mimes) {
@@ -459,6 +591,11 @@ class Skyline_Turbo_Mod {
             if ($next === $decoded) break;
             $decoded = $next;
         }
+        // L31：再去掉 Tab/换行/回车做一份“去空白版”一起校验——浏览器按
+        // WHATWG URL 规范会去掉 URL 中的 Tab/换行后还原，java<TAB>script:
+        // 这类写法否则会绕过下面的 javascript: 正则。
+        $scrubbed = str_replace(["\t", "\n", "\r"], '', $content);
+        $scrubbed_decoded = str_replace(["\t", "\n", "\r"], '', $decoded);
         $dangerous = [
             '/<\s*script/i',                                              // 内嵌脚本
             '/<\s*(iframe|object|embed|form|foreignObject|animate|set|handler)/i',
@@ -468,9 +605,16 @@ class Skyline_Turbo_Mod {
             '/href\s*=\s*["\']\s*(javascript|data\s*:)/i',                // 危险 href
             '/<\s*style/i',                                               // <style> 可 @import 外部样式表
             '/@import/i',                                                 // CSS @import 外部资源
+            // L31：<use>/<image> 的外部 href（http(s) 与协议相对 URL）会加载
+            // 外链资源/被追踪；内部片段引用（#id）与 xlink:href 同理检查。
+            // 只禁外部地址，不禁 # 开头的内部引用。
+            '/<\s*(use|image)\b[^>]*?(?:xlink:)?href\s*=\s*["\']\s*(?:https?:)?\/\//i',
+            // L31：style 属性里的 url(...) 同样可拉外部资源。
+            '/\bstyle\s*=\s*["\'][^"\']*url\s*\(/i',
         ];
         foreach ($dangerous as $pattern) {
-            if (preg_match($pattern, $content) || preg_match($pattern, $decoded)) {
+            if (preg_match($pattern, $content) || preg_match($pattern, $decoded)
+                || preg_match($pattern, $scrubbed) || preg_match($pattern, $scrubbed_decoded)) {
                 $file['error'] = 'SVG 文件含有不安全内容，已拒绝上传';
                 return $file;
             }
@@ -488,15 +632,369 @@ class Skyline_Turbo_Mod {
         return min((int)$size, 5 * 1024 * 1024);
     }
 
+    // ================= WebP 转换 =================
+    const WEBP_MAX_FILESIZE = 10 * 1024 * 1024; // 与 compress() 同一上限：超大图不转
+    const WEBP_BATCH_SIZE = 20;                 // 批量工具每批张数（防超时）
+    const WEBP_BATCH_TIME_BUDGET = 25;          // 单次 AJAX 请求的墙钟预算（秒）
+
+    // 能力检测结果缓存（类属性而非函数内 static，便于测试用反射重置 /
+    // 模拟 GD 支持 WebP 的服务器环境；生产行为不变）。
+    private static $webp_supported_cache = null;
+
+    // 能力检测（请求内缓存）：GD 扩展 + imagewebp + 读图函数 +
+    // gd_info()['WebP Support'] 四项缺一不可。服务器没装 imagick 不影响
+    // ——转 WebP 只用 GD。GD 不支持时整个功能静默跳过，上传流程不受影响。
+    public static function webp_supported() {
+        if (self::$webp_supported_cache !== null) return self::$webp_supported_cache;
+        $supported = false;
+        if (extension_loaded('gd') && function_exists('imagewebp')
+            && function_exists('imagecreatefromjpeg') && function_exists('imagecreatefrompng')) {
+            $info = function_exists('gd_info') ? @gd_info() : [];
+            $supported = !empty($info['WebP Support']);
+        }
+        self::$webp_supported_cache = $supported;
+        return $supported;
+    }
+
+    // WebP 文件魔数校验：RIFF....WEBP。不依赖 GD 的 WebP 解码能力，
+    // 任何 PHP 版本都能验。
+    public static function is_webp_file($file) {
+        $head = @file_get_contents($file, false, null, 0, 12);
+        return $head !== false && strlen($head) === 12
+            && substr($head, 0, 4) === 'RIFF' && substr($head, 8, 4) === 'WEBP';
+    }
+
+    // 读图（可被测试替身覆盖）：JPG/PNG 读失败返回 false，不抛错。
+    protected function load_image($file, $mime) {
+        try {
+            if ($mime === 'image/jpeg' && function_exists('imagecreatefromjpeg')) {
+                $img = @imagecreatefromjpeg($file);
+            } elseif ($mime === 'image/png' && function_exists('imagecreatefrompng')) {
+                $img = @imagecreatefrompng($file);
+            } else {
+                return false;
+            }
+            return $img === false ? false : $img;
+        } catch (Throwable $e) {
+            return false;
+        }
+    }
+
+    // 编码（可被测试替身覆盖）：生产路径就是一行 imagewebp，与 WP 核心
+    // WP_Image_Editor_GD 存 WebP 的写法一致。
+    protected function encode_webp($img, $tmp, $quality) {
+        try {
+            return function_exists('imagewebp') ? (bool)@imagewebp($img, $tmp, (int)$quality) : false;
+        } catch (Throwable $e) {
+            return false;
+        }
+    }
+
+    // 单文件转 WebP。成功返回新文件绝对路径，失败返回 false（调用方保留原图）。
+    // 先写临时文件、校验通过后再 rename，中途失败不留半成品、不动原文件。
+    // $max_width > 0 且原图更宽时先缩到该宽度再编码（一次有损编码完成
+    // 改尺寸 + 转格式，不单独再编一次）。
+    public function convert_file_to_webp($file, $quality = 80, $max_width = 0) {
+        if (!is_string($file) || $file === '' || !file_exists($file)) return false;
+        if (filesize($file) > self::WEBP_MAX_FILESIZE) return false;
+        if (!self::webp_supported()) return false;
+        $info = @getimagesize($file);
+        if ($info === false || !in_array($info['mime'], ['image/jpeg', 'image/png'], true)) return false;
+
+        $new = preg_replace('/\.(jpe?g|png)$/i', '.webp', $file);
+        if ($new === $file) return false; // 扩展名不在预期内
+        // 目标已存在时换唯一名，绝不覆盖已有文件。
+        if (file_exists($new)) {
+            $unique = function_exists('wp_unique_filename')
+                ? wp_unique_filename(dirname($file), basename($new))
+                : basename($new, '.webp') . '-1.webp';
+            $new = dirname($file) . '/' . $unique;
+        }
+        $quality = min(100, max(0, (int)$quality));
+
+        $img = $this->load_image($file, $info['mime']);
+        if ($img === false) return false;
+        $tmp = false;
+        try {
+            // PNG 透明通道（R15 的教训）：调色板图先转真彩色，再保留 alpha，
+            // 否则透明 PNG 转完会变黑底。
+            if ($info['mime'] === 'image/png') {
+                if (function_exists('imageistruecolor') && !imageistruecolor($img) && function_exists('imagepalettetotruecolor')) {
+                    imagepalettetotruecolor($img);
+                }
+                if (function_exists('imagesavealpha')) imagesavealpha($img, true);
+                if (function_exists('imagealphablending')) imagealphablending($img, false);
+            }
+            // 改尺寸（只缩不放）：在编码前一次完成。
+            if ($max_width > 0 && function_exists('imagescale')) {
+                $w = imagesx($img);
+                if ($w && $w > $max_width) {
+                    $scaled = @imagescale($img, $max_width);
+                    if ($scaled !== false) { imagedestroy($img); $img = $scaled; }
+                }
+            }
+            $tmp = tempnam(dirname($new), 'skywebp');
+            if ($tmp === false) { imagedestroy($img); return false; }
+            $ok = $this->encode_webp($img, $tmp, $quality);
+            imagedestroy($img);
+            $img = null;
+            if (!$ok) { @unlink($tmp); return false; }
+            // 二次校验：必须是真实有效的 WebP（魔数 + 非空），否则不认。
+            if (!file_exists($tmp) || filesize($tmp) <= 0 || !self::is_webp_file($tmp)) {
+                @unlink($tmp);
+                return false;
+            }
+            if (!@rename($tmp, $new)) { @unlink($tmp); return false; }
+            // 临时文件默认 0600，改回与原文件一致的权限，避免 Web 服务器读不到。
+            @chmod($new, fileperms($file) & 0777);
+            return $new;
+        } catch (Throwable $e) {
+            if ($img !== null) { try { imagedestroy($img); } catch (Throwable $ignored) {} }
+            if ($tmp !== false) @unlink($tmp);
+            return false;
+        }
+    }
+
+    // 该附件是否还有可转的文件（批量工具扫描用）。返回
+    // ['eligible'=>bool, 'code'=>原因码, 'reason'=>中文原因]。
+    // 排除规则：本地文件缺失（已被 Zero-Disk 删掉）、>10MB、已有 Zero-Disk
+    // 待删登记（正等着删的文件不值得转，转完还会干扰二次校验）、已转过。
+    public static function webp_eligibility($attachment_id) {
+        $attachment_id = (int)$attachment_id;
+        if ($attachment_id <= 0) return ['eligible' => false, 'code' => 'invalid', 'reason' => '无效附件'];
+        $file = get_attached_file($attachment_id);
+        if (!$file || !file_exists($file)) return ['eligible' => false, 'code' => 'missing', 'reason' => '本地文件不存在'];
+        if (filesize($file) > self::WEBP_MAX_FILESIZE) return ['eligible' => false, 'code' => 'toolarge', 'reason' => '文件超过 10MB'];
+        // Zero-Disk 待删登记中的附件不转（见上）。
+        if (get_post_meta($attachment_id, '_sky_oss_pending_delete', true)) {
+            return ['eligible' => false, 'code' => 'pending_delete', 'reason' => 'Zero-Disk 待删登记中'];
+        }
+        $type = get_post_mime_type($attachment_id);
+        if (in_array($type, ['image/jpeg', 'image/png'], true)) return ['eligible' => true, 'code' => '', 'reason' => ''];
+        // 原图已是 WebP：检查是否还有 JPG/PNG 缩略图没转（新增尺寸的场景）。
+        $metadata = get_post_meta($attachment_id, '_wp_attachment_metadata', true);
+        if (is_array($metadata) && !empty($metadata['sizes'])) {
+            foreach ($metadata['sizes'] as $size_info) {
+                if (empty($size_info['file'])) continue;
+                $size_file = dirname($file) . '/' . $size_info['file'];
+                if (!file_exists($size_file)) continue;
+                $ftype = wp_check_filetype($size_file);
+                if (in_array($ftype['type'], ['image/jpeg', 'image/png'], true)) {
+                    return ['eligible' => true, 'code' => '', 'reason' => ''];
+                }
+            }
+        }
+        return ['eligible' => false, 'code' => 'converted', 'reason' => '已转过'];
+    }
+
+    // 附件级转换：原图 + 全部尺寸缩略图。至少转成一个文件时返回更新后的
+    // $metadata；原图转换失败时返回 false，调用方回退旧压缩流程（静默
+    // 回退，上传不受影响）；无文件可转时也返回 false（调用方走原有流程）。
+    // 单张缩略图失败只跳过该张、记日志，不影响其他（R28 的教训）。
+    public function convert_attachment_to_webp($attachment_id, $metadata) {
+        $core = Skyline_Core::instance();
+        if (!self::webp_supported()) return false;
+        if (!is_array($metadata)) return false;
+        $attachment_id = (int)$attachment_id;
+        if ($attachment_id <= 0) return false;
+
+        $file = get_attached_file($attachment_id);
+        if (!$file || !file_exists($file) || filesize($file) > self::WEBP_MAX_FILESIZE) return false;
+
+        $quality = min(100, max(0, (int)$core->get_opt('turbo_webp_quality', 80)));
+        $keep_original = (bool)$core->get_opt('turbo_webp_keep_original', true);
+        $max_width = (int)$core->get_opt('turbo_max_width', 0);
+        $changed = false;
+
+        // 已转记录：尺寸名 => 转完的 WebP 文件 md5。重新生成缩略图时只有
+        // 内容变了才重转，防止反复有损编码（与 _sky_compressed 同一规矩）。
+        $done = get_post_meta($attachment_id, '_sky_webp_done', true);
+        if (!is_array($done)) $done = [];
+        $orig_to_delete = [];
+
+        // 1. 原图（还是 JPG/PNG 时才转；已是 WebP 则只处理缩略图）。
+        $type = get_post_mime_type($attachment_id);
+        if (in_array($type, ['image/jpeg', 'image/png'], true)) {
+            if (!isset($done['__original__']) || $done['__original__'] !== md5_file($file)) {
+                $new = $this->convert_file_to_webp($file, $quality, $max_width);
+                if ($new === false) return false; // 原图失败：整体回退旧流程
+                // 回填元数据与附件引用（不回填的话前台 srcset 与 OSS 上传
+                // 拿到的还是旧 JPG）。以磁盘实际文件名为准（重名时已换唯一名）。
+                $upload_dir = function_exists('wp_upload_dir') ? wp_upload_dir() : ['basedir' => dirname($file)];
+                $base_dir = rtrim($upload_dir['basedir'], '/');
+                $rel_new = (strpos($new, $base_dir . '/') === 0)
+                    ? substr($new, strlen($base_dir) + 1)
+                    : basename($new);
+                $metadata['file'] = $rel_new;
+                $dim = @getimagesize($new);
+                if ($dim !== false) {
+                    $metadata['width'] = (int)$dim[0];
+                    $metadata['height'] = (int)$dim[1];
+                }
+                $metadata['filesize'] = filesize($new);
+                update_post_meta($attachment_id, '_wp_attached_file', $rel_new);
+                // 直接写库改 mime，不走 wp_update_post：后者会触发 save_post，
+                // 而 save_post 会整库清页面缓存（P5），一张图触发一次全清太贵；
+                // 附件不参与修订版，写库后清缓存即可。
+                global $wpdb;
+                if (isset($wpdb) && method_exists($wpdb, 'update')) {
+                    $wpdb->update($wpdb->posts, ['post_mime_type' => 'image/webp'], ['ID' => $attachment_id]);
+                    if (function_exists('clean_post_cache')) clean_post_cache($attachment_id);
+                }
+                $done['__original__'] = md5_file($new);
+                $changed = true;
+                if (!$keep_original) $orig_to_delete[] = $file;
+            }
+        }
+
+        // 2. 缩略图：WP 是先生成完所有缩略图、再跑元数据钩子，所以这里
+        // 能拿到全部尺寸。注意顺序：本钩子优先级 5，OSS 上传钩子优先级 99，
+        // 压完再上传，COS 上拿到的就是转完的 WebP。
+        if (!empty($metadata['sizes']) && is_array($metadata['sizes'])) {
+            $base_dir = dirname($file);
+            foreach ($metadata['sizes'] as $size_name => $size_info) {
+                if (empty($size_info['file'])) continue;
+                $size_file = $base_dir . '/' . $size_info['file'];
+                if (!file_exists($size_file)) continue;
+                if (isset($done[$size_name]) && $done[$size_name] === md5_file($size_file)) continue;
+                $ftype = wp_check_filetype($size_file);
+                if (!in_array($ftype['type'], ['image/jpeg', 'image/png'], true)) continue;
+                $new_size = $this->convert_file_to_webp($size_file, $quality, 0);
+                if ($new_size === false) {
+                    $core->log("⚠️ [Turbo] 缩略图转 WebP 失败，已保留原格式：{$size_file}", 'warn', 'Turbo');
+                    continue;
+                }
+                $metadata['sizes'][$size_name]['file'] = basename($new_size);
+                $dim = @getimagesize($new_size);
+                if ($dim !== false) {
+                    $metadata['sizes'][$size_name]['width'] = (int)$dim[0];
+                    $metadata['sizes'][$size_name]['height'] = (int)$dim[1];
+                }
+                $metadata['sizes'][$size_name]['mime-type'] = 'image/webp';
+                $metadata['sizes'][$size_name]['filesize'] = filesize($new_size);
+                $done[$size_name] = md5_file($new_size);
+                $changed = true;
+                if (!$keep_original) $orig_to_delete[] = $size_file;
+            }
+        }
+
+        if (!$changed) return false;
+        update_post_meta($attachment_id, '_sky_webp_done', $done);
+        if (!empty($orig_to_delete)) {
+            // 原图删除走两阶段：OSS 开着时先登记，等 OSS 上传成功后再删
+            // （upload_all_sizes 成功分支里删）；OSS 没开时 WebP 已校验有效，
+            // 直接删（本地唯一副本就是刚校验过的 WebP）。
+            if ($core->get_opt('oss_enable')) {
+                update_post_meta($attachment_id, '_sky_webp_orig_pending', array_values(array_unique($orig_to_delete)));
+            } else {
+                foreach ($orig_to_delete as $old) {
+                    if (file_exists($old)) @unlink($old);
+                }
+            }
+        }
+        return $metadata;
+    }
+
+    // ---------- 批量转 WebP（后台 AJAX）----------
+    // 两个端点都只给管理员：nonce + manage_options（N5/R18 的教训：
+    // 只有 nonce 不够，必须验权限）。
+    public function ajax_webp_scan() {
+        check_ajax_referer('skyline_ajax_nonce');
+        if (!current_user_can('manage_options')) wp_send_json_error('Unauthorized');
+        if (!self::webp_supported()) {
+            wp_send_json_success(['supported' => false, 'total' => 0, 'ids' => [], 'skipped' => []]);
+        }
+        $ids = get_posts([
+            'post_type' => 'attachment',
+            'post_mime_type' => ['image/jpeg', 'image/png', 'image/webp'],
+            'post_status' => 'inherit',
+            'posts_per_page' => -1,
+            'fields' => 'ids',
+            'orderby' => 'ID',
+            'order' => 'ASC',
+        ]);
+        if (!is_array($ids)) $ids = [];
+        if (function_exists('update_postmeta_cache')) update_postmeta_cache($ids);
+        $eligible = [];
+        $skipped = ['converted' => 0, 'missing' => 0, 'toolarge' => 0, 'pending_delete' => 0, 'invalid' => 0];
+        foreach ($ids as $id) {
+            $e = self::webp_eligibility((int)$id);
+            if ($e['eligible']) { $eligible[] = (int)$id; continue; }
+            if (isset($skipped[$e['code']])) $skipped[$e['code']]++;
+        }
+        wp_send_json_success(['supported' => true, 'total' => count($eligible), 'ids' => $eligible, 'skipped' => $skipped]);
+    }
+
+    public function ajax_webp_batch() {
+        check_ajax_referer('skyline_ajax_nonce');
+        if (!current_user_can('manage_options')) wp_send_json_error('Unauthorized');
+        if (!self::webp_supported()) wp_send_json_error('服务器 GD 不支持 WebP');
+        $ids = isset($_POST['ids']) && is_array($_POST['ids']) ? array_map('absint', $_POST['ids']) : [];
+        // 每批上限 20 张由服务端定死，不信任客户端传的数量。
+        $ids = array_slice(array_values(array_unique(array_filter($ids))), 0, self::WEBP_BATCH_SIZE);
+        if (empty($ids)) wp_send_json_success(['results' => [], 'stopped_early' => false]);
+
+        $core = Skyline_Core::instance();
+        $oss = ($core->get_opt('oss_enable') && class_exists('Skyline_OSS_Mod')) ? Skyline_OSS_Mod::instance() : null;
+        $start = microtime(true);
+        $results = [];
+        $stopped_early = false;
+        foreach ($ids as $id) {
+            // 墙钟预算：超时前停下，剩下的 ID 客户端下一批重发。
+            if (microtime(true) - $start > self::WEBP_BATCH_TIME_BUDGET) { $stopped_early = true; break; }
+            // 客户端只发扫描出的可转 ID；这里再核一次，防过期 ID 被当失败
+            // （例如两次扫描之间文件已被删或已转过）。
+            $elig = self::webp_eligibility($id);
+            if (!$elig['eligible']) {
+                $results[] = ['id' => $id, 'status' => 'skipped', 'reason' => $elig['reason']];
+                continue;
+            }
+            $metadata = get_post_meta($id, '_wp_attachment_metadata', true);
+            if (!is_array($metadata) || empty($metadata)) {
+                $results[] = ['id' => $id, 'status' => 'failed', 'reason' => '无附件元数据（可能上传未完成）'];
+                continue;
+            }
+            $new_meta = $this->convert_attachment_to_webp($id, $metadata);
+            if ($new_meta === false) {
+                $results[] = ['id' => $id, 'status' => 'failed', 'reason' => '转换失败（原图已保留）'];
+                continue;
+            }
+            update_post_meta($id, '_wp_attachment_metadata', $new_meta);
+            $cos = 'off';
+            if ($oss) {
+                // 转完立即重新同步到 COS，否则前台 URL（已重写为 COS 域名）
+                // 会指向不存在的 .webp 对象。上传失败时原图按 keep 设置
+                // 保留（见 delete_webp_originals：只在成功分支删）。
+                $oss->upload_all_sizes($new_meta, $id);
+                $cos = get_post_meta($id, '_sky_oss_synced', true) ? 'ok' : 'failed';
+            }
+            $results[] = ['id' => $id, 'status' => 'converted', 'cos' => $cos];
+        }
+        wp_send_json_success(['results' => $results, 'stopped_early' => $stopped_early]);
+    }
+
     public function compress($metadata, $attachment_id) {
         $core = Skyline_Core::instance();
         if(!$core->get_opt('turbo_enable_image_opt')) return $metadata;
 
         $file = get_attached_file($attachment_id);
-        if(!$file || !file_exists($file) || filesize($file) > 10 * 1024 * 1024) return $metadata;
+        if (!$file || !file_exists($file)) return $metadata;
+        // L11：>10MB 只跳过原图压缩，不跳过缩略图——修前整个函数直接返回，
+        // 超大原图的缩略图也不压。
+        $oversize = filesize($file) > 10 * 1024 * 1024;
 
         $type = get_post_mime_type($attachment_id);
-        if(!in_array($type, ['image/jpeg', 'image/png', 'image/webp'])) return $metadata;
+        // L11：GIF 加入压缩类型白名单（修前只认 jpeg/png/webp，GIF 缩略图不压缩）。
+        if (!in_array($type, ['image/jpeg', 'image/png', 'image/webp', 'image/gif'])) return $metadata;
+
+        // WebP 转换（在旧压缩之前）：JPG/PNG 先转 WebP，一次有损编码同时
+        // 完成质量压缩与格式转换；转完直接返回，不再走下面的 JPEG 重编码，
+        // 避免同张图被两次有损压缩。转失败返回 false 时静默回退旧流程
+        // （上传不受影响）。
+        if ($core->get_opt('turbo_webp_convert') && in_array($type, ['image/jpeg', 'image/png'], true)) {
+            $converted = $this->convert_attachment_to_webp($attachment_id, $metadata);
+            if (is_array($converted)) return $converted;
+        }
 
         $quality = (int)$core->get_opt('turbo_quality', 85);
 
@@ -509,7 +1007,14 @@ class Skyline_Turbo_Mod {
         // 1. 原图：save() 返回值必须检查（PR #3 已加），保存失败直接返回，
         // 不上传、不删；成功后回填元数据（resize 后旧的 width/height/filesize
         // 否则会让前台 srcset/sizes 和后台显示的尺寸全错）。
-        if (!isset($done['__original__']) || $done['__original__'] !== md5_file($file)) {
+        // L11：原图 md5 只算一次并复用（$orig_md5 既作“已压过？”的比对；
+        // 保存成功后文件内容变了，记录时需重算一次新文件的 md5——那是
+        // 不同内容，不是一次重复计算）。>10MB 时不算（原图本就不压）。
+        if ($oversize) {
+            $core->log("原图超过 10MB，跳过原图压缩，仍压缩缩略图：{$file}", 'info', 'Turbo');
+        }
+        $orig_md5 = $oversize ? null : md5_file($file);
+        if (!$oversize && (!isset($done['__original__']) || $done['__original__'] !== $orig_md5)) {
             $editor = wp_get_image_editor($file);
             if (!is_wp_error($editor)) {
                 $editor->set_quality($quality);
@@ -549,18 +1054,27 @@ class Skyline_Turbo_Mod {
             $base_dir = dirname($file);
             foreach ($metadata['sizes'] as $size_name => $size_info) {
                 if (empty($size_info['file'])) continue;
-                $size_file = $base_dir . '/' . $size_info['file'];
+                // L30：拼路径前过 basename()，防元数据里的 ../ 穿越。
+                $size_file = $base_dir . '/' . basename($size_info['file']);
                 if (!file_exists($size_file)) continue;
-                if (isset($done[$size_name]) && $done[$size_name] === md5_file($size_file)) continue;
+                // L11：同一文件只算一次 md5 并复用（比对用；保存成功后内容
+                // 变了，记录时重算一次新文件的 md5，见原图处注释）。
+                $size_md5 = md5_file($size_file);
+                if (isset($done[$size_name]) && $done[$size_name] === $size_md5) continue;
                 $ftype = wp_check_filetype($size_file);
-                if (!in_array($ftype['type'], ['image/jpeg', 'image/png', 'image/webp'])) continue;
+                if (!in_array($ftype['type'], ['image/jpeg', 'image/png', 'image/webp', 'image/gif'])) continue;
 
                 $editor = wp_get_image_editor($size_file);
                 if (is_wp_error($editor)) continue;
                 $editor->set_quality($quality);
                 $saved = $editor->save($size_file);
                 unset($editor);
-                if (is_wp_error($saved)) continue; // 单张缩略图失败不影响其他
+                // L9：单张缩略图 save() 失败记 warn 日志（带尺寸名和错误信息），
+                // 再 continue——与原图失败记日志保持一致，不再静默跳过。
+                if (is_wp_error($saved)) {
+                    $core->log("⚠️ [Turbo] 缩略图压缩保存失败，已跳过：{$size_name} | {$size_file} | " . $saved->get_error_message(), 'warn', 'Turbo');
+                    continue;
+                }
                 if (isset($saved['width'])) $metadata['sizes'][$size_name]['width'] = (int)$saved['width'];
                 if (isset($saved['height'])) $metadata['sizes'][$size_name]['height'] = (int)$saved['height'];
                 if (file_exists($size_file)) $metadata['sizes'][$size_name]['filesize'] = filesize($size_file);
@@ -584,8 +1098,21 @@ if (!class_exists('Skyline_OSS_Mod')) {
         // _sky_oss_synced=1、再也不会重新上传。
         const PENDING_DELETE_META = '_sky_oss_pending_delete';
         const PURGE_DELAY = DAY_IN_SECONDS; // 24 小时
+        // M22：Zero-Disk 回收站保留期——删前移入 uploads/.trash/ 保留 7 天，
+        // 到期由后续 purge 运行时清理、真正删除。
+        const TRASH_TTL = 7 * DAY_IN_SECONDS;
+
+        private static $instance = null;
+
+        // 批量转 WebP 工具需要同步调用 upload_all_sizes；经此取单例，
+        // 不直接 new（构造器会重复注册钩子）。
+        public static function instance() {
+            if (self::$instance === null) self::$instance = new self();
+            return self::$instance;
+        }
 
         public function __construct() {
+            self::$instance = $this;
             add_filter('wp_generate_attachment_metadata', [$this, 'upload_all_sizes'], 99, 2);
             add_filter('wp_get_attachment_url', [$this, 'replace_url'], 99, 2);
             add_filter('wp_get_attachment_image_src', [$this, 'replace_image_src'], 99, 4);
@@ -612,7 +1139,14 @@ if (!class_exists('Skyline_OSS_Mod')) {
             if (!$core->get_opt('oss_enable')) return $metadata;
 
             $file = get_attached_file($attachment_id);
-            if (!$file || !file_exists($file)) return $metadata;
+            // L28(a)：文件不存在时不再静默返回——清除 _sky_oss_synced 并记
+            // 日志（自愈标记）：本地文件被删/丢失后，前台 URL 不应再翻成
+            // COS 地址；下次重新生成或手动重传时重新同步。
+            if (!$file || !file_exists($file)) {
+                delete_post_meta($attachment_id, '_sky_oss_synced');
+                $core->log("⚠️ [OSS] 附件 #{$attachment_id} 本地文件缺失，已清除已同步标记（待重新生成/上传时自愈）", 'warn', 'OSS');
+                return $metadata;
+            }
 
             $core->log("🚀 [OSS] 开始处理附件 #{$attachment_id}: " . basename($file), 'info', 'OSS');
 
@@ -642,9 +1176,10 @@ if (!class_exists('Skyline_OSS_Mod')) {
                     if ($rel_dir === '.') $rel_dir = '';
 
                     foreach ($metadata['sizes'] as $size => $size_info) {
-                        $size_file = $base_dir . '/' . $size_info['file'];
+                        // L30：拼路径前过 basename()，防元数据里的 ../ 穿越。
+                        $size_file = $base_dir . '/' . basename($size_info['file']);
                         if (file_exists($size_file)) {
-                            $size_rel_path = $rel_dir ? $rel_dir . '/' . $size_info['file'] : $size_info['file'];
+                            $size_rel_path = $rel_dir ? $rel_dir . '/' . basename($size_info['file']) : basename($size_info['file']);
                             $size_object_key = $base_url_path . '/' . ltrim($size_rel_path, '/');
 
                             if ($client->putFile($size_object_key, $size_file)) {
@@ -658,7 +1193,14 @@ if (!class_exists('Skyline_OSS_Mod')) {
 
                 if (empty($failed_files)) {
                     update_post_meta($attachment_id, '_sky_oss_synced', 1);
+                    // L28(c)：全成功时清掉旧的失败清单，不留过期重试项。
+                    delete_post_meta($attachment_id, '_sky_oss_failed_sizes');
                     $core->log("🎉 [OSS] 附件 #{$attachment_id} 全部上传成功！", 'info', 'OSS');
+
+                    // 转 WebP 后原图的第二阶段删除（keep_original=false 时才有
+                    // 登记）：WebP 已校验、COS 已同步，至此原 JPG/PNG 才可以删。
+                    // 上传失败时不走到这里，原图与登记都保留（安全方向）。
+                    $this->delete_webp_originals($attachment_id);
 
                     if ($core->get_opt('oss_delete_local')) {
                         // 两阶段删除：只登记待删清单并约 24 小时后二次校验，不在本请求内删文件。
@@ -671,7 +1213,15 @@ if (!class_exists('Skyline_OSS_Mod')) {
                         }
                     }
                 } else {
-                    $core->log("⚠️ [OSS] 附件 #{$attachment_id} 存在失败项（共 " . count($failed_files) . " 个）", 'warn', 'OSS');
+                    // L28(c)：单张图失败时把失败尺寸记入日志与重试清单
+                    // _sky_oss_failed_sizes，不要静默全有或全无——已同步标记
+                    // 的整体语义不变（仍只有全成功才写 _sky_oss_synced），
+                    // 但失败项从此可见、可重试，而不是只留一句“存在失败项”。
+                    update_post_meta($attachment_id, '_sky_oss_failed_sizes', $failed_files);
+                    $failed_desc = implode(', ', array_map(function ($f) {
+                        return ($f['type'] ?? '?') . ':' . ($f['key'] ?? '');
+                    }, $failed_files));
+                    $core->log("⚠️ [OSS] 附件 #{$attachment_id} 存在失败项（共 " . count($failed_files) . " 个）：{$failed_desc}，已记入 _sky_oss_failed_sizes 待重试", 'warn', 'OSS');
                 }
 
             } catch (Throwable $e) {
@@ -679,6 +1229,51 @@ if (!class_exists('Skyline_OSS_Mod')) {
             }
 
             return $metadata;
+        }
+
+        // M22：把本地文件移入回收站（wp-content/uploads/.trash/），返回
+        // 移入后的路径，失败返回 false。回收站就在 uploads 目录内，与原
+        // 文件同一文件系统，rename 是同盘移动、不走跨盘复制；同名时加
+        // 时间戳 + 哈希后缀，不覆盖已有文件。
+        private function trash_local_file($path) {
+            $upload_dir = function_exists('wp_upload_dir') ? wp_upload_dir() : null;
+            $basedir = (is_array($upload_dir) && !empty($upload_dir['basedir'])) ? $upload_dir['basedir'] : dirname($path);
+            $trash_dir = rtrim($basedir, '/') . '/.trash';
+            if (!is_dir($trash_dir)) {
+                if (function_exists('wp_mkdir_p')) {
+                    wp_mkdir_p($trash_dir);
+                } elseif (!@mkdir($trash_dir, 0755, true) && !is_dir($trash_dir)) {
+                    return false;
+                }
+            }
+            if (!is_dir($trash_dir)) return false;
+            $base = basename($path);
+            $dest = $trash_dir . '/' . $base;
+            if (file_exists($dest)) {
+                $stem = pathinfo($base, PATHINFO_FILENAME);
+                $ext = pathinfo($base, PATHINFO_EXTENSION);
+                $dest = $trash_dir . '/' . $stem . '-' . time() . '-' . substr(md5($path . microtime(true)), 0, 6)
+                    . ($ext !== '' ? '.' . $ext : '');
+            }
+            if (!@rename($path, $dest)) return false;
+            return $dest;
+        }
+
+        // M22：清理回收站里超过 TRASH_TTL（7 天）的文件，返回删除数。
+        // 只清普通文件；purge 运行时顺手调用（见 purge_pending_deletes）。
+        public function cleanup_trash() {
+            $upload_dir = function_exists('wp_upload_dir') ? wp_upload_dir() : null;
+            if (!is_array($upload_dir) || empty($upload_dir['basedir'])) return 0;
+            $trash_dir = rtrim($upload_dir['basedir'], '/') . '/.trash';
+            if (!is_dir($trash_dir)) return 0;
+            $cutoff = time() - self::TRASH_TTL;
+            $removed = 0;
+            foreach ((array)glob($trash_dir . '/*') as $f) {
+                if (!is_file($f)) continue;
+                $mtime = filemtime($f);
+                if ($mtime !== false && $mtime < $cutoff && @unlink($f)) $removed++;
+            }
+            return $removed;
         }
 
         // WP-Cron 回调：二次校验待删清单，全部通过才删本地文件。
@@ -700,6 +1295,11 @@ if (!class_exists('Skyline_OSS_Mod')) {
             if (!is_array($pending) || empty($pending['files']) || !is_array($pending['files'])) return;
 
             $core = Skyline_Core::instance();
+            // M22：每次 purge 运行时顺手清理回收站里超过 7 天的文件。
+            $swept = $this->cleanup_trash();
+            if ($swept > 0) {
+                $core->log("🗑️ [OSS-Zero-Disk] 回收站清理：已删除 {$swept} 个超过 7 天的文件", 'info', 'OSS');
+            }
             if (!$core->get_opt('oss_enable')) {
                 // OSS 已关闭：不删文件，保留待删清单，1 小时后重试（上限 3 次）。
                 $core->log("⚠️ [OSS-Zero-Disk] OSS 已关闭，附件 #{$attachment_id} 的本地文件暂不删除", 'warn', 'OSS');
@@ -766,16 +1366,26 @@ if (!class_exists('Skyline_OSS_Mod')) {
                     $core->log("❌ [OSS-Zero-Disk] COS 对象缺失，附件 #{$attachment_id} 已取消已同步标记，本地文件已保留", 'error', 'OSS');
                 }
 
-                // 先删已校验通过的本地文件；删失败的项并入待重试清单。
+                // M22：先移入回收站再删——校验通过的本地文件先 rename 到
+                // wp-content/uploads/.trash/（同盘、同文件系统），保留 7 天
+                // 再由后续 purge 的回收站清理真正删除；COS 侧事后损坏/误删
+                // 时本地仍有副本可恢复。移入失败的项并入待重试清单。
                 $deleted_count = 0;
+                $trashed = [];
                 $seen = [];
                 foreach ($to_delete as $entry) {
                     if (isset($seen[$entry['path']])) continue;
                     $seen[$entry['path']] = true;
                     if (file_exists($entry['path'])) {
-                        if (@unlink($entry['path'])) { $deleted_count++; continue; }
+                        $dest = $this->trash_local_file($entry['path']);
+                        if ($dest !== false) { $deleted_count++; $trashed[] = $entry['path'] . ' -> ' . $dest; continue; }
                         $remaining[] = $entry;
                     }
+                }
+                // 删除清单写日志（即使还有待重试项、提前返回，也要先记下已
+                // 移入回收站的文件，否则这批删除无据可查）。
+                if ($deleted_count > 0) {
+                    $core->log("🗑️ [OSS-Zero-Disk] 二次校验通过，{$deleted_count} 个本地文件已移入回收站（保留 7 天）：\n" . implode("\n", $trashed), 'info', 'OSS');
                 }
 
                 if (!empty($remaining)) {
@@ -785,9 +1395,6 @@ if (!class_exists('Skyline_OSS_Mod')) {
                 }
 
                 delete_post_meta($attachment_id, self::PENDING_DELETE_META);
-                if ($deleted_count > 0) {
-                    $core->log("🗑️ [OSS-Zero-Disk] 二次校验通过，安全清理了 {$deleted_count} 个本地文件", 'info', 'OSS');
-                }
             } catch (Throwable $e) {
                 // 校验过程异常：宁可不删。保留清单与本地文件，1 小时后重试（上限 3 次）。
                 $core->log("💥 [OSS-Zero-Disk] 二次清理异常，已保留本地文件：附件 #{$attachment_id} | " . $e->getMessage(), 'error', 'OSS');
@@ -812,10 +1419,50 @@ if (!class_exists('Skyline_OSS_Mod')) {
             return true;
         }
 
+        // 转 WebP 后原图的两阶段删除（keep_original=false 时）：
+        // 只有 COS 全部上传成功（走到这里）才删；删之前再核对一次——
+        // 待删路径必须是 JPG/PNG、必须真实存在、且不能是当前附件指向的
+        // 文件或当前尺寸文件（防过期清单误删现役文件）。删失败不报错，
+        // 只记日志、文件保留（安全方向）。
+        private function delete_webp_originals($attachment_id) {
+            $pending = get_post_meta($attachment_id, '_sky_webp_orig_pending', true);
+            if (!is_array($pending) || empty($pending)) return;
+            delete_post_meta($attachment_id, '_sky_webp_orig_pending');
+            $current = get_attached_file($attachment_id);
+            $metadata = get_post_meta($attachment_id, '_wp_attachment_metadata', true);
+            $live = [];
+            if (is_string($current) && $current !== '') $live[$current] = true;
+            if (is_array($metadata) && !empty($metadata['sizes']) && is_string($current) && $current !== '') {
+                $base = dirname($current);
+                foreach ($metadata['sizes'] as $s) {
+                    if (!empty($s['file'])) $live[$base . '/' . $s['file']] = true;
+                }
+            }
+            $core = Skyline_Core::instance();
+            foreach ($pending as $path) {
+                if (!is_string($path) || $path === '' || isset($live[$path])) continue;
+                $ext = strtolower(pathinfo($path, PATHINFO_EXTENSION));
+                if (!in_array($ext, ['jpg', 'jpeg', 'png'], true)) continue;
+                if (!file_exists($path)) continue;
+                if (@unlink($path)) {
+                    $core->log("🗑️ [WebP] 原图已删除（WebP 已校验 + COS 已同步）：{$path}", 'info', 'Turbo');
+                } else {
+                    $core->log("⚠️ [WebP] 原图删除失败，已保留：{$path}", 'warn', 'Turbo');
+                }
+            }
+        }
+
         public function replace_url($url, $post_id) {
             $core = Skyline_Core::instance();
             if (!$core->get_opt('oss_enable') || !get_post_meta($post_id, '_sky_oss_synced', true)) return $url;
-            $domain = rtrim($core->get_opt('oss_domain') ?: "https://{$core->get_opt('oss_bucket')}.{$core->get_opt('oss_endpoint')}", '/');
+            // L17：OSS 三项配置全空时直接返回原 URL——否则拼出 https://.
+            // （bucket 与 endpoint 都空时 "https://{$bucket}.{$endpoint}"
+            // 得 "https://."），再 str_replace 会产出坏 URL。
+            $bucket = $core->get_opt('oss_bucket');
+            $endpoint = $core->get_opt('oss_endpoint');
+            $domain = $core->get_opt('oss_domain');
+            if (empty($bucket) && empty($endpoint) && empty($domain)) return $url;
+            $domain = rtrim($domain ?: "https://{$bucket}.{$endpoint}", '/');
             return str_replace(rtrim(get_site_url(), '/'), $domain, $url);
         }
 
@@ -823,7 +1470,12 @@ if (!class_exists('Skyline_OSS_Mod')) {
             if (!$image) return $image;
             $core = Skyline_Core::instance();
             if (!$core->get_opt('oss_enable') || !get_post_meta($attachment_id, '_sky_oss_synced', true)) return $image;
-            $domain = rtrim($core->get_opt('oss_domain') ?: "https://{$core->get_opt('oss_bucket')}.{$core->get_opt('oss_endpoint')}", '/');
+            // L17：同 replace_url，三项全空时不拼 https://.。
+            $bucket = $core->get_opt('oss_bucket');
+            $endpoint = $core->get_opt('oss_endpoint');
+            $domain = $core->get_opt('oss_domain');
+            if (empty($bucket) && empty($endpoint) && empty($domain)) return $image;
+            $domain = rtrim($domain ?: "https://{$bucket}.{$endpoint}", '/');
             $image[0] = str_replace(rtrim(get_site_url(), '/'), $domain, $image[0]);
             return $image;
         }
@@ -838,7 +1490,12 @@ if (!class_exists('Sky_Official_COS_Client')) {
         public function __construct($ak, $sk, $bucket, $endpoint) {
             $this->bucket = trim($bucket);
             $region = 'ap-beijing';
-            if (preg_match('/cos[-.]([a-z0-9-]+)\.myqcloud/i', $endpoint, $m)) {
+            // L18：region 正则补 cos-website 形态——
+            // lingganwu-1253189685.cos-website.ap-beijing.myqcloud.com
+            // 要能抓到 ap-beijing（修前只认 cos[-.]<region>.myqcloud，
+            // 在 cos-website 后抓到的是 website，匹配失败回落 ap-beijing；
+            // 北京地域碰巧正确，非北京地域的桶会因 region 错误签名失败）。
+            if (preg_match('/cos(?:-website)?[-.]([a-z0-9-]+)\.myqcloud/i', $endpoint, $m)) {
                 $region = $m[1];
             }
 
@@ -943,6 +1600,32 @@ if (!class_exists('Sky_Official_COS_Client')) {
             }
         }
 
+        // L28(b)：abort 指定 key 下未完成的分片上传。Upload() 复合接口
+        // 内部管理 uploadId，调用方拿不到；这里用 listMultipartUploads
+        // 按 key 前缀找回未完成的上传再逐个 abort。SDK 不支持这两个
+        // 方法时记一条 warn 日志（残留分片需靠桶的生命周期规则清理），
+        // 不抛错。任何一步异常都静默吞掉——清理是尽力而为，不能掩盖
+        // 原始上传错误。
+        private function abort_incomplete_uploads($key) {
+            try {
+                if (!method_exists($this->client, 'listMultipartUploads')
+                    || !method_exists($this->client, 'abortMultipartUpload')) {
+                    if (class_exists('Skyline_Core')) {
+                        try { Skyline_Core::instance()->log("⚠️ [OSS] SDK 不支持 abort 未完成分片，未完成的分片可能残留（需桶生命周期规则清理）：{$key}", 'warn', 'OSS'); } catch (Throwable $ignored) {}
+                    }
+                    return;
+                }
+                $list = $this->client->listMultipartUploads(['Bucket' => $this->bucket, 'Prefix' => $key]);
+                $uploads = (is_array($list) && isset($list['Uploads']) && is_array($list['Uploads'])) ? $list['Uploads'] : [];
+                foreach ($uploads as $u) {
+                    if (!is_array($u) || ($u['Key'] ?? '') !== $key || empty($u['UploadId'])) continue;
+                    try {
+                        $this->client->abortMultipartUpload(['Bucket' => $this->bucket, 'Key' => $key, 'UploadId' => $u['UploadId']]);
+                    } catch (\Throwable $ignored) {}
+                }
+            } catch (\Throwable $ignored) {}
+        }
+
         public function putFile($key, $file) {
             if (!file_exists($file)) return false;
 
@@ -987,6 +1670,10 @@ if (!class_exists('Sky_Official_COS_Client')) {
                         if (is_resource($stream)) fclose($stream);
                     }
                 } catch (\Throwable $e) {
+                    // L28(b)：分片中途异常时尝试 abort 未完成的分片上传，
+                    // 否则 COS 上残留未完成的分片占桶空间（尽力清理，清理
+                    // 失败也不掩盖原始错误）。
+                    $this->abort_incomplete_uploads($key);
                     // 新分支单独捕获 Throwable：SDK 抛出的 Error（如 TypeError）
                     // 不能穿透到媒体上传导致 fatal；这里只记日志并返回失败，
                     // 让 upload_all_sizes 走失败分支（不写已同步标记、不删本地）。

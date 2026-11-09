@@ -454,6 +454,46 @@ input:checked + .sky-slider:before {
     color: #059669;
 }
 
+/* ─── MODE SWITCH（图片同步方式：自动/手动两个单选项）─── */
+/* 选中态用 :has(input:checked)，不用 JS、不写死 active 类；:has 在
+   Chrome 105+ / Safari 15.4+ / Firefox 121+ 均已支持，旧浏览器回退
+   到原生单选圆点，功能不受影响。 */
+.sky-mode-switch {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.sky-mode-opt {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 7px 12px;
+    border: 1px solid #e2e8f0;
+    border-radius: 20px;
+    background: #fff;
+    color: var(--sky-text-muted);
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+
+.sky-mode-opt:hover {
+    border-color: var(--sky-primary);
+}
+
+.sky-mode-opt:has(input:checked) {
+    border-color: var(--sky-primary);
+    background: rgba(99, 102, 241, 0.08);
+    color: var(--sky-primary);
+}
+
+.sky-mode-opt input {
+    accent-color: var(--sky-primary);
+    margin: 0;
+}
+
 /* ─── SETTINGS ERRORS ─── */
 .settings-error {
     padding: 12px 16px;
@@ -578,3 +618,42 @@ input:checked + .sky-slider:before {
         grid-template-columns: 1fr 1fr;
     }
 }
+
+/* ─── RESPONSIVE (≤480px) ─── */
+/* 注意顺序：必须放在 782px 断点之后，同等优先级下后写的规则才胜出。 */
+@media (max-width: 480px) {
+    .sky-main {
+        padding: 16px 12px;
+    }
+
+    .sky-welcome h2 {
+        font-size: 20px;
+    }
+
+    .sky-stats-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .sky-card {
+        padding: 16px;
+    }
+
+    .sky-field-control {
+        width: 100%;
+    }
+
+    /* 看板“系统健康度 + 更新历史”双栏网格是 admin.php 里的内联样式
+       (grid-template-columns: 1fr 1fr，无 class)，窄屏下改单列；内联样式
+       只能用 !important 覆盖（admin.php 不在本批修改范围内）。 */
+    .sky-main div[style*="grid-template-columns: 1fr 1fr"] {
+        grid-template-columns: 1fr !important;
+    }
+
+    /* 新建 Prompt 模板的“模板名称”输入框是内联固定宽 280px，
+       320px 视口下会顶出卡片；同上，只能用 !important 覆盖。 */
+    #new-prompt-name {
+        width: 100% !important;
+        box-sizing: border-box;
+    }
+}
+
