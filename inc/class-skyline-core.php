@@ -41,6 +41,43 @@ class Skyline_Core {
         if (!file_exists($log_dir . '/index.html')) {
             @file_put_contents($log_dir . '/index.html', '');
         }
+        // L33：已装站点的 skyline_ai_settings 行仍是 autoload=yes——
+        // admin.php 的 update_option(..., false) 只对新建行生效，已有行
+        // 的 autoload 不会被改写。这里在 core 初始化时做一次版本化
+        // 一次性迁移（见 maybe_migrate_settings_autoload），已迁移标记
+        // 防重复；插件无现成的版本/迁移机制，故用独立标记，不另起版本表。
+        $this->maybe_migrate_settings_autoload();
+    }
+
+    // L33：把已装站点现有的 'skyline_ai_settings' option 行的 autoload
+    // 改成 no（密钥不再随每个请求读进内存）。只改 autoload 列，不动
+    // option 值；可重复跑（幂等）；失败不致命（返回 false，下次请求再试）。
+    // 实现：直接 $wpdb->update() 只写 autoload 列——update_option() 同值
+    // 重写在部分 WP 版本下会因“值未变”提前返回、改不到 autoload，且会
+    // 重写整个值；$wpdb 路径则与值无关。无行可迁（从未保存过配置）时也
+    // 记标记：后续新建行由 admin.php 的 update_option(..., false) 直接
+    // 写成 no。无 $wpdb 的极端环境退回 update_option() 同值 + false
+    // 尽力而为，不记标记、不抛错。
+    public function maybe_migrate_settings_autoload() {
+        if (!function_exists('get_option') || !function_exists('update_option')) return false;
+        if (get_option('skyline_ai_settings_autoload_migrated', false)) return false;
+        try {
+            $existing = get_option('skyline_ai_settings', null);
+            if ($existing === null) {
+                update_option('skyline_ai_settings_autoload_migrated', 1, false);
+                return false;
+            }
+            global $wpdb;
+            if (isset($wpdb) && is_object($wpdb) && method_exists($wpdb, 'update') && isset($wpdb->options)) {
+                $wpdb->update($wpdb->options, ['autoload' => 'no'], ['option_name' => 'skyline_ai_settings']);
+                update_option('skyline_ai_settings_autoload_migrated', 1, false);
+                return true;
+            }
+            update_option('skyline_ai_settings', $existing, false);
+        } catch (Throwable $e) {
+            return false;
+        }
+        return false;
     }
 
     // 本站日志文件名随机后缀（16 位 hex，存于 skyline_ai_log_token）。
@@ -201,10 +238,12 @@ class Skyline_Core {
         
         $db_opts = get_option('skyline_ai_settings', []);
         $val = $db_opts[$key] ?? ($this->get_config_schema()[$key]['default'] ?? $default);
-        
-        // 配置缓存 TTL 从 86400 缩到 3600 秒：管理员在后台改了配置，
-        // 最长 1 小时生效，而不是等一天；代价是一天最多多几次 get_option，
-        // 相对 24 小时旧配置的风险可以忽略。
+
+        // L33：注意——api_key / oss_sk / redis_auth 等密钥经 get_opt()
+        // 会以明文进 Redis 缓存（下面 cache_set 的 sky_opt_*，TTL 3600 秒）
+        // 与 transient：这是已知现状，不改行为；调用方与部署方须知晓——
+        // Redis 须按内网服务对待、不要对外暴露，密钥轮换后须清掉 sky_opt_*
+        // 缓存（后台保存配置时已清），否则旧密钥最长残留 1 小时。
         set_transient($cache_key, $val, 3600);
         if ($infra) $infra->cache_set($cache_key, $val, 3600);
         $this->options[$key] = $val;
@@ -516,6 +555,12 @@ class Skyline_Core {
     // host/port/auth/db），因为 Infra 的连接是 private、没有对外暴露的
     // 原子计数方法；新建连接只发生在聊天请求上，失败即回退、不影响聊天。
     private function chat_rate_limit_redis($ip) {
+        // M12：先查 Redis 熔断（与 Infra::init_redis() 同一个 transient，
+        // 见 infra.php:28、:90-92，熔断 60 秒）。熔断期间不再 new Redis()
+        // 直连，直接返回 false 走 transient 回退，避免每次聊天都等 2 秒
+        // 连接超时拖垮 FPM 工人。管理员手动测试 handle_test_redis() 有意
+        // 绕过熔断，不改。
+        if (function_exists('get_transient') && get_transient('sky_redis_circuit_open')) return false;
         if (!class_exists('Redis') || !$this->get_opt('redis_enable')) return false;
         try {
             $redis = new Redis();

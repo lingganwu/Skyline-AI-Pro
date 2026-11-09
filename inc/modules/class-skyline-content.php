@@ -119,19 +119,66 @@ class Skyline_Content {
             $v4 = gethostbynamel($host);
             if (is_array($v4)) $ips = array_merge($ips, $v4);
         }
-        if (function_exists('dns_get_record')) {
-            $aaaa = @dns_get_record($host, DNS_AAAA);
-            if (is_array($aaaa)) {
-                foreach ($aaaa as $rec) {
-                    if (!empty($rec['ipv6'])) $ips[] = $rec['ipv6'];
-                }
-            }
-        }
+        // L32⑤：AAAA 走 CNAME 链解析（见 resolve_aaaa_chain）：$host 本身
+        // 只有 CNAME 记录时，AAAA 在 CNAME 目标上，直接查 $host 的 AAAA
+        // 查不到，会漏判目标的内网 AAAA。链上每一跳的 AAAA 都收集到 $ips，
+        // 下面统一经 is_public_ip() 校验，任一内网地址即拒绝。
+        $aaaa = $this->resolve_aaaa_chain($host);
+        if ($aaaa === null) return '域名解析失败'; // CNAME 循环
+        $ips = array_merge($ips, $aaaa);
         if (empty($ips)) return '域名解析失败';
         foreach ($ips as $ip) {
             if (!$this->is_public_ip($ip)) return '不允许访问内部网络地址';
         }
         return null;
+    }
+
+    // DNS 查询的可替身入口：生产走 dns_get_record；测试用子类覆盖本
+    // 方法注入脚本化记录——全局命名空间的 dns_get_record 是内置函数，
+    // 无法在测试里重定义，故走这层间接调用。返回 dns_get_record 的
+    // 原样结果（记录数组 / false），调用方按 is_array 判断。
+    protected function dns_query($host, $type) {
+        if (!function_exists('dns_get_record')) return false;
+        return @dns_get_record($host, $type);
+    }
+
+    // L32⑤：沿 CNAME 链查 AAAA。dns_get_record($host, DNS_AAAA) 不跟
+    // CNAME：$host 本身只有 CNAME 记录时，AAAA 在 CNAME 目标上，直接
+    // 查 $host 的 AAAA 查不到目标的内网 AAAA，会漏判。逐跳查 AAAA 再
+    // 查 CNAME、跳到目标主机继续查（上限 5 跳，含 $host 本身；目标
+    // 主机名统一小写、去尾点再比对，防循环）。返回收集到的全部 IPv6
+    // 地址数组（调用方逐个经 is_public_ip() 校验）；检测到 CNAME 循环
+    // 时返回 null（拒绝，不死循环）。
+    // 注意：A 记录不用走这条链——gethostbynamel() 由系统解析器跟 CNAME，
+    // 本来就能拿到目标的 A 记录，只有 AAAA 有这个缺口。
+    // 诚实记录：本机无法验证真 DNS（本机 dns_get_record /
+    // gethostbynamel 均返回 false），该路径只用测试替身验证过，真 DNS
+    // 行为须在服务器上核对。
+    private function resolve_aaaa_chain($host) {
+        $ips = [];
+        $seen = [];
+        $current = $host;
+        for ($hop = 0; $hop < 5; $hop++) {
+            $current = strtolower(rtrim($current, '.'));
+            if (isset($seen[$current])) return null; // CNAME 循环
+            $seen[$current] = true;
+            $aaaa = $this->dns_query($current, DNS_AAAA);
+            if (is_array($aaaa)) {
+                foreach ($aaaa as $rec) {
+                    if (!empty($rec['ipv6'])) $ips[] = $rec['ipv6'];
+                }
+            }
+            $cname = $this->dns_query($current, DNS_CNAME);
+            $target = null;
+            if (is_array($cname)) {
+                foreach ($cname as $rec) {
+                    if (!empty($rec['target'])) { $target = (string)$rec['target']; break; }
+                }
+            }
+            if ($target === null || $target === '') break;
+            $current = $target;
+        }
+        return $ips;
     }
 
     // IPv4 公网校验（主分支与 ::ffff: 映射 / ::/96 兼容分支共用）：

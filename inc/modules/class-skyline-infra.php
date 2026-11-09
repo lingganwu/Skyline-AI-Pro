@@ -304,7 +304,7 @@ class Skyline_Redis_Mod {
         // 先级 10，只做 emoji/embeds/xmlrpc 的移除，不读页面缓存、不依赖
         // page_cache 在 0 运行）；也不要同时加服务器 crontab（与本修复二选一）。
         add_action('init', [$this, 'page_cache'], 20);
-        add_action('save_post', [$this, 'smart_flush'], 10, 2);
+        add_action('transition_post_status', [$this, 'smart_flush'], 10, 3);
         add_action('deleted_post', [$this, 'flush_on_delete'], 10, 2);
     }
 
@@ -432,30 +432,38 @@ class Skyline_Redis_Mod {
         return false;
     }
 
-    // M3：不要每次保存都全清页面缓存。跳过修订版、自动草稿
-    // （DOING_AUTOSAVE，打开写文章页即触发）、附件（wp_insert_attachment
-    // 同样触发 save_post）和 auto-draft（新建文章页创建的草稿）；只有
-    // 文章真正发布/更新/下架/删除时才全清。修前发文/写稿/传图都会让
-    // 全站冷启动，首批访客直面 12–14 秒生成。
-    public function smart_flush($pid, $post) {
-        if (wp_is_post_revision($pid)) return;
+    // M3（补修）：save_post 每次保存都全清页面缓存，写草稿/改草稿也让
+    // 全站冷启动。改挂 transition_post_status($new_status, $old_status,
+    // $post)，只在“公开状态变化”时全清：
+    //  - 新/旧任一为 publish：发布、已发布文章更新、下架/移入回收站/
+    //    设为私密/定时发布，公开页面确实变了；
+    //  - 其余转换（草稿→草稿、草稿→待审核、待审核→草稿…）只清首页+
+    //    本篇（下面的退化路径），未公开内容不影响任何公开页面。
+    // 跳过逻辑按 transition_post_status 语义适配：修订版（transition
+    // 对修订版也会触发，用 $post->ID 查）、自动保存、附件、auto-draft
+    // （新建文章页创建草稿：auto-draft→draft，还没有任何公开内容）。
+    // 注意：$post->post_status 即新状态，auto-draft 须同时查新/旧两个
+    // 状态——auto-draft→draft 时 $post->post_status 已是 draft。
+    public function smart_flush($new_status, $old_status, $post) {
+        if (!is_object($post) || !isset($post->ID)) return;
+        if (wp_is_post_revision($post->ID)) return;
         if (defined('DOING_AUTOSAVE') && DOING_AUTOSAVE) return;
-        if (is_object($post)) {
-            if (isset($post->post_type) && $post->post_type === 'attachment') return;
-            if (isset($post->post_status) && $post->post_status === 'auto-draft') return;
-        }
+        if (isset($post->post_type) && $post->post_type === 'attachment') return;
+        if ($new_status === 'auto-draft' || $old_status === 'auto-draft') return;
         $core = Skyline_Core::instance();
         $infra = Skyline_Infra::instance();
-        // redis_smart_purge 开启（默认 true）：按前缀批量清全部页面缓存，
-        // 分类/标签/Feed/归档一起刷新；下架、草稿、移入回收站同样清理，
-        // 已下架文章的缓存页不再存活到 TTL 结束。
-        // 关闭时退回旧行为：只清首页和本篇。
-        if ($core->get_opt('redis_smart_purge', true)) {
+        // redis_smart_purge 开启（默认 true）：公开状态变化时按前缀批量
+        // 清全部页面缓存，分类/标签/Feed/归档一起刷新；已下架文章的缓存
+        // 页不再存活到 TTL 结束。
+        // 关闭时退回旧行为：只清首页和本篇。草稿→草稿等非公开转换无论
+        // 开关如何，都只清首页+本篇。
+        if (($new_status === 'publish' || $old_status === 'publish')
+            && $core->get_opt('redis_smart_purge', true)) {
             $infra->cache_del_prefix('page_');
             return;
         }
         $infra->cache_del('page_' . md5(home_url('/')));
-        $infra->cache_del('page_' . md5(get_permalink($pid)));
+        $infra->cache_del('page_' . md5(get_permalink($post->ID)));
     }
 
     // M3：删修订版时不全清。注意 deleted_post 触发时行已删，wp_is_post_revision()
@@ -1098,6 +1106,11 @@ if (!class_exists('Skyline_OSS_Mod')) {
         // _sky_oss_synced=1、再也不会重新上传。
         const PENDING_DELETE_META = '_sky_oss_pending_delete';
         const PURGE_DELAY = DAY_IN_SECONDS; // 24 小时
+        // L28（补修）：失败清单重试——WP-Cron 单次事件 skyline_oss_retry_failed。
+        // 间隔与上限与 Zero-Disk 的 purge 保持一致（1 小时、上限 3 次）。
+        const RETRY_DELAY = 3600;
+        const RETRY_MAX = 3;
+        const RETRY_ATTEMPTS_META = '_sky_oss_retry_attempts';
         // M22：Zero-Disk 回收站保留期——删前移入 uploads/.trash/ 保留 7 天，
         // 到期由后续 purge 运行时清理、真正删除。
         const TRASH_TTL = 7 * DAY_IN_SECONDS;
@@ -1117,6 +1130,7 @@ if (!class_exists('Skyline_OSS_Mod')) {
             add_filter('wp_get_attachment_url', [$this, 'replace_url'], 99, 2);
             add_filter('wp_get_attachment_image_src', [$this, 'replace_image_src'], 99, 4);
             add_action('skyline_oss_purge_pending', [$this, 'purge_pending_deletes']);
+            add_action('skyline_oss_retry_failed', [$this, 'retry_failed_sizes']);
         }
 
         private function make_cos_client() {
@@ -1139,12 +1153,27 @@ if (!class_exists('Skyline_OSS_Mod')) {
             if (!$core->get_opt('oss_enable')) return $metadata;
 
             $file = get_attached_file($attachment_id);
-            // L28(a)：文件不存在时不再静默返回——清除 _sky_oss_synced 并记
-            // 日志（自愈标记）：本地文件被删/丢失后，前台 URL 不应再翻成
-            // COS 地址；下次重新生成或手动重传时重新同步。
+            // 对象 key 提前算出来：文件缺失分支也要用它核查 COS 上是否还有副本。
+            $upload_dir = wp_upload_dir();
+            $base_url_path = trim(parse_url($upload_dir['baseurl'], PHP_URL_PATH), '/') ?: 'wp-content/uploads';
+            $attached_file = get_post_meta($attachment_id, '_wp_attached_file', true) ?: ($file ? basename($file) : '');
+            $object_key = $base_url_path . '/' . ltrim($attached_file, '/');
+            // L28(a) 补修：文件不存在时不再只清标记等下次——先核查 COS 上
+            // 是否还有副本（remoteExists 的既定语义：COS 对象在就说明同步
+            // 是完好的，不能清标记，否则前台 URL 会从能打开的 COS 地址翻
+            // 回不存在的本地路径）。COS 有副本：标记保留、前台继续走 COS；
+            // COS 也没有：按旧行为清标记。两种情况都约 1 小时后的自动复查
+            // （skyline_oss_retry_failed），不再被动等下次重新生成/手动重传。
             if (!$file || !file_exists($file)) {
-                delete_post_meta($attachment_id, '_sky_oss_synced');
-                $core->log("⚠️ [OSS] 附件 #{$attachment_id} 本地文件缺失，已清除已同步标记（待重新生成/上传时自愈）", 'warn', 'OSS');
+                $client = $this->make_cos_client();
+                $cos_has_it = $client ? $client->remoteExists($object_key) : false;
+                if ($cos_has_it) {
+                    $core->log("⚠️ [OSS] 附件 #{$attachment_id} 本地文件缺失，但 COS 副本完好，已同步标记保留、前台继续走 COS；已约 1 小时后自动复查", 'warn', 'OSS');
+                } else {
+                    delete_post_meta($attachment_id, '_sky_oss_synced');
+                    $core->log("⚠️ [OSS] 附件 #{$attachment_id} 本地文件缺失且 COS 上无副本，已清除已同步标记；已约 1 小时后自动复查", 'warn', 'OSS');
+                }
+                $this->schedule_retry($attachment_id);
                 return $metadata;
             }
 
@@ -1154,11 +1183,6 @@ if (!class_exists('Skyline_OSS_Mod')) {
             if (!$client) return $metadata;
 
             try {
-                $upload_dir = wp_upload_dir();
-                $base_url_path = trim(parse_url($upload_dir['baseurl'], PHP_URL_PATH), '/') ?: 'wp-content/uploads';
-                $attached_file = get_post_meta($attachment_id, '_wp_attached_file', true) ?: basename($file);
-
-                $object_key = $base_url_path . '/' . ltrim($attached_file, '/');
                 $success_entries = [];
                 $failed_files = [];
 
@@ -1218,10 +1242,16 @@ if (!class_exists('Skyline_OSS_Mod')) {
                     // 的整体语义不变（仍只有全成功才写 _sky_oss_synced），
                     // 但失败项从此可见、可重试，而不是只留一句“存在失败项”。
                     update_post_meta($attachment_id, '_sky_oss_failed_sizes', $failed_files);
+                    // L28（补修）：新一轮失败即新一轮重试周期——清掉旧的重试
+                    // 计数（否则上轮用满 3 次后本轮一次也约不上），并约 1 小时
+                    // 后的自动重试（skyline_oss_retry_failed）；清单从此有消费
+                    // 方，不再只记不重试。
+                    delete_post_meta($attachment_id, self::RETRY_ATTEMPTS_META);
+                    $this->schedule_retry($attachment_id);
                     $failed_desc = implode(', ', array_map(function ($f) {
                         return ($f['type'] ?? '?') . ':' . ($f['key'] ?? '');
                     }, $failed_files));
-                    $core->log("⚠️ [OSS] 附件 #{$attachment_id} 存在失败项（共 " . count($failed_files) . " 个）：{$failed_desc}，已记入 _sky_oss_failed_sizes 待重试", 'warn', 'OSS');
+                    $core->log("⚠️ [OSS] 附件 #{$attachment_id} 存在失败项（共 " . count($failed_files) . " 个）：{$failed_desc}，已记入 _sky_oss_failed_sizes 待重试，已约 1 小时后自动重试", 'warn', 'OSS');
                 }
 
             } catch (Throwable $e) {
@@ -1229,6 +1259,96 @@ if (!class_exists('Skyline_OSS_Mod')) {
             }
 
             return $metadata;
+        }
+
+        // L28（补修）：失败清单的重试消费方（WP-Cron 回调，见 schedule_retry）。
+        // 选 WP-Cron 而不是后台 AJAX 入口，两个理由：
+        //  ① 失败发生在媒体上传流程里，重试必须无人值守自动发生——AJAX 要管理
+        //     员打开后台点一下才跑，等于“待重试”仍依赖人工；
+        //  ② 插件已有 skyline_oss_purge_pending 的同款模式（单次事件 +
+        //     wp_next_scheduled 守卫 + 1 小时重排 + 上限 3 次），复用零新概
+        //     念；且 S4 刚修好 wp-cron 饿死，低流量时段 cron 也能触发。
+        // 语义：逐项重试清单里的失败尺寸——本地文件还在就重新 putFile
+        // （putFile 自带上传后强校验）；本地文件已不在时核查 COS：对象在即
+        // 视为已同步、直接从清单移除（自愈），对象也不在则保留清单记日志
+        // （缺本地文件无法上传，等重新生成）。清单清空后写 _sky_oss_synced=1
+        // （此前成功项早已在 COS 上，清单空即全量已同步）；仍有剩余时更新
+        // 清单、1 小时后重排（上限 3 次）。
+        public function retry_failed_sizes($attachment_id) {
+            $attachment_id = (int)$attachment_id;
+            $failed = get_post_meta($attachment_id, '_sky_oss_failed_sizes', true);
+            if (!is_array($failed) || empty($failed)) return;
+
+            $core = Skyline_Core::instance();
+            if (!$core->get_opt('oss_enable')) {
+                $core->log("⚠️ [OSS] OSS 已关闭，附件 #{$attachment_id} 的失败清单暂不重试", 'warn', 'OSS');
+                $this->reschedule_retry($attachment_id, 'OSS 已关闭');
+                return;
+            }
+
+            $client = $this->make_cos_client();
+            if (!$client) {
+                $this->reschedule_retry($attachment_id, 'COS 客户端创建失败');
+                return;
+            }
+
+            $remaining = [];
+            foreach ($failed as $entry) {
+                if (!is_array($entry) || empty($entry['path']) || empty($entry['key'])) {
+                    $remaining[] = $entry;
+                    continue;
+                }
+                if (!file_exists($entry['path'])) {
+                    // 本地文件缺失：COS 上有对象即视为已同步（自愈）、从清单移除；
+                    // COS 上也没有则保留、记日志（无法凭空上传，等重新生成）。
+                    if ($client->remoteExists($entry['key'])) {
+                        $core->log("✅ [OSS] 附件 #{$attachment_id} 重试：本地文件已缺失但 COS 上已有 {$entry['key']}，视为已同步", 'info', 'OSS');
+                        continue;
+                    }
+                    $core->log("⚠️ [OSS] 附件 #{$attachment_id} 重试：本地文件缺失且 COS 上无对象，无法重试 {$entry['key']}，保留清单", 'warn', 'OSS');
+                    $remaining[] = $entry;
+                    continue;
+                }
+                if ($client->putFile($entry['key'], $entry['path'])) {
+                    $core->log("✅ [OSS] 附件 #{$attachment_id} 重试成功：{$entry['key']}", 'info', 'OSS');
+                    continue;
+                }
+                $core->log("⚠️ [OSS] 附件 #{$attachment_id} 重试仍失败：{$entry['key']}，保留清单", 'warn', 'OSS');
+                $remaining[] = $entry;
+            }
+
+            if (empty($remaining)) {
+                delete_post_meta($attachment_id, '_sky_oss_failed_sizes');
+                delete_post_meta($attachment_id, self::RETRY_ATTEMPTS_META);
+                update_post_meta($attachment_id, '_sky_oss_synced', 1);
+                $core->log("🎉 [OSS] 附件 #{$attachment_id} 失败清单已全部重试成功，已写已同步标记", 'info', 'OSS');
+                return;
+            }
+
+            update_post_meta($attachment_id, '_sky_oss_failed_sizes', $remaining);
+            $this->reschedule_retry($attachment_id, '仍有 ' . count($remaining) . ' 项未成功');
+        }
+
+        // L28（补修）：重试未完成时 1 小时后重排，复用 purge 的上限 3 次规则；
+        // 超限记错误日志并保留清单待人工处理，不再重排。
+        private function reschedule_retry($attachment_id, $reason = '') {
+            $retries = (int)get_post_meta($attachment_id, self::RETRY_ATTEMPTS_META, true);
+            if ($retries >= self::RETRY_MAX) {
+                $core = Skyline_Core::instance();
+                $core->log("❌ [OSS] 附件 #{$attachment_id} 失败清单重试已满 3 次，停止重试，清单已保留待人工处理" . ($reason !== '' ? "（{$reason}）" : ''), 'error', 'OSS');
+                return false;
+            }
+            update_post_meta($attachment_id, self::RETRY_ATTEMPTS_META, $retries + 1);
+            $this->schedule_retry($attachment_id);
+            return true;
+        }
+
+        // L28（补修）：约一次失败清单重试（WP-Cron 单次事件，1 小时后）。
+        // 已有排期时不重复约（wp_next_scheduled 守卫，与 purge 的写法一致）。
+        private function schedule_retry($attachment_id) {
+            if (!wp_next_scheduled('skyline_oss_retry_failed', [$attachment_id])) {
+                wp_schedule_single_event(time() + self::RETRY_DELAY, 'skyline_oss_retry_failed', [$attachment_id]);
+            }
         }
 
         // M22：把本地文件移入回收站（wp-content/uploads/.trash/），返回
