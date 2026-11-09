@@ -226,6 +226,42 @@ class Skyline_Core {
         return 'custom';
     }
 
+    // v2.2.1：对话端点归一化。call_api() 直接拿 api_base 当 POST 目标，
+    // 用户只填裸根地址（如 https://www.lgwu.de:3001/v1）时会 POST 到
+    // /v1 而失败（404/405）。根地址以 /v1 结尾时补 /chat/completions：
+    // 预设的 chat_endpoint 本就以该后缀结尾，OpenAI 兼容接口的对话
+    // 入口也都是这个形状。只认 /v1 结尾——已带其他路径的（如
+    // …/v1/chat）原样返回，不乱拼；已带后缀的原样返回。空值返回空。
+    public function get_chat_endpoint() {
+        $base = rtrim(trim((string)$this->get_opt('api_base', '')), '/');
+        if ($base === '') return '';
+        if (substr($base, -17) === '/chat/completions') return $base;
+        if (substr($base, -3) === '/v1') $base .= '/chat/completions';
+        return $base;
+    }
+
+    // v2.2.1：生图密钥解析。api_img_key 非空时用它，否则跟随主 api_key
+    // （对话与生图同一家时单密钥即可；分属两家时生图填另一家的密钥）。
+    public function get_img_api_key() {
+        $k = trim((string)$this->get_opt('api_img_key', ''));
+        if ($k !== '') return $k;
+        return trim((string)$this->get_opt('api_key', ''));
+    }
+
+    // v2.2.1：生图根地址解析（handle_gen_img 与界面占位文案共用同一份
+    // 逻辑，界面显示的就是真实生效值）。优先级：已存 api_img_base →
+    // 从归一化后的 api_base 推导（去掉 /chat/completions）；推导不出
+    // 返回 ''（调用方报错，不静默回退硅基流动）。
+    public function get_effective_img_base() {
+        $img_base = trim((string)$this->get_opt('api_img_base', ''));
+        if ($img_base !== '') return rtrim($img_base, '/');
+        $endpoint = $this->get_chat_endpoint();
+        if (substr($endpoint, -17) === '/chat/completions') {
+            return substr($endpoint, 0, -17);
+        }
+        return '';
+    }
+
     public function get_config_schema() {
         // v2.2.0：厂商下拉选项与厂商表同源（label 取自 get_api_vendors()），
         // 顺序与厂商表一致：7 家预设在前，“自定义”最后一位。
@@ -237,8 +273,12 @@ class Skyline_Core {
             // 生图端点根地址（L8）：handle_gen_img() 优先用这里拼 /images/generations；
             // 留空时回退到从 api_base 推导（/chat/completions → /images/generations）并记日志。
             'api_img_base' => ['group'=>'ai', 'type'=>'url', 'label'=>'生图 API 根地址', 'desc'=>'例如 https://api.siliconflow.cn/v1；默认与上方 API Endpoint 同厂商（硅基流动）。留空时从 API Endpoint 推导（仅当它以 /chat/completions 结尾时）；推导不出请填写。', 'default'=>'https://api.siliconflow.cn/v1'],
-            'api_key' => ['group'=>'ai', 'type'=>'password', 'label'=>'API Key', 'desc'=>'你的 API 密钥 (sk-...)', 'required'=>true],
-            'chat_model' => ['group'=>'ai', 'type'=>'datalist', 'label'=>'对话模型', 'desc'=>'可点选预设，也可直接输入厂商新出的模型名；切换厂商后下拉随之更新。', 'default'=>'deepseek-ai/DeepSeek-V3'],
+            'api_key' => ['group'=>'ai', 'type'=>'password', 'label'=>'API Key', 'desc'=>'你的 API 密钥 (sk-...)；对话与生图共用，生图未填独立密钥时也用它。', 'required'=>true],
+            // v2.2.1：独立的生图密钥（对话与生图分属不同厂商时用）。留空
+            // 时跟随上方 API Key；整站都切同一家（如 FreeLLMAPI）时留
+            // 空即可，单密钥。生图请求优先用它（见 handle_gen_img）。
+            'api_img_key' => ['group'=>'ai', 'type'=>'password', 'label'=>'生图 API Key', 'desc'=>'生图专用的 API 密钥；留空时跟随上方“API Key”。对话切到 FreeLLMAPI、生图继续用硅基流动时，在此填硅基流动的密钥；整站都切同一家时留空即可（单密钥）。', 'default'=>''],
+            'chat_model' => ['group'=>'ai', 'type'=>'datalist', 'label'=>'对话模型', 'desc'=>'可点选预设，也可直接输入厂商新出的模型名；切换厂商后下拉随之更新。', 'default'=>'zai-org/GLM-5.3-Flash'],
             'image_model' => ['group'=>'ai', 'type'=>'datalist', 'label'=>'绘图模型', 'desc'=>'可点选预设，也可直接输入新模型名；所选厂商无绘图模型时请留空或自由输入。', 'default'=>'black-forest-labs/FLUX.1-schnell'],
             'system_prompt' => ['group'=>'ai', 'type'=>'textarea', 'label'=>'系统人设', 'default'=>"你是灵感屋（lgwu.net）的 AI 助手，专注景观设计：园林方案、施工图与节点详图、植物配置、铺装与工程做法、设计软件与学习资源。用准确的景观专业术语，中文回答，简洁实用。"],
             'robot_enable' => ['group'=>'ai', 'type'=>'bool', 'label'=>'启用前台悬浮助手', 'default'=>true],
@@ -509,7 +549,7 @@ class Skyline_Core {
             'sslverify' => true
         ];
 
-        $r = wp_remote_post($this->get_opt('api_base'), $args);
+        $r = wp_remote_post($this->get_chat_endpoint(), $args);
         
         if(is_wp_error($r)) {
             $err = $r->get_error_message();
@@ -910,24 +950,28 @@ class Skyline_Core {
         $prompt = sanitize_text_field($_POST['prompt'] ?? '');
         // L8：prompt 为空直接报错，不发请求。
         if ($prompt === '') wp_send_json_error('生图提示词为空');
-        $k = $this->get_opt('api_key');
+        $k = $this->get_img_api_key();
         if(!$k) wp_send_json_error('API Key 未配置');
         // L8：生图端点优先用独立配置项 api_img_base（根地址，schema 默认
         // 与 API Endpoint 同厂商：https://api.siliconflow.cn/v1）。
-        // 留空时只从以 /chat/completions 结尾的 api_base 推导；推导不出
-        // 时直接报错，不再静默回退 SiliconFlow 默认地址——api_base 换了
-        // 厂商时，偷偷把提示词发给另一家既鉴权失败、也不符合用户预期。
-        $img_base = trim((string)$this->get_opt('api_img_base', ''));
+        // 留空时只从以 /chat/completions 结尾的 api_base 推导（/chat/completions → /images/generations）并记日志。
+        // 推导逻辑与 get_effective_img_base() 同源；推导不出时直接报错，
+        // 不再静默回退 SiliconFlow 默认地址——api_base 换了厂商时，偷偷
+        // 把提示词发给另一家既鉴权失败、也不符合用户预期。
+        // v2.2.1：生图密钥优先用独立的 api_img_key（见 get_img_api_key，
+        // 留空时跟随主 api_key）；生图调用形状是 api_img_base +
+        // /images/generations、body {model, prompt, size}，与硅基流动、
+        // FreeLLMAPI 等 OpenAI 兼容接口同一形状，模型名以用户填的为准、
+        // 不做厂商白名单校验。
+        $stored_img_base = trim((string)$this->get_opt('api_img_base', ''));
+        $img_base = $this->get_effective_img_base();
         if ($img_base !== '') {
-            $img_url = rtrim($img_base, '/') . '/images/generations';
-        } else {
-            $base = trim((string)$this->get_opt('api_base', 'https://api.siliconflow.cn/v1/chat/completions'));
-            if (substr($base, -17) === '/chat/completions') {
-                $img_url = str_replace('/chat/completions', '/images/generations', $base);
+            $img_url = $img_base . '/images/generations';
+            if ($stored_img_base === '') {
                 $this->log("生图端点未配置 api_img_base，从 api_base 推导：{$img_url}", 'warning', 'API');
-            } else {
-                wp_send_json_error('生图端点未配置：请在智能核心设置里填写“生图 API 根地址”，或把 API Endpoint 改为以 /chat/completions 结尾的地址');
             }
+        } else {
+            wp_send_json_error('生图端点未配置：请在智能核心设置里填写“生图 API 根地址”，或把 API Endpoint 改为以 /chat/completions 结尾的地址');
         }
         $args = [
             'headers' => ['Authorization' => 'Bearer '.$k, 'Content-Type' => 'application/json'],

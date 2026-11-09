@@ -1,5 +1,5 @@
 document.addEventListener('DOMContentLoaded', function() {
-    console.log('🚀 Skyline AI Pro v2.2.0 Enterprise Engine Loaded');
+    console.log('🚀 Skyline AI Pro v2.2.1 Enterprise Engine Loaded');
 
     // 表单保存按钮动画增强
     const saveBtn = document.querySelector('.sky-save-btn');
@@ -12,6 +12,128 @@ document.addEventListener('DOMContentLoaded', function() {
     }
 });
 
+// v2.2.1：三张批量卡片（WebP / 蜘蛛 / SEO）共用的批量进度驱动。
+// 各卡片只留一个薄壳（见 admin.php 内联 <script>）：扫描解析、结果
+// 计数与文案由回调传入；驱动负责状态机与进度——
+// ① 发每批请求前先写“正在处理第 N/M 批（第 X–Y 项）…”，一批 10–60 秒
+//    时界面不再像冻住；② 停止时 abort 在途请求（旧的软停只在批间生
+//    效，在途一批跑完后还会把“已停止”文案冲回“处理中”）；③ 失败与
+//    跳过都逐条列出原因（回调把 it.reason 拼成 <li>，只用 textContent）。
+window.SkyBatchRunner = (function() {
+    function el(id) { return document.getElementById(id); }
+    function setText(id, txt) { var n = el(id); if (n) n.textContent = txt; }
+    function setDisabled(id, disabled) { var n = el(id); if (n) n.disabled = disabled; }
+    function setBar(cfg, done, total) {
+        var bar = el(cfg.bar);
+        if (bar) bar.style.width = (total ? Math.round(done / total * 100) : 0) + '%';
+        var wrap = el(cfg.progress);
+        if (wrap) wrap.style.display = total ? 'block' : 'none';
+    }
+    function addLine(cfg, text) {
+        var ul = el(cfg.failures);
+        if (!ul) return;
+        var li = document.createElement('li');
+        li.textContent = text;
+        ul.appendChild(li);
+    }
+    function create(cfg) {
+        var st = { ids: [], pos: 0, total: 0, done: 0, stopping: false, xhr: null };
+        function restoreButtons() {
+            setDisabled(cfg.scanBtn, false);
+            setDisabled(cfg.startBtn, false);
+            setDisabled(cfg.stopBtn, true);
+        }
+        function summary() { return cfg.summaryText(st); }
+        function next() {
+            if (st.stopping) return;
+            if (st.pos >= st.ids.length) {
+                setText(cfg.status, '✅ 全部完成：' + summary());
+                restoreButtons();
+                return;
+            }
+            var size = cfg.batchSize();
+            if (!(size >= 1)) size = 1;
+            var batch = st.ids.slice(st.pos, st.pos + size);
+            var totalBatches = Math.max(1, Math.ceil(st.total / size));
+            var batchNo = Math.floor(st.pos / size) + 1;
+            setText(cfg.status, '正在处理第 ' + batchNo + '/' + totalBatches + ' 批（第 ' + (st.pos + 1) + '–' + (st.pos + batch.length) + ' 项，共 ' + st.total + ' 项）…请稍候。' + summary());
+            var params = { action: cfg.batchAction, ids: batch, _ajax_nonce: cfg.nonce };
+            if (cfg.batchParams) {
+                var extra = cfg.batchParams(batch, size);
+                for (var k in extra) params[k] = extra[k];
+            }
+            st.xhr = jQuery.post(ajaxurl, params, function(r) {
+                st.xhr = null;
+                if (st.stopping) return;
+                if (!r.success) {
+                    setText(cfg.status, '❌ ' + cfg.batchFailLabel + '失败：' + (r.data || '未知错误'));
+                    restoreButtons();
+                    return;
+                }
+                var results = (r.data && r.data.results) || [];
+                results.forEach(function(it) {
+                    st.done++;
+                    cfg.onResult(it, st, function(text) { addLine(cfg, text); });
+                });
+                st.pos += results.length;
+                setBar(cfg, st.done, st.total);
+                setText(cfg.status, '处理中：' + summary());
+                next();
+            }).fail(function(xhr, textStatus) {
+                st.xhr = null;
+                if (st.stopping || textStatus === 'abort') {
+                    setText(cfg.status, '已停止：' + summary());
+                    restoreButtons();
+                    return;
+                }
+                setText(cfg.status, '❌ 批量请求失败（网络错误），已停止。');
+                restoreButtons();
+            });
+        }
+        return {
+            scan: function() {
+                st.stopping = false;
+                st.pos = 0; st.done = 0;
+                setText(cfg.status, cfg.scanText || '正在扫描…');
+                jQuery.post(ajaxurl, { action: cfg.scanAction, _ajax_nonce: cfg.nonce }, function(r) {
+                    if (!r.success) { setText(cfg.status, '❌ 扫描失败：' + (r.data || '未知错误')); return; }
+                    var parsed = cfg.parseScan(r.data || {});
+                    st.ids = parsed.ids || [];
+                    st.total = st.ids.length;
+                    st.pos = 0; st.done = 0;
+                    cfg.resetCounts(st);
+                    setText(cfg.status, parsed.statusText);
+                    if (parsed.costText !== undefined) setText(cfg.cost, parsed.costText);
+                    var ul = el(cfg.failures);
+                    if (ul) ul.innerHTML = '';
+                    setBar(cfg, 0, st.total);
+                    setDisabled(cfg.startBtn, st.total === 0);
+                }).fail(function() { setText(cfg.status, '❌ 扫描请求失败（网络错误）。'); });
+            },
+            start: function() {
+                var ids = cfg.collectIds ? cfg.collectIds(st) : st.ids;
+                if (!ids || !ids.length) { setText(cfg.status, cfg.emptyStartText || '没有可处理的项目。'); return; }
+                st.ids = ids;
+                st.total = ids.length;
+                st.pos = 0; st.done = 0;
+                st.stopping = false;
+                cfg.resetCounts(st);
+                setDisabled(cfg.startBtn, true);
+                setDisabled(cfg.scanBtn, true);
+                setDisabled(cfg.stopBtn, false);
+                next();
+            },
+            stop: function() {
+                st.stopping = true;
+                if (st.xhr && st.xhr.abort) st.xhr.abort();
+                setText(cfg.status, '已停止：' + summary());
+                restoreButtons();
+            }
+        };
+    }
+    return { create: create };
+})();
+
 // v2.2.0：模型厂商下拉联动。厂商表由 render_ai_tab 以 JSON 嵌在智能核心
 // 页里（#sky-api-vendors），其他页没有该节点、直接返回。只在用户主动切
 // 厂商时改值：页面加载时不写任何字段，不覆盖已存的自定义值。
@@ -22,12 +144,6 @@ document.addEventListener('DOMContentLoaded', function() {
     try { vendors = JSON.parse(dataEl.textContent); } catch (e) { return; }
     var vendorSel = document.getElementById('sky-field-api_vendor');
     if (!vendorSel) return;
-    var apiBase = document.getElementById('sky-field-api_base');
-    var imgBase = document.getElementById('sky-field-api_img_base');
-    var chatInput = document.getElementById('sky-field-chat_model');
-    var imageInput = document.getElementById('sky-field-image_model');
-    var chatList = document.getElementById('sky-list-chat_model');
-    var imageList = document.getElementById('sky-list-image_model');
 
     // 重建 datalist：有预设就挂 list 属性、无预设就摘掉（纯自由输入）。
     function refreshList(listEl, inputEl, models) {
@@ -48,10 +164,25 @@ document.addEventListener('DOMContentLoaded', function() {
         inputEl.value = models.length ? models[0] : '';
     }
 
-    vendorSel.addEventListener('change', function() {
-        var v = vendors[vendorSel.value];
+    // v2.2.1：厂商切换逻辑抽成具名函数（window.skyApplyVendor），供
+    // node 测试直接调；change 监听只负责传值。行为：
+    // ① 切“自定义”时不改任何已存值（Endpoint、生图根地址、生图模型
+    //    都原样保留），只把预设下拉清空、模型恢复纯自由输入——用户要
+    //    填 FreeLLMAPI 的生图地址与模型（如 @cf/...）时不会被清空；
+    // ② 切预设且该厂商有生图根地址时才写 api_img_base；无生图根地址
+    //    的厂商（如 DeepSeek / Moonshot）不清空已存的生图根地址与生
+    //    图密钥（密钥字段 JS 从不碰）；③ 无生图模型的厂商只清空生图
+    //    模型名（pickModel 的无清单分支）。
+    window.skyApplyVendor = function(vendorKey) {
+        var v = vendors[vendorKey];
         if (!v) return;
-        if (vendorSel.value === 'custom') {
+        var apiBase = document.getElementById('sky-field-api_base');
+        var imgBase = document.getElementById('sky-field-api_img_base');
+        var chatInput = document.getElementById('sky-field-chat_model');
+        var imageInput = document.getElementById('sky-field-image_model');
+        var chatList = document.getElementById('sky-list-chat_model');
+        var imageList = document.getElementById('sky-list-image_model');
+        if (vendorKey === 'custom') {
             // 自定义：不改任何已存值（Endpoint、生图根地址与模型都原样
             // 保留），只把预设下拉清空，模型字段恢复纯自由输入。
             refreshList(chatList, chatInput, []);
@@ -59,11 +190,14 @@ document.addEventListener('DOMContentLoaded', function() {
             return;
         }
         if (apiBase) apiBase.value = v.chat_endpoint || '';
-        if (imgBase) imgBase.value = v.img_base || '';
+        if (imgBase && v.img_base) imgBase.value = v.img_base;
         refreshList(chatList, chatInput, v.chat_models || []);
         refreshList(imageList, imageInput, v.image_models || []);
         pickModel(chatInput, v.chat_models || []);
         pickModel(imageInput, v.image_models || []);
+    };
+    vendorSel.addEventListener('change', function() {
+        window.skyApplyVendor(vendorSel.value);
     });
 });
 // v2.2.0 收口：密码字段显示切换。按钮与输入框由 render_field 的 password

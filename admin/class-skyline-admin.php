@@ -90,8 +90,22 @@ class Skyline_Admin {
                 } else {
                     switch ($type) {
                         case 'url':
-                            $sanitized[$key] = esc_url_raw($posted[$key]);
-                            $wrote++;
+                            // v2.2.1：浏览器自动填充会把已保存的用户名（如
+                            // “灵感屋”）填进 URL 框；无 scheme 的假值绝不能
+                            // 覆盖已存配置。空值 = 用户清空（沿旧语义存 ''）；
+                            // 非空但不是 http(s) 地址的拒绝保存、保留旧值，
+                            // 并报错提示（http(s) 才放行，FreeLLMAPI 的
+                            // http:// 内网/公网地址与端口都不拦）。
+                            $raw_url = trim((string)$posted[$key]);
+                            if ($raw_url === '') {
+                                $sanitized[$key] = '';
+                                $wrote++;
+                            } elseif (preg_match('#^https?://#i', $raw_url)) {
+                                $sanitized[$key] = esc_url_raw($raw_url);
+                                $wrote++;
+                            } else {
+                                add_settings_error('skyline_messages', 'skyline_msg_' . $key, '⚠️ “' . $cfg['label'] . '”的值不是合法的 http(s) 地址（可能是浏览器自动填充），已保留原值，未保存。', 'error');
+                            }
                             break;
                         case 'textarea':
                             $sanitized[$key] = sanitize_textarea_field($posted[$key]);
@@ -105,8 +119,17 @@ class Skyline_Admin {
                             // M21：密码字段留空表示“不改”，绝不拿空值覆盖已
                             // 有的密钥（render_field 也不再回显密钥原文）。
                             // 只有用户主动填入新值时才更新。
+                            // v2.2.1：生图密钥（api_img_key）例外——留空即
+                            // “跟随主 API Key”，已填过的要清掉时，勾选
+                            // “更改”后留空提交即清空（此时字段已启用、键
+                            // 会提交空值；未勾选时字段禁用、键根本不提交，
+                            // 不会误清）。其他密码字段仍是“空=不改”，因为
+                            // 清空主密钥/OSS 密钥没有安全语义。
                             if (trim((string)$posted[$key]) !== '') {
                                 $sanitized[$key] = sanitize_text_field($posted[$key]);
+                                $wrote++;
+                            } elseif ($key === 'api_img_key') {
+                                $sanitized[$key] = '';
                                 $wrote++;
                             }
                             break;
@@ -319,7 +342,7 @@ class Skyline_Admin {
             'logs' => ['label' => '📜 系统日志', 'icon' => '📜'],
         ];
         ?>
-        <form method="post" action="" id="skyline-settings-form">
+        <form method="post" action="" id="skyline-settings-form" autocomplete="off">
         <div class="sky-wrapper">
             <div class="sky-sidebar">
                 <div class="sky-brand">
@@ -688,6 +711,7 @@ class Skyline_Admin {
             <div class="sky-card">
                 <div class="sky-card-title">📜 更新历史</div>
                 <div style="font-size: 13px; color: var(--sky-text-muted); line-height: 1.8;">
+                    <b>v2.2.1</b> - 批量进度实时显示（WebP/图片同步/SEO 共用组件，在途批次可见、停止立即生效）+ 失败/跳过逐篇给原因；敏感字段防浏览器自动填充（密码框默认禁用、生图密钥独立）；生图 API Key 独立（留空跟随主 Key）；Prompt 模板库移到聊天记录上方<br>
                     <b>v2.2.0</b> - API 厂商预设下拉 + 模型联动（7 家 + 自定义，已存配置自动反推厂商）；前台聊天报错按原因区分（504 超时/403/60 秒超时/断网）<br>
                     <b>v2.1.1</b> - 审核遗留小尾巴全修：预览防 XSS、手动同步补排除检查、英文 Slug 不带中文人设、每日上限按本地天重置、WebP 原图删失败可重试、生图端点安全默认值；重新保存复活已放弃的自动 SEO、接口报错带出真实 message<br>
                     <b>v2.1.0</b> - 聊天面板美化 + WebP 转换 + 图片同步自动/手动切换 + 看板娘气泡重做；审核 61 项全修（wp-cron 饿死、保存假成功、API 错误统计、9 个摆设开关等）<br>
@@ -726,7 +750,7 @@ class Skyline_Admin {
         $defs = [];
         if ($current_tab === 'ai') {
             $defs = [
-                '🔌 接口配置' => ['api_vendor', 'api_base', 'api_img_base', 'api_key', 'chat_model', 'image_model', 'system_prompt'],
+                '🔌 接口配置' => ['api_vendor', 'api_base', 'api_img_base', 'api_key', 'api_img_key', 'chat_model', 'image_model', 'system_prompt'],
                 '🤖 悬浮助手' => ['robot_enable', 'robot_only_logged', 'robot_img'],
                 '🛡️ 可信代理' => ['trusted_proxy_ips'],
             ];
@@ -767,20 +791,8 @@ class Skyline_Admin {
         $vendors = Skyline_Core::get_api_vendors();
         if (!isset($vendors[$vendor_key])) $vendor_key = 'custom';
         ?>
-        <?php // v2.2.0 收口：Prompt 模板库提到本页最前面（首屏可见）——
-              // 原来在设置网格与聊天记录之间，首屏之外；只挪位置，结构、
-              // id 与 JS（loadPrompts/savePromptTemplate）一字不动。 ?>
-        <div class="sky-card">
-            <div class="sky-card-title">📋 Prompt 模板库</div>
-            <div id="sky-prompt-list"></div>
-            <div style="margin-top: 16px; padding: 16px; background: var(--sky-bg); border-radius: 8px;">
-                <input type="text" id="new-prompt-name" placeholder="模板名称" style="width: 280px; max-width: 100%; box-sizing: border-box;">
-                <textarea id="new-prompt-template" rows="4" style="width: 100%; margin-top: 8px;" placeholder="Prompt 模板内容..."></textarea>
-                <button type="button" class="button button-primary" onclick="savePromptTemplate()" style="margin-top: 8px;">
-                    + 保存新模板
-                </button>
-            </div>
-        </div>
+        <?php // v2.2.1：Prompt 模板库已移到“最近聊天记录”卡片正上方
+              // （见本函数后部）；只挪位置，结构、id 与 JS 一字不动。 ?>
 
         <div class="sky-settings-grid sky-tab-ai">
             <?php
@@ -823,6 +835,21 @@ class Skyline_Admin {
 
         <?php // v2.2.0：厂商表以 JSON 嵌在页面里，供 assets/js/admin.js 做下拉联动；纯 PHP json_encode，不依赖 WP 函数。 ?>
         <script type="application/json" id="sky-api-vendors"><?php echo json_encode($vendors, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT); ?></script>
+
+        <?php // v2.2.1：Prompt 模板库移到“最近聊天记录”卡片正上方——
+              // 原来在页首（v2.2.0 收口时提到最前面）；只挪位置，结构、
+              // id 与 JS（loadPrompts/savePromptTemplate）一字不动。 ?>
+        <div class="sky-card">
+            <div class="sky-card-title">📋 Prompt 模板库</div>
+            <div id="sky-prompt-list"></div>
+            <div style="margin-top: 16px; padding: 16px; background: var(--sky-bg); border-radius: 8px;">
+                <input type="text" id="new-prompt-name" placeholder="模板名称" style="width: 280px; max-width: 100%; box-sizing: border-box;">
+                <textarea id="new-prompt-template" rows="4" style="width: 100%; margin-top: 8px;" placeholder="Prompt 模板内容..."></textarea>
+                <button type="button" class="button button-primary" onclick="savePromptTemplate()" style="margin-top: 8px;">
+                    + 保存新模板
+                </button>
+            </div>
+        </div>
 
         <?php
         // A1：最近聊天记录——读 core 的 skyline_ai_chat_log option（新记录
@@ -1096,86 +1123,33 @@ class Skyline_Admin {
             <ul id="sky-webp-failures" style="margin-top: 10px; font-size: 13px; color: #b91c1c; list-style: disc inside;"></ul>
         </div>
         <script>
-        var skyWebpIds = [], skyWebpPos = 0, skyWebpTotal = 0, skyWebpDone = 0, skyWebpOk = 0, skyWebpFail = 0, skyWebpStopping = false;
-        function skyWebpSetText(id, txt) { var el = document.getElementById(id); if (el) el.textContent = txt; }
-        function skyWebpScan() {
-            skyWebpSetText('sky-webp-status', '正在扫描…');
-            jQuery.post(ajaxurl, {
-                action: 'sky_webp_scan',
-                _ajax_nonce: '<?php echo wp_create_nonce('skyline_ajax_nonce'); ?>'
-            }, function(r) {
-                if (!r.success) { skyWebpSetText('sky-webp-status', '❌ 扫描失败：' + (r.data || '未知错误')); return; }
-                if (!r.data.supported) { skyWebpSetText('sky-webp-status', '❌ 当前服务器 GD 不支持 WebP，无法转换。'); return; }
-                skyWebpIds = r.data.ids || [];
-                skyWebpTotal = skyWebpIds.length;
-                skyWebpPos = 0; skyWebpDone = 0; skyWebpOk = 0; skyWebpFail = 0;
-                var sk = r.data.skipped || {};
-                skyWebpSetText('sky-webp-status', '可转换 ' + skyWebpTotal + ' 张（已跳过：已转过 ' + (sk.converted || 0) + '、本地缺失 ' + (sk.missing || 0) + '、超 10MB ' + (sk.toolarge || 0) + '、待删登记中 ' + (sk.pending_delete || 0) + '）。');
-                document.getElementById('sky-webp-start-btn').disabled = skyWebpTotal === 0;
-                document.getElementById('sky-webp-progress').style.display = skyWebpTotal ? 'block' : 'none';
-                document.getElementById('sky-webp-bar').style.width = '0%';
-                document.getElementById('sky-webp-failures').innerHTML = '';
-            }).fail(function() { skyWebpSetText('sky-webp-status', '❌ 扫描请求失败（网络错误）。'); });
-        }
-        function skyWebpStart() {
-            if (!skyWebpIds.length) return;
-            skyWebpStopping = false;
-            document.getElementById('sky-webp-start-btn').disabled = true;
-            document.getElementById('sky-webp-scan-btn').disabled = true;
-            document.getElementById('sky-webp-stop-btn').disabled = false;
-            skyWebpNext();
-        }
-        function skyWebpStop() {
-            skyWebpStopping = true;
-            skyWebpSetText('sky-webp-status', '已停止：已处理 ' + skyWebpDone + ' / ' + skyWebpTotal + '，成功 ' + skyWebpOk + '，失败 ' + skyWebpFail + '。');
-            document.getElementById('sky-webp-start-btn').disabled = false;
-            document.getElementById('sky-webp-scan-btn').disabled = false;
-            document.getElementById('sky-webp-stop-btn').disabled = true;
-        }
-        function skyWebpNext() {
-            if (skyWebpStopping) return;
-            if (skyWebpPos >= skyWebpIds.length) {
-                skyWebpSetText('sky-webp-status', '✅ 全部完成：共 ' + skyWebpTotal + ' 张，成功 ' + skyWebpOk + '，失败 ' + skyWebpFail + '。');
-                document.getElementById('sky-webp-start-btn').disabled = false;
-                document.getElementById('sky-webp-scan-btn').disabled = false;
-                document.getElementById('sky-webp-stop-btn').disabled = true;
-                return;
+        // v2.2.1：批量驱动抽到 assets/js/admin.js 的 SkyBatchRunner，这里
+        // 只留卡片专属配置（扫描解析、结果计数与文案）+ 同名全局函数
+        // （按钮 onclick 不变）。失败与跳过都逐条列原因（服务端已带 reason）。
+        var skyWebpOk = 0, skyWebpFail = 0, skyWebpSkip = 0;
+        var skyWebpRunner = SkyBatchRunner.create({
+            status: 'sky-webp-status', progress: 'sky-webp-progress', bar: 'sky-webp-bar', failures: 'sky-webp-failures',
+            scanBtn: 'sky-webp-scan-btn', startBtn: 'sky-webp-start-btn', stopBtn: 'sky-webp-stop-btn',
+            scanAction: 'sky_webp_scan', batchAction: 'sky_webp_batch', batchFailLabel: '批量转换',
+            scanText: '正在扫描…',
+            nonce: '<?php echo wp_create_nonce('skyline_ajax_nonce'); ?>',
+            batchSize: function() { return 20; },
+            resetCounts: function(st) { skyWebpOk = 0; skyWebpFail = 0; skyWebpSkip = 0; },
+            summaryText: function(st) { return '已处理 ' + st.done + ' / ' + st.total + ' 张，成功 ' + skyWebpOk + '，失败 ' + skyWebpFail + '，跳过 ' + skyWebpSkip + '。'; },
+            parseScan: function(d) {
+                if (!d.supported) return { ids: [], statusText: '❌ 当前服务器 GD 不支持 WebP，无法转换。' };
+                var sk = d.skipped || {};
+                return { ids: d.ids || [], statusText: '可转换 ' + (d.ids || []).length + ' 张（已跳过：已转过 ' + (sk.converted || 0) + '、本地缺失 ' + (sk.missing || 0) + '、超 10MB ' + (sk.toolarge || 0) + '、待删登记中 ' + (sk.pending_delete || 0) + '）。' };
+            },
+            onResult: function(it, st, addLine) {
+                if (it.status === 'converted') { skyWebpOk++; }
+                else if (it.status === 'failed') { skyWebpFail++; addLine('附件 #' + it.id + '：' + (it.reason || '转换失败')); }
+                else if (it.status === 'skipped') { skyWebpSkip++; addLine('附件 #' + it.id + '：跳过（' + (it.reason || '已处理过') + '）'); }
             }
-            var batch = skyWebpIds.slice(skyWebpPos, skyWebpPos + 20);
-            jQuery.post(ajaxurl, {
-                action: 'sky_webp_batch',
-                ids: batch,
-                _ajax_nonce: '<?php echo wp_create_nonce('skyline_ajax_nonce'); ?>'
-            }, function(r) {
-                if (!r.success) {
-                    skyWebpSetText('sky-webp-status', '❌ 批量转换失败：' + (r.data || '未知错误'));
-                    document.getElementById('sky-webp-start-btn').disabled = false;
-                    document.getElementById('sky-webp-scan-btn').disabled = false;
-                    document.getElementById('sky-webp-stop-btn').disabled = true;
-                    return;
-                }
-                var results = r.data.results || [];
-                results.forEach(function(it) {
-                    skyWebpDone++;
-                    if (it.status === 'converted') { skyWebpOk++; }
-                    else if (it.status === 'failed') {
-                        skyWebpFail++;
-                        var li = document.createElement('li');
-                        li.textContent = '附件 #' + it.id + '：' + (it.reason || '转换失败');
-                        document.getElementById('sky-webp-failures').appendChild(li);
-                    }
-                });
-                skyWebpPos += results.length;
-                document.getElementById('sky-webp-bar').style.width = (skyWebpTotal ? Math.round(skyWebpDone / skyWebpTotal * 100) : 0) + '%';
-                skyWebpSetText('sky-webp-status', '处理中：' + skyWebpDone + ' / ' + skyWebpTotal + '，成功 ' + skyWebpOk + '，失败 ' + skyWebpFail + '。');
-                skyWebpNext();
-            }).fail(function() {
-                skyWebpSetText('sky-webp-status', '❌ 批量请求失败（网络错误），已停止。');
-                document.getElementById('sky-webp-start-btn').disabled = false;
-                document.getElementById('sky-webp-scan-btn').disabled = false;
-                document.getElementById('sky-webp-stop-btn').disabled = true;
-            });
-        }
+        });
+        function skyWebpScan() { skyWebpRunner.scan(); }
+        function skyWebpStart() { skyWebpRunner.start(); }
+        function skyWebpStop() { skyWebpRunner.stop(); }
         </script>
         <?php
     }
@@ -1217,19 +1191,20 @@ class Skyline_Admin {
             <ul id="sky-spider-failures" style="margin-top: 10px; font-size: 13px; color: #b91c1c; list-style: disc inside;"></ul>
         </div>
         <script>
-        var skySpiderIds = [], skySpiderPos = 0, skySpiderTotal = 0, skySpiderDone = 0, skySpiderOk = 0, skySpiderFail = 0, skySpiderSkip = 0, skySpiderOkImgs = 0, skySpiderFailImgs = 0, skySpiderStopping = false;
-        function skySpiderSetText(id, txt) { var el = document.getElementById(id); if (el) el.textContent = txt; }
-        function skySpiderScan() {
-            skySpiderSetText('sky-spider-status', '正在扫描全站文章…');
-            jQuery.post(ajaxurl, {
-                action: 'sky_spider_scan',
-                _ajax_nonce: '<?php echo wp_create_nonce('skyline_ajax_nonce'); ?>'
-            }, function(r) {
-                if (!r.success) { skySpiderSetText('sky-spider-status', '❌ 扫描失败：' + (r.data || '未知错误')); return; }
-                var d = r.data || {};
-                skySpiderIds = (d.items || []).map(function(it) { return it.id; });
-                skySpiderTotal = skySpiderIds.length;
-                skySpiderPos = 0; skySpiderDone = 0; skySpiderOk = 0; skySpiderFail = 0; skySpiderSkip = 0; skySpiderOkImgs = 0; skySpiderFailImgs = 0;
+        // v2.2.1：批量驱动抽到 assets/js/admin.js 的 SkyBatchRunner，这里
+        // 只留卡片专属配置（扫描解析、结果计数与文案）+ 同名全局函数
+        // （按钮 onclick 不变）。失败与跳过都逐条列原因（服务端已带 reason）。
+        var skySpiderOk = 0, skySpiderFail = 0, skySpiderSkip = 0, skySpiderOkImgs = 0, skySpiderFailImgs = 0;
+        var skySpiderRunner = SkyBatchRunner.create({
+            status: 'sky-spider-status', progress: 'sky-spider-progress', bar: 'sky-spider-bar', failures: 'sky-spider-failures',
+            scanBtn: 'sky-spider-scan-btn', startBtn: 'sky-spider-start-btn', stopBtn: 'sky-spider-stop-btn',
+            scanAction: 'sky_spider_scan', batchAction: 'sky_spider_batch', batchFailLabel: '批量同步',
+            scanText: '正在扫描全站文章…',
+            nonce: '<?php echo wp_create_nonce('skyline_ajax_nonce'); ?>',
+            batchSize: function() { return 5; },
+            resetCounts: function(st) { skySpiderOk = 0; skySpiderFail = 0; skySpiderSkip = 0; skySpiderOkImgs = 0; skySpiderFailImgs = 0; },
+            summaryText: function(st) { return '已处理 ' + st.done + ' / ' + st.total + ' 篇，同步成功 ' + skySpiderOk + ' 篇（成功 ' + skySpiderOkImgs + ' 张 / 失败 ' + skySpiderFailImgs + ' 张），失败 ' + skySpiderFail + ' 篇，跳过 ' + skySpiderSkip + ' 篇。'; },
+            parseScan: function(d) {
                 var tbody = document.getElementById('sky-spider-list');
                 tbody.innerHTML = '';
                 (d.items || []).forEach(function(it) {
@@ -1244,79 +1219,28 @@ class Skyline_Admin {
                     tr.appendChild(tdT); tr.appendChild(tdC); tr.appendChild(tdD);
                     tbody.appendChild(tr);
                 });
-                document.getElementById('sky-spider-list-wrap').style.display = skySpiderTotal ? 'block' : 'none';
-                var extra = d.truncated ? '（仅列出前 ' + skySpiderTotal + ' 篇，处理完再重扫）' : '';
-                skySpiderSetText('sky-spider-status', '共扫描 ' + (d.total_scanned || 0) + ' 篇文章，发现 ' + (d.total_posts || 0) + ' 篇含外链图、共 ' + (d.total_images || 0) + ' 张。' + extra);
-                document.getElementById('sky-spider-start-btn').disabled = skySpiderTotal === 0;
-                document.getElementById('sky-spider-progress').style.display = skySpiderTotal ? 'block' : 'none';
-                document.getElementById('sky-spider-bar').style.width = '0%';
-                document.getElementById('sky-spider-failures').innerHTML = '';
-            }).fail(function() { skySpiderSetText('sky-spider-status', '❌ 扫描请求失败（网络错误）。'); });
-        }
-        function skySpiderStart() {
-            if (!skySpiderIds.length) return;
-            skySpiderStopping = false;
-            document.getElementById('sky-spider-start-btn').disabled = true;
-            document.getElementById('sky-spider-scan-btn').disabled = true;
-            document.getElementById('sky-spider-stop-btn').disabled = false;
-            skySpiderNext();
-        }
-        function skySpiderStop() {
-            skySpiderStopping = true;
-            skySpiderSetText('sky-spider-status', '已停止：已处理 ' + skySpiderDone + ' / ' + skySpiderTotal + ' 篇，同步成功 ' + skySpiderOk + ' 篇，失败 ' + skySpiderFail + ' 篇，跳过 ' + skySpiderSkip + ' 篇。');
-            document.getElementById('sky-spider-start-btn').disabled = false;
-            document.getElementById('sky-spider-scan-btn').disabled = false;
-            document.getElementById('sky-spider-stop-btn').disabled = true;
-        }
-        function skySpiderNext() {
-            if (skySpiderStopping) return;
-            if (skySpiderPos >= skySpiderIds.length) {
-                skySpiderSetText('sky-spider-status', '✅ 全部完成：共 ' + skySpiderTotal + ' 篇，同步成功 ' + skySpiderOk + ' 篇（成功 ' + skySpiderOkImgs + ' 张 / 失败 ' + skySpiderFailImgs + ' 张），失败 ' + skySpiderFail + ' 篇，跳过 ' + skySpiderSkip + ' 篇。');
-                document.getElementById('sky-spider-start-btn').disabled = false;
-                document.getElementById('sky-spider-scan-btn').disabled = false;
-                document.getElementById('sky-spider-stop-btn').disabled = true;
-                return;
-            }
-            var batch = skySpiderIds.slice(skySpiderPos, skySpiderPos + 5);
-            jQuery.post(ajaxurl, {
-                action: 'sky_spider_batch',
-                ids: batch,
-                _ajax_nonce: '<?php echo wp_create_nonce('skyline_ajax_nonce'); ?>'
-            }, function(r) {
-                if (!r.success) {
-                    skySpiderSetText('sky-spider-status', '❌ 批量同步失败：' + (r.data || '未知错误'));
-                    document.getElementById('sky-spider-start-btn').disabled = false;
-                    document.getElementById('sky-spider-scan-btn').disabled = false;
-                    document.getElementById('sky-spider-stop-btn').disabled = true;
-                    return;
+                document.getElementById('sky-spider-list-wrap').style.display = (d.items || []).length ? 'block' : 'none';
+                var extra = d.truncated ? '（仅列出前 ' + (d.items || []).length + ' 篇，处理完再重扫）' : '';
+                return { ids: (d.items || []).map(function(it) { return it.id; }), statusText: '共扫描 ' + (d.total_scanned || 0) + ' 篇文章，发现 ' + (d.total_posts || 0) + ' 篇含外链图、共 ' + (d.total_images || 0) + ' 张。' + extra };
+            },
+            onResult: function(it, st, addLine) {
+                var title = '《' + (it.title || ('文章 #' + it.id)) + '》';
+                if (it.status === 'done') {
+                    skySpiderOk++;
+                    skySpiderOkImgs += (it.success || 0);
+                    skySpiderFailImgs += (it.failed || 0);
+                } else if (it.status === 'failed') {
+                    skySpiderFail++;
+                    addLine(title + '：' + (it.reason || '同步失败（未返回原因）'));
+                } else if (it.status === 'skipped') {
+                    skySpiderSkip++;
+                    addLine(title + '：跳过（' + (it.reason || '正在同步中') + '）');
                 }
-                var results = r.data.results || [];
-                results.forEach(function(it) {
-                    skySpiderDone++;
-                    if (it.status === 'done') {
-                        skySpiderOk++;
-                        skySpiderOkImgs += (it.success || 0);
-                        skySpiderFailImgs += (it.failed || 0);
-                    } else if (it.status === 'failed') {
-                        skySpiderFail++;
-                        var li = document.createElement('li');
-                        li.textContent = '《' + (it.title || ('文章 #' + it.id)) + '》：' + (it.reason || '同步失败');
-                        document.getElementById('sky-spider-failures').appendChild(li);
-                    } else if (it.status === 'skipped') {
-                        skySpiderSkip++;
-                    }
-                });
-                skySpiderPos += results.length;
-                document.getElementById('sky-spider-bar').style.width = (skySpiderTotal ? Math.round(skySpiderDone / skySpiderTotal * 100) : 0) + '%';
-                skySpiderSetText('sky-spider-status', '处理中：' + skySpiderDone + ' / ' + skySpiderTotal + ' 篇，同步成功 ' + skySpiderOk + ' 篇，失败 ' + skySpiderFail + ' 篇，跳过 ' + skySpiderSkip + ' 篇。');
-                skySpiderNext();
-            }).fail(function() {
-                skySpiderSetText('sky-spider-status', '❌ 批量请求失败（网络错误），已停止。');
-                document.getElementById('sky-spider-start-btn').disabled = false;
-                document.getElementById('sky-spider-scan-btn').disabled = false;
-                document.getElementById('sky-spider-stop-btn').disabled = true;
-            });
-        }
+            }
+        });
+        function skySpiderScan() { skySpiderRunner.scan(); }
+        function skySpiderStart() { skySpiderRunner.start(); }
+        function skySpiderStop() { skySpiderRunner.stop(); }
         </script>
         <?php
     }
@@ -1324,10 +1248,18 @@ class Skyline_Admin {
     // S1：历史文章 SEO 批量补全卡片（搜索优化页）。先只读扫描，列出缺
     // 英文 Slug / 缺摘要 / 缺标签的文章（每篇标清缺哪几项），再分批调
     // auto_seo_meta 补全；已有项跳过不重算。成本写在卡片上：每篇最多
-    // 3 次 AI 调用，全站 3,634 篇全跑约 1 万次——默认只勾选前 20 篇试
-    // 跑，每批篇数可调（默认 5，上限 20），可随时停。前端轮询模式照抄
-    // WebP 批量卡片。
+    // 3 次 AI 调用，全站篇数动态取数（wp_count_posts）、最大调用数 =
+    // 篇数 × 3——默认只勾选前 20 篇试跑，每批篇数可调（默认 5，上限
+    // 20），可随时停。前端轮询模式照抄 WebP 批量卡片。
     private function render_seo_batch_card() {
+        // v2.2.1：全站篇数动态取数（之前写死的“3,634 篇”已过时，实际
+        // 扫描是 3,638 篇）；最大调用数 = 篇数 × 3（每篇最多 3 次）。
+        $seo_total_posts = 0;
+        if (function_exists('wp_count_posts')) {
+            $seo_counts = wp_count_posts('post');
+            $seo_total_posts = (int)($seo_counts->publish ?? 0);
+        }
+        $seo_max_calls = $seo_total_posts * 3;
         ?>
         <div class="sky-card" style="margin-top: 20px;">
             <div class="sky-card-title">🚀 历史文章 SEO 批量补全</div>
@@ -1336,7 +1268,11 @@ class Skyline_Admin {
             </p>
             <p style="color: var(--sky-text-muted); line-height: 1.6; font-size: 13px;">
                 💰 成本说明：每篇最多 3 次 AI 调用（标签、Slug、摘要各 1 次；缺哪项补哪项，不缺的不调用）。
-                全站 3,634 篇文章若全部补全，约需 1 万次调用——请先用默认勾选的 20 篇试效果，确认没问题再逐步放大；批量可随时停止，已处理的不受影响。
+                <?php if ($seo_total_posts > 0): ?>
+                全站 <?php echo number_format($seo_total_posts); ?> 篇文章若全部补全，约需 <?php echo number_format($seo_max_calls); ?> 次调用——请先用默认勾选的 20 篇试效果，确认没问题再逐步放大；批量可随时停止，已处理的不受影响。
+                <?php else: ?>
+                请先用默认勾选的 20 篇试效果，确认没问题再逐步放大；批量可随时停止，已处理的不受影响。
+                <?php endif; ?>
             </p>
             <div style="display: flex; gap: 10px; flex-wrap: wrap; align-items: center;">
                 <button type="button" class="button button-primary" id="sky-seo-scan-btn" onclick="skySeoScan()">
@@ -1366,9 +1302,11 @@ class Skyline_Admin {
             <ul id="sky-seo-failures" style="margin-top: 10px; font-size: 13px; color: #b91c1c; list-style: disc inside;"></ul>
         </div>
         <script>
-        var skySeoIds = [], skySeoPos = 0, skySeoTotal = 0, skySeoDone = 0, skySeoOk = 0, skySeoPartial = 0, skySeoFail = 0, skySeoSkip = 0, skySeoStopping = false;
+        // v2.2.1：批量驱动抽到 assets/js/admin.js 的 SkyBatchRunner，这里
+        // 只留卡片专属配置（扫描解析、结果计数与文案）+ 同名全局函数
+        // （按钮 onclick 不变）。失败与跳过都逐条列原因（服务端已带 reason）。
+        var skySeoOk = 0, skySeoPartial = 0, skySeoFail = 0, skySeoSkip = 0;
         var skySeoMissingLabel = {slug: '缺 Slug', excerpt: '缺摘要', tags: '缺标签'};
-        function skySeoSetText(id, txt) { var el = document.getElementById(id); if (el) el.textContent = txt; }
         function skySeoCheckedIds() {
             var ids = [];
             document.querySelectorAll('.sky-seo-check:checked').forEach(function(cb) { ids.push(parseInt(cb.value, 10)); });
@@ -1377,16 +1315,26 @@ class Skyline_Admin {
         function skySeoToggleAll(checked) {
             document.querySelectorAll('.sky-seo-check').forEach(function(cb) { cb.checked = checked; });
         }
-        function skySeoScan() {
-            skySeoSetText('sky-seo-status', '正在扫描全站文章…');
-            jQuery.post(ajaxurl, {
-                action: 'sky_seo_scan',
-                _ajax_nonce: '<?php echo wp_create_nonce('skyline_ajax_nonce'); ?>'
-            }, function(r) {
-                if (!r.success) { skySeoSetText('sky-seo-status', '❌ 扫描失败：' + (r.data || '未知错误')); return; }
-                var d = r.data || {};
+        var skySeoRunner = SkyBatchRunner.create({
+            status: 'sky-seo-status', cost: 'sky-seo-cost', progress: 'sky-seo-progress', bar: 'sky-seo-bar', failures: 'sky-seo-failures',
+            scanBtn: 'sky-seo-scan-btn', startBtn: 'sky-seo-start-btn', stopBtn: 'sky-seo-stop-btn',
+            scanAction: 'sky_seo_scan', batchAction: 'sky_seo_batch', batchFailLabel: '批量补全',
+            scanText: '正在扫描全站文章…',
+            nonce: '<?php echo wp_create_nonce('skyline_ajax_nonce'); ?>',
+            batchSize: function() {
+                var sizeInput = document.getElementById('sky-seo-batch-size');
+                var size = sizeInput ? parseInt(sizeInput.value, 10) : 5;
+                if (isNaN(size) || size < 1) size = 1;
+                if (size > 20) size = 20;
+                return size;
+            },
+            batchParams: function(batch, size) { return { batch_size: size }; },
+            collectIds: function(st) { return skySeoCheckedIds(); },
+            emptyStartText: '请先勾选要补全的文章（默认勾选前 20 篇）。',
+            resetCounts: function(st) { skySeoOk = 0; skySeoPartial = 0; skySeoFail = 0; skySeoSkip = 0; },
+            summaryText: function(st) { return '已处理 ' + st.done + ' / ' + st.total + ' 篇，全部补全 ' + skySeoOk + ' 篇，部分补全 ' + skySeoPartial + ' 篇，失败 ' + skySeoFail + ' 篇，跳过 ' + skySeoSkip + ' 篇。'; },
+            parseScan: function(d) {
                 var items = d.items || [];
-                skySeoPos = 0; skySeoDone = 0; skySeoOk = 0; skySeoPartial = 0; skySeoFail = 0; skySeoSkip = 0;
                 var tbody = document.getElementById('sky-seo-list');
                 tbody.innerHTML = '';
                 items.forEach(function(it, idx) {
@@ -1409,90 +1357,34 @@ class Skyline_Admin {
                 });
                 document.getElementById('sky-seo-list-wrap').style.display = items.length ? 'block' : 'none';
                 var extra = d.truncated ? '（仅列出前 ' + items.length + ' 篇，处理完再重扫）' : '';
-                skySeoSetText('sky-seo-status', '共扫描 ' + (d.total_scanned || 0) + ' 篇文章，发现 ' + (d.total_posts || 0) + ' 篇缺 SEO 项。' + extra);
-                skySeoSetText('sky-seo-cost', '本次缺项 ' + (d.total_posts || 0) + ' 篇，全部补全约需最多 ' + ((d.total_posts || 0) * 3) + ' 次 AI 调用（每篇最多 3 次）；默认已勾选前 20 篇，先试效果。');
-                document.getElementById('sky-seo-start-btn').disabled = items.length === 0;
-                document.getElementById('sky-seo-progress').style.display = items.length ? 'block' : 'none';
-                document.getElementById('sky-seo-bar').style.width = '0%';
-                document.getElementById('sky-seo-failures').innerHTML = '';
                 var checkAll = document.getElementById('sky-seo-check-all');
                 if (checkAll) checkAll.checked = false;
-            }).fail(function() { skySeoSetText('sky-seo-status', '❌ 扫描请求失败（网络错误）。'); });
-        }
-        function skySeoStart() {
-            skySeoIds = skySeoCheckedIds();
-            if (!skySeoIds.length) { skySeoSetText('sky-seo-status', '请先勾选要补全的文章（默认勾选前 20 篇）。'); return; }
-            skySeoTotal = skySeoIds.length;
-            skySeoPos = 0; skySeoDone = 0; skySeoOk = 0; skySeoPartial = 0; skySeoFail = 0; skySeoSkip = 0;
-            skySeoStopping = false;
-            document.getElementById('sky-seo-start-btn').disabled = true;
-            document.getElementById('sky-seo-scan-btn').disabled = true;
-            document.getElementById('sky-seo-stop-btn').disabled = false;
-            skySeoNext();
-        }
-        function skySeoStop() {
-            skySeoStopping = true;
-            skySeoSetText('sky-seo-status', '已停止：已处理 ' + skySeoDone + ' / ' + skySeoTotal + ' 篇，全部补全 ' + skySeoOk + ' 篇，部分补全 ' + skySeoPartial + ' 篇，失败 ' + skySeoFail + ' 篇，跳过 ' + skySeoSkip + ' 篇。');
-            document.getElementById('sky-seo-start-btn').disabled = false;
-            document.getElementById('sky-seo-scan-btn').disabled = false;
-            document.getElementById('sky-seo-stop-btn').disabled = true;
-        }
-        function skySeoNext() {
-            if (skySeoStopping) return;
-            if (skySeoPos >= skySeoIds.length) {
-                skySeoSetText('sky-seo-status', '✅ 全部完成：共 ' + skySeoTotal + ' 篇，全部补全 ' + skySeoOk + ' 篇，部分补全 ' + skySeoPartial + ' 篇，失败 ' + skySeoFail + ' 篇，跳过 ' + skySeoSkip + ' 篇。');
-                document.getElementById('sky-seo-start-btn').disabled = false;
-                document.getElementById('sky-seo-scan-btn').disabled = false;
-                document.getElementById('sky-seo-stop-btn').disabled = true;
-                return;
-            }
-            var sizeInput = document.getElementById('sky-seo-batch-size');
-            var size = sizeInput ? parseInt(sizeInput.value, 10) : 5;
-            if (isNaN(size) || size < 1) size = 1;
-            if (size > 20) size = 20;
-            var batch = skySeoIds.slice(skySeoPos, skySeoPos + size);
-            jQuery.post(ajaxurl, {
-                action: 'sky_seo_batch',
-                ids: batch,
-                batch_size: size,
-                _ajax_nonce: '<?php echo wp_create_nonce('skyline_ajax_nonce'); ?>'
-            }, function(r) {
-                if (!r.success) {
-                    skySeoSetText('sky-seo-status', '❌ 批量补全失败：' + (r.data || '未知错误'));
-                    document.getElementById('sky-seo-start-btn').disabled = false;
-                    document.getElementById('sky-seo-scan-btn').disabled = false;
-                    document.getElementById('sky-seo-stop-btn').disabled = true;
-                    return;
+                return {
+                    ids: items.map(function(it) { return it.id; }),
+                    statusText: '共扫描 ' + (d.total_scanned || 0) + ' 篇文章，发现 ' + (d.total_posts || 0) + ' 篇缺 SEO 项。' + extra,
+                    costText: '本次缺项 ' + (d.total_posts || 0) + ' 篇，全部补全约需最多 ' + ((d.total_posts || 0) * 3) + ' 次 AI 调用（每篇最多 3 次）；默认已勾选前 20 篇，先试效果。'
+                };
+            },
+            onResult: function(it, st, addLine) {
+                var title = '《' + (it.title || ('文章 #' + it.id)) + '》';
+                if (it.status === 'done') { skySeoOk++; }
+                else if (it.status === 'partial') {
+                    skySeoPartial++;
+                    addLine(title + '：部分补全，仍缺 ' + (it.missing || []).map(function(m) { return skySeoMissingLabel[m] || m; }).join('、') + (it.reason ? '（' + it.reason + '）' : ''));
                 }
-                var results = r.data.results || [];
-                results.forEach(function(it) {
-                    skySeoDone++;
-                    if (it.status === 'done') { skySeoOk++; }
-                    else if (it.status === 'partial') {
-                        skySeoPartial++;
-                        var liP = document.createElement('li');
-                        liP.textContent = '《' + (it.title || ('文章 #' + it.id)) + '》：部分补全，仍缺 ' + (it.missing || []).map(function(m) { return skySeoMissingLabel[m] || m; }).join('、');
-                        document.getElementById('sky-seo-failures').appendChild(liP);
-                    }
-                    else if (it.status === 'failed') {
-                        skySeoFail++;
-                        var li = document.createElement('li');
-                        li.textContent = '《' + (it.title || ('文章 #' + it.id)) + '》：' + (it.reason || '补全失败');
-                        document.getElementById('sky-seo-failures').appendChild(li);
-                    }
-                    else if (it.status === 'skipped') { skySeoSkip++; }
-                });
-                skySeoPos += results.length;
-                document.getElementById('sky-seo-bar').style.width = (skySeoTotal ? Math.round(skySeoDone / skySeoTotal * 100) : 0) + '%';
-                skySeoSetText('sky-seo-status', '处理中：' + skySeoDone + ' / ' + skySeoTotal + ' 篇，全部补全 ' + skySeoOk + ' 篇，部分补全 ' + skySeoPartial + ' 篇，失败 ' + skySeoFail + ' 篇，跳过 ' + skySeoSkip + ' 篇。');
-                skySeoNext();
-            }).fail(function() {
-                skySeoSetText('sky-seo-status', '❌ 批量请求失败（网络错误），已停止。');
-                document.getElementById('sky-seo-start-btn').disabled = false;
-                document.getElementById('sky-seo-scan-btn').disabled = false;
-                document.getElementById('sky-seo-stop-btn').disabled = true;
-            });
-        }
+                else if (it.status === 'failed') {
+                    skySeoFail++;
+                    addLine(title + '：' + (it.reason || '补全失败（未返回原因）'));
+                }
+                else if (it.status === 'skipped') {
+                    skySeoSkip++;
+                    addLine(title + '：跳过（' + (it.reason || '已无缺失项') + '）');
+                }
+            }
+        });
+        function skySeoScan() { skySeoRunner.scan(); }
+        function skySeoStart() { skySeoRunner.start(); }
+        function skySeoStop() { skySeoRunner.stop(); }
         </script>
         <?php
     }
@@ -1528,11 +1420,29 @@ class Skyline_Admin {
                 // 永不进 DOM）；② 已存值与否只用“已配置/未配置”角标表示，
                 // 不把值写进页面（.sky-password-wrap 是 flex，角标与按钮
                 // 纵向居中对齐）。
+                // v2.2.1 防自动填充：① 输入框默认 disabled——浏览器不往禁
+                // 用字段里填已保存的登录信息，禁用字段也不提交，只有用户
+                // 主动勾选“更改”才启用、此时键入的值才会被保存（这是真正
+                // 的防线，autocomplete 只是提示、浏览器常忽略）；②
+                // autocomplete="new-password"（不让浏览器把已保存的登录密
+                // 码往里填）；③ 生图密钥（api_img_key）留空时跟随主 API
+                // Key，角标在主密钥已配时显示“跟随 API Key”，占位文案也
+                // 相应改成“留空表示跟随主 API Key”。
                 $pw_configured = trim((string)$val) !== '';
+                $pw_label = $pw_configured ? '已配置' : '未配置';
+                $pw_placeholder = '留空表示不改';
+                if ($key === 'api_img_key') {
+                    $pw_placeholder = '留空表示跟随主 API Key';
+                    if (!$pw_configured && trim((string)$this->core->get_opt('api_key')) !== '') {
+                        $pw_label = '跟随 API Key';
+                        $pw_configured = true;
+                    }
+                }
                 echo '<div class="sky-field-input sky-password-wrap" style="width:100%;">';
-                echo '<input class="sky-password-input" type="password" id="sky-field-' . esc_attr($key) . '" name="skyline_settings[' . esc_attr($key) . ']" value="" autocomplete="off" placeholder="留空表示不改">';
+                echo '<label style="font-size: 12px; white-space: nowrap;"><input type="checkbox" onclick="var i=document.getElementById(\'sky-field-' . esc_attr($key) . '\');i.disabled=!this.checked;if(this.checked)i.focus();"> 更改</label>';
+                echo '<input class="sky-password-input" type="password" id="sky-field-' . esc_attr($key) . '" name="skyline_settings[' . esc_attr($key) . ']" value="" autocomplete="new-password" placeholder="' . esc_attr($pw_placeholder) . '" disabled>';
                 echo '<button type="button" class="button sky-password-toggle" aria-label="显示密钥">👁 显示</button>';
-                echo '<span class="sky-status-badge' . ($pw_configured ? ' active' : '') . '">' . ($pw_configured ? '已配置' : '未配置') . '</span>';
+                echo '<span class="sky-status-badge' . ($pw_configured ? ' active' : '') . '">' . esc_html($pw_label) . '</span>';
                 echo '</div>';
                 break;
 
@@ -1551,8 +1461,18 @@ class Skyline_Admin {
                 // 网址键盘，不再走纯 text 输入框。
                 // v2.2.0 收口：title 悬停显示完整地址——输入框再宽也难一次
                 // 看全超长 URL，title 是兜底（值本身仍可横向滚动查看）。
+                // v2.2.1：autocomplete="off"（浏览器不把已保存的用户名往
+                // 地址框里填；服务端还有 handle_settings 的 url 守卫兜底）。
+                // 生图根地址留空时，placeholder 显示真实生效值（与
+                // handle_gen_img 同源的 get_effective_img_base()），而不
+                // 是让用户对着空框猜。
+                $url_extra = ' autocomplete="off"';
+                if ($key === 'api_img_base' && trim((string)$val) === '' && method_exists($this->core, 'get_effective_img_base')) {
+                    $effective = $this->core->get_effective_img_base();
+                    $url_extra .= ' placeholder="' . esc_attr($effective !== '' ? ('当前生效：' . $effective . '（留空则自动推导）') : '留空：无法从 API Endpoint 推导，请填写') . '"';
+                }
                 echo '<div class="sky-field-input" style="width:100%;">';
-                echo '<input type="url" id="sky-field-' . esc_attr($key) . '" name="skyline_settings[' . esc_attr($key) . ']" value="' . esc_attr($val) . '" title="' . esc_attr($val) . '">';
+                echo '<input type="url" id="sky-field-' . esc_attr($key) . '" name="skyline_settings[' . esc_attr($key) . ']" value="' . esc_attr($val) . '" title="' . esc_attr($val) . '"' . $url_extra . '>';
                 echo '</div>';
                 break;
                 
@@ -1617,7 +1537,8 @@ class Skyline_Admin {
                 $list_id = 'sky-list-' . $key;
                 echo '<div class="sky-field-input" style="width:100%;">';
                 // v2.2.0 收口：title 悬停显示完整模型名（同 url 分支的兜底）。
-                echo '<input type="text" id="sky-field-' . esc_attr($key) . '" name="skyline_settings[' . esc_attr($key) . ']" value="' . esc_attr($val) . '" title="' . esc_attr($val) . '"' . (!empty($dl_opts) ? ' list="' . esc_attr($list_id) . '"' : '') . '>';
+                // v2.2.1：autocomplete="off"（模型名不走浏览器自动填充）。
+                echo '<input type="text" id="sky-field-' . esc_attr($key) . '" name="skyline_settings[' . esc_attr($key) . ']" value="' . esc_attr($val) . '" title="' . esc_attr($val) . '" autocomplete="off"' . (!empty($dl_opts) ? ' list="' . esc_attr($list_id) . '"' : '') . '>';
                 echo '<datalist id="' . esc_attr($list_id) . '">';
                 foreach ($dl_opts as $o) {
                     echo '<option value="' . esc_attr($o) . '"></option>';
@@ -1629,7 +1550,8 @@ class Skyline_Admin {
             default:
                 echo '<div class="sky-field-input" style="width:100%;">';
                 // v2.2.0 收口：title 悬停显示完整值（同 url 分支的兜底）。
-                echo '<input type="text" name="skyline_settings[' . esc_attr($key) . ']" value="' . esc_attr($val) . '" title="' . esc_attr($val) . '">';
+                // v2.2.1：autocomplete="off"（不走浏览器自动填充）。
+                echo '<input type="text" name="skyline_settings[' . esc_attr($key) . ']" value="' . esc_attr($val) . '" title="' . esc_attr($val) . '" autocomplete="off">';
                 echo '</div>';
                 break;
         }

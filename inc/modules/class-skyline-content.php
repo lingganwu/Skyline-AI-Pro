@@ -640,14 +640,22 @@ class Skyline_Content {
                 $results[] = ['id' => $id, 'status' => 'skipped', 'title' => $post->post_title, 'reason' => '正在同步中，稍后再试'];
                 continue;
             }
-            $results[] = [
+            // v2.2.1：一张都没同步成功时记 failed 而不是 done，并带首个
+            // 失败原因（如“HTTP状态 404”）；否则失败的篇在界面上看不出。
+            $all_failed = (int)$res['success'] === 0 && (int)$res['failed'] > 0;
+            $row = [
                 'id' => $id,
-                'status' => 'done',
+                'status' => $all_failed ? 'failed' : 'done',
                 'title' => $post->post_title,
                 'success' => (int)$res['success'],
                 'failed' => (int)$res['failed'],
                 'skipped' => (int)$res['skipped'],
             ];
+            if ($all_failed) {
+                $err = (string)($res['first_error'] ?? '');
+                $row['reason'] = $err !== '' ? ((int)$res['failed'] . ' 张图片下载失败（' . $err . '）') : ((int)$res['failed'] . ' 张图片下载失败');
+            }
+            $results[] = $row;
         }
         return ['results' => $results, 'stopped_early' => $stopped_early];
     }
@@ -678,7 +686,7 @@ class Skyline_Content {
         // 永远显示“未同步”，分不清“没跑过”和“跑过但无图可同步”。
         if(empty($candidates)) {
             update_post_meta($pid, '_sky_spider_last', ['success' => 0, 'failed' => 0, 'skipped' => 0, 'time' => time()]);
-            return ['success' => 0, 'failed' => 0, 'skipped' => 0];
+            return ['success' => 0, 'failed' => 0, 'skipped' => 0, 'first_error' => ''];
         }
 
         $site_domain = parse_url(get_site_url(), PHP_URL_HOST);
@@ -687,6 +695,9 @@ class Skyline_Content {
         // 供看板最近文章处理状态表直接读。
         $failed = 0;
         $skipped = 0;
+        // v2.2.1：首个下载失败原因（download_image 失败时恒带 error），
+        // 供 batch_spider_posts 在“全部失败”时展示。
+        $first_error = '';
 
         $core = Skyline_Core::instance();
         $max_img = intval($core->get_opt('spider_max_img', 20));
@@ -720,6 +731,7 @@ class Skyline_Content {
                 // D2：download_image 没返回 id 即本次下载失败（网络错误 /
                 // HTTP 状态 / 文件过大过小等，原因见日志），记失败数。
                 $failed++;
+                if ($first_error === '' && is_array($res) && isset($res['error'])) $first_error = (string)$res['error'];
             }
             $processed_count++;
         }
@@ -748,7 +760,7 @@ class Skyline_Content {
         // 最近文章处理状态表直接读，不再翻日志核对。超上限续跑时本次
         // 只记已跑完的部分，下次跑完会覆盖成本次完整结果。
         update_post_meta($pid, '_sky_spider_last', ['success' => $success, 'failed' => $failed, 'skipped' => $skipped, 'time' => time()]);
-        return ['success' => $success, 'failed' => $failed, 'skipped' => $skipped];
+        return ['success' => $success, 'failed' => $failed, 'skipped' => $skipped, 'first_error' => $first_error];
         } finally {
             delete_post_meta($pid, '_sky_spider_processing');
         }
@@ -759,8 +771,8 @@ class Skyline_Content {
     // 保护就落在这里：slug 只在缺失时才进 $only）。$only 为 null 时
     // 保持老行为（全部开关项都跑，供保存时异步任务调用）。
     // 返回 null = 未跑（文章不存在 / 已标记完成 / 对应开关全关）；
-    // 否则返回 ['attempted'=>[...], 'succeeded'=>[...]]，供批量引擎
-    // 按项判定 done/partial/failed，不用重读文章猜结果。
+    // 否则返回 ['attempted'=>[...], 'succeeded'=>[...], 'failed'=>[项=>原因]]，
+    // 供批量引擎按项判定 done/partial/failed，并把失败原因展示出来。
     // $reschedule_on_fail：全部失败时是否按 S4 附录约 1 小时后重试。
     // 保存/定时触发的调用保持默认 true；S1 批量调用传 false——批量
     // 是只跑缺项的，失败后约一次“全量”重试会把已有好 slug 也重算掉，
@@ -794,6 +806,15 @@ class Skyline_Content {
         $any_attempted = false;
         $attempted = [];
         $succeeded = [];
+        // v2.2.1：逐项失败原因（S1 批量要在界面上逐篇说明失败/跳过原因，
+        // 不能只写“补全失败”）。WP_Error 的 message 经 call_api 里的
+        // extract_api_error_message() 清洗过，不含密钥与完整响应体，
+        // 可直接展示；非 WP_Error 的失败（如 Slug 清洗后为空）给短说明。
+        $failed = [];
+        $failed_reason = function ($res, $fallback) {
+            if (is_wp_error($res)) return $res->get_error_message();
+            return $fallback;
+        };
         global $wpdb;
 
         if ($do_polish && ($only === null || in_array('polish', $only, true))) {
@@ -819,6 +840,7 @@ class Skyline_Content {
                 // R2：失败的标志是 WP_Error，不再全文搜 "Error"——含 Error 一词
                 // 的合法润色文不再被误判丢弃。
                 if ($res && !is_wp_error($res) && strlen($res) > 100) $polished = $res;
+                else $failed['polish'] = $failed_reason($res, 'AI 返回的润色结果过短或为空');
             } elseif (!$skip_polish_blocks) {
                 // 全文超过 3000 字：按 3000 字分段润色，全部成功才拼接替换；
                 // 任一段失败则不替换正文（只记日志），避免用半截结果覆盖全文。
@@ -832,7 +854,7 @@ class Skyline_Content {
                     $prompt = "请修正以下文章内容的错别字、标点符号错误和语病，保持原意不变，直接返回修正后的 Markdown 内容：\n\n" . $chunk;
                     $any_attempted = true;
                     $part = $core->call_api([['role'=>'user', 'content'=>$prompt]]);
-                    if (!$part || is_wp_error($part) || strlen($part) < 10) { $polish_failed = true; break; }
+                    if (!$part || is_wp_error($part) || strlen($part) < 10) { $polish_failed = true; $failed['polish'] = $failed_reason($part, 'AI 返回的分段润色结果过短或为空'); break; }
                     $polished_parts[] = $part;
                 }
                 if (!$polish_failed && !empty($polished_parts)) {
@@ -863,6 +885,7 @@ class Skyline_Content {
             $any_attempted = true;
             $tags = $core->call_api([['role'=>'user', 'content'=>$prompt]]);
             if ($tags && !is_wp_error($tags)) { wp_set_post_tags($pid, str_replace(['，', '、'], ',', $tags), true); $any_success = true; $succeeded[] = 'tags'; }
+            else { $failed['tags'] = $failed_reason($tags, 'API 未返回标签'); }
         }
         if ($do_slug && ($only === null || in_array('slug', $only, true))) {
             $attempted[] = 'slug';
@@ -874,6 +897,9 @@ class Skyline_Content {
             if ($slug && !is_wp_error($slug)) {
                 $slug = sanitize_title(strip_tags(preg_replace('/^(Here.*?:\s*)/i', '', $slug)));
                 if ($slug) { $updates['post_name'] = substr(trim(preg_replace('/-+/', '-', $slug), '-'), 0, 60); $any_success = true; $succeeded[] = 'slug'; }
+                else { $failed['slug'] = 'AI 返回的 Slug 为空或无效'; }
+            } else {
+                $failed['slug'] = $failed_reason($slug, 'API 未返回 Slug');
             }
         }
         if ($do_excerpt && ($only === null || in_array('excerpt', $only, true)) && empty($post->post_excerpt)) {
@@ -886,6 +912,8 @@ class Skyline_Content {
                 $updates['post_excerpt'] = trim(mb_substr(wp_strip_all_tags($excerpt), 0, 260));
                 $any_success = true;
                 $succeeded[] = 'excerpt';
+            } else {
+                $failed['excerpt'] = $failed_reason($excerpt, 'API 未返回摘要');
             }
         }
 
@@ -922,7 +950,40 @@ class Skyline_Content {
             }
         }
 
-        return ['attempted' => array_values(array_unique($attempted)), 'succeeded' => array_values(array_unique($succeeded))];
+        return ['attempted' => array_values(array_unique($attempted)), 'succeeded' => array_values(array_unique($succeeded)), 'failed' => $failed];
+    }
+
+    // v2.2.1：SEO 缺项的中文名（批量结果的原因文案用）。
+    public static function seo_item_label($item) {
+        $labels = ['slug' => 'Slug', 'excerpt' => '摘要', 'tags' => '标签', 'polish' => '润色'];
+        return $labels[$item] ?? $item;
+    }
+
+    // v2.2.1：把 auto_seo_meta() 的 failed 明细拼成一行原因文案，
+    // 如“摘要：API Error (401)：…；标签：API 未返回标签”。没有明细
+    // 时给带原因的兜底，界面永不只显示裸的“补全失败”。
+    private function seo_failed_reason(array $failed_map, array $items) {
+        $parts = [];
+        foreach ($items as $it) {
+            $parts[] = self::seo_item_label($it) . '：' . ($failed_map[$it] ?? '补全失败（未返回原因）');
+        }
+        return implode('；', $parts);
+    }
+
+    // v2.2.1：跳过原因拆细——auto_seo_meta() 返回 null 时，逐项看对应
+    // 开关：缺的项里开关关着的列出来（如“标签、摘要开关未开启”），
+    // 而不是笼统的“对应开关未开启或已完成”（批量调用前已清 _sky_seo_done，
+    // “已完成”基本不会发生，只作兜底）。
+    private function seo_skipped_reason(array $missing) {
+        $core = Skyline_Core::instance();
+        $switch = ['tags' => 'auto_tags', 'slug' => 'auto_slug', 'excerpt' => 'auto_excerpt'];
+        $off = [];
+        foreach ($missing as $it) {
+            $opt = $switch[$it] ?? null;
+            if ($opt !== null && !$core->get_opt($opt)) $off[] = self::seo_item_label($it);
+        }
+        if (!empty($off)) return implode('、', $off) . '开关未开启';
+        return '已标记完成或对应开关未开启';
     }
 
     // S1：slug 是否缺英文版。空、含中文等非 ASCII 字符、纯数字（自动生
@@ -1019,19 +1080,23 @@ class Skyline_Content {
             }
             $res = $this->auto_seo_meta($id, $missing, false);
             if ($res === null) {
-                $results[] = ['id' => $id, 'status' => 'skipped', 'title' => $post->post_title, 'reason' => '对应开关未开启或已完成'];
+                $results[] = ['id' => $id, 'status' => 'skipped', 'title' => $post->post_title, 'reason' => $this->seo_skipped_reason($missing)];
                 continue;
             }
             $done_items = array_values(array_intersect($missing, $res['succeeded']));
             $still = array_values(array_diff($missing, $done_items));
             $status = empty($still) ? 'done' : (empty($done_items) ? 'failed' : 'partial');
-            $results[] = [
+            $row = [
                 'id' => $id,
                 'status' => $status,
                 'title' => $post->post_title,
                 'done' => $done_items,
                 'missing' => $still,
             ];
+            if ($status !== 'done') {
+                $row['reason'] = $this->seo_failed_reason($res['failed'] ?? [], $still);
+            }
+            $results[] = $row;
         }
         return ['results' => $results, 'stopped_early' => $stopped_early];
     }
