@@ -93,6 +93,13 @@ class Skyline_Core {
             'robot_enable' => ['group'=>'ai', 'type'=>'bool', 'label'=>'启用前台悬浮助手', 'default'=>true],
             'robot_only_logged' => ['group'=>'ai', 'type'=>'bool', 'label'=>'仅登录用户可见', 'default'=>false],
             'robot_img' => ['group'=>'ai', 'type'=>'url', 'label'=>'自定义图标 URL'],
+            // 聊天限流用的可信代理清单（R6）：EdgeOne 回源时 REMOTE_ADDR 是边缘
+            // 节点 IP，真实访客 IP 在 X-Forwarded-For 首位；但只有 REMOTE_ADDR
+            // 落在下面配置的 EdgeOne 回源 IP 段内时才信任该头，否则任何人都能
+            // 伪造 XFF 绕过限流。留空 = 永不信任 XFF（回退到 REMOTE_ADDR 的旧
+            // 行为，安全但限流仍按边缘节点 IP 计）。EdgeOne 回源 IP 段见控制台
+            // “回源配置 / 回源 IP 段”提供的列表，粘贴进来即可（每行一个 IP 或 CIDR）。
+            'trusted_proxy_ips' => ['group'=>'ai', 'type'=>'textarea', 'label'=>'可信代理 IP（EdgeOne 回源段）', 'desc'=>'每行一个 IP 或 CIDR；仅当 REMOTE_ADDR 在此列表中时，才信任 X-Forwarded-For 首个 IP 作为访客真实 IP。留空则永不信任。'],
             
             'spider_enable' => ['group'=>'spider', 'type'=>'bool', 'label'=>'启用内容同步', 'default'=>true],
             'spider_auto' => ['group'=>'spider', 'type'=>'bool', 'label'=>'发布时自动同步', 'default'=>true],
@@ -142,6 +149,11 @@ class Skyline_Core {
             'turbo_lazy_load' => ['group'=>'speed', 'type'=>'bool', 'label'=>'强制图片懒加载', 'default'=>true],
             'turbo_enable_image_opt' => ['group'=>'speed', 'type'=>'bool', 'label'=>'上传图片压缩', 'default'=>false],
             'turbo_quality' => ['group'=>'speed', 'type'=>'number', 'label'=>'压缩质量', 'default'=>85],
+            // R14：原图改尺寸独立开关。0 = 不改尺寸（默认，只压质量）；
+            // 设为正数（如 2560）时，宽于该值的原图才会被缩到该宽度。
+            // 之前无条件缩到 2560px 是静默不可逆行为，与 Zero-Disk 叠加会
+            // 永久丢失高清原图，故默认关闭、改尺寸前记日志。
+            'turbo_max_width' => ['group'=>'speed', 'type'=>'number', 'label'=>'原图最大宽度（px，0 表示不改尺寸）', 'desc'=>'仅在“上传图片压缩”开启时生效；0 表示只压质量、不改尺寸。', 'default'=>0],
             'turbo_limit_5m' => ['group'=>'speed', 'type'=>'bool', 'label'=>'限制上传 5MB', 'default'=>false],
             'turbo_allow_svg' => ['group'=>'speed', 'type'=>'bool', 'label'=>'允许 SVG/WebP', 'default'=>false],
         ];
@@ -235,9 +247,16 @@ class Skyline_Core {
         return $val;
     }
 
-    public function call_api($messages, $temp = 0.7, $retry_count = 0) {
+    // R2：错误不再用字符串协议。成功返回 string，失败返回 WP_Error
+    // （调用方用 is_wp_error() 判定，不再用 strpos/stripos 猜字符串）。
+    // 这样三类错误（Key 缺失 / 网络失败 / 非 200 / 空响应）都会被识别，
+    // 而 AI 返回的合法内容即使含有 "Error" 一词也不会被误判为失败。
+    // R7：去掉 sleep() 重试与 120 秒超时——单次请求、30 秒超时、失败即返，
+    // 不再占着 PHP-FPM 工人重试；重试与否由调用方决定。stat_inc('api_calls')
+    // 只在单次调用里计一次，不再因递归重试重复计数。
+    public function call_api($messages, $temp = 0.7) {
         $k = $this->get_opt('api_key'); 
-        if(!$k) return 'Error: API Key missing';
+        if(!$k) return new WP_Error('sky_api_key_missing', 'Error: API Key missing');
 
         $hash_key = 'sky_api_' . md5(json_encode($messages) . $temp . $this->get_opt('chat_model'));
         $infra = class_exists('Skyline_Infra') ? Skyline_Infra::instance() : null;
@@ -255,7 +274,7 @@ class Skyline_Core {
                 'messages' => $messages, 
                 'temperature' => $temp
             ]),
-            'timeout' => 120, 
+            'timeout' => 30, 
             'sslverify' => true
         ];
 
@@ -264,11 +283,7 @@ class Skyline_Core {
         if(is_wp_error($r)) {
             $err = $r->get_error_message();
             $this->log("API 网络失败: {$err}", 'error', 'API');
-            if ($retry_count < 2) {
-                sleep(1 * ($retry_count + 1));
-                return $this->call_api($messages, $temp, $retry_count + 1);
-            }
-            return "Network Error: Request failed";
+            return new WP_Error('sky_api_network', 'Network Error: Request failed');
         }
 
         $code = wp_remote_retrieve_response_code($r);
@@ -276,29 +291,31 @@ class Skyline_Core {
         $d = json_decode($body, true);
 
         if ($code !== 200) {
-            $errMsg = $d['error']['message'] ?? 'Unknown API Error';
+            $errMsg = (is_array($d) && isset($d['error']['message'])) ? $d['error']['message'] : 'Unknown API Error';
             $this->log("API 返回 {$code}: {$errMsg}", 'error', 'API');
-            if ($code >= 500 && $retry_count < 2) {
-                sleep(1 * ($retry_count + 1));
-                return $this->call_api($messages, $temp, $retry_count + 1);
-            }
-            return "API Error ({$code}): " . $errMsg;
+            return new WP_Error('sky_api_http', "API Error ({$code}): " . $errMsg);
         }
 
-        $res = $d['choices'][0]['message']['content'] ?? 'API Error: Empty Response';
-        if (strpos($res, 'Error') === false && $infra) {
-            // API 缓存 TTL 统一走 redis_ttl，不再写死 3600 秒。
-            $infra->cache_set($hash_key, $res, (int)$this->get_opt('redis_ttl', 3600));
+        // 响应体必须是含 choices 的对象才算成功；标量/异常体按空响应处理。
+        $content = (is_array($d) && isset($d['choices'][0]['message']['content'])) ? $d['choices'][0]['message']['content'] : null;
+        if ($content === null || $content === '') {
+            $this->log('API 返回空响应', 'error', 'API');
+            return new WP_Error('sky_api_empty', 'API Error: Empty Response');
         }
-        return $res;
+
+        if ($infra) {
+            // API 缓存 TTL 统一走 redis_ttl，不再写死 3600 秒。
+            $infra->cache_set($hash_key, $content, (int)$this->get_opt('redis_ttl', 3600));
+        }
+        return $content;
     }
 
     public function handle_api_test() {
         check_ajax_referer('sky_ai_test_nonce'); 
         if(!current_user_can('manage_options')) wp_send_json_error('Unauthorized');
         $res = $this->call_api([['role'=>'user', 'content'=>'Ping']]);
-        if (strpos($res, 'Error:') === 0) {
-            wp_send_json_error($res);
+        if (is_wp_error($res)) {
+            wp_send_json_error($res->get_error_message());
         }
         wp_send_json_success(['reply'=>$res]);
     }
@@ -325,21 +342,78 @@ class Skyline_Core {
         check_ajax_referer('sky_ai_test_nonce'); 
         if(!current_user_can('manage_options')) wp_send_json_error('Unauthorized');
         if (!$this->get_opt('oss_enable')) wp_send_json_error('OSS is disabled in settings');
-        $endpoint = $this->get_opt('oss_endpoint');
-        if (strpos($endpoint, 'http') !== 0) {
-            $endpoint = 'https://' . ltrim($endpoint, '/');
+        // R12：只测 endpoint 连通性等于没测——COS 返回 403/404 的 XML 错误体
+        // 也是正常 HTTP 响应，之前一律报成功。改成真正写一次 + 读一次 +
+        // 删一次测试对象，bucket 不存在、AK/SK 错误、权限不足时都会报真实
+        // 失败原因；测试对象用完即删，不留垃圾。
+        if (!class_exists('Sky_Official_COS_Client')) {
+            wp_send_json_error('COS 客户端类不可用');
         }
-        $response = wp_remote_get($endpoint, ['timeout' => 5]);
-        if (is_wp_error($response)) {
-            wp_send_json_error('Cannot reach OSS endpoint: ' . $response->get_error_message());
+        try {
+            $client = new Sky_Official_COS_Client(
+                $this->get_opt('oss_ak'),
+                $this->get_opt('oss_sk'),
+                $this->get_opt('oss_bucket'),
+                $this->get_opt('oss_endpoint')
+            );
+        } catch (Throwable $e) {
+            wp_send_json_error('无法创建 COS 客户端：' . $e->getMessage());
         }
-        wp_send_json_success('OSS endpoint reachable');
+        $result = $client->test_bucket();
+        if (!is_array($result) || empty($result['ok'])) {
+            wp_send_json_error('OSS 测试失败：' . ($result['error'] ?? '未知错误'));
+        }
+        wp_send_json_success('OSS 写入/读取/删除测试通过');
+    }
+
+    // R6：取真实访客 IP（供聊天限流用）。EdgeOne 回源请求默认带
+    // X-Forwarded-For，首个 IP 即真实访客 IP；但只有 REMOTE_ADDR 落在
+    // trusted_proxy_ips（EdgeOne 回源 IP 段）内时才信任它——否则攻击者
+    // 直连源站、每请求伪造一个 XFF 就能绕过限流。首个 IP 还必须是合法
+    // 公网 IP，否则回退 REMOTE_ADDR。未配置可信代理时行为与旧版一致。
+    public function get_real_visitor_ip() {
+        $remote = $_SERVER['REMOTE_ADDR'] ?? '0.0.0.0';
+        $xff = $_SERVER['HTTP_X_FORWARDED_FOR'] ?? '';
+        if ($xff === '') return $remote;
+        $trusted = $this->get_opt('trusted_proxy_ips', '');
+        if (!is_string($trusted) || trim($trusted) === '') return $remote;
+        if (!$this->ip_in_list($remote, $trusted)) return $remote;
+        $first = trim(explode(',', $xff)[0]);
+        if ($first === '' || !filter_var($first, FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE)) return $remote;
+        return $first;
+    }
+
+    // $ip 是否在 $list（每行一个 IP 或 CIDR）里。支持 IPv4/IPv6 CIDR。
+    private function ip_in_list($ip, $list) {
+        $bin = @inet_pton($ip);
+        if ($bin === false) return false;
+        foreach (explode("\n", $list) as $line) {
+            $entry = trim($line);
+            if ($entry === '') continue;
+            if (strpos($entry, '/') !== false) {
+                list($net, $bits) = explode('/', $entry, 2);
+                $bits = (int)$bits;
+                $net_bin = @inet_pton(trim($net));
+                if ($net_bin === false || strlen($net_bin) !== strlen($bin)) continue;
+                if ($bits < 0 || $bits > strlen($bin) * 8) continue;
+                $bytes = (int)($bits / 8);
+                $rem = $bits % 8;
+                if ($bytes > 0 && strncmp($bin, $net_bin, $bytes) !== 0) continue;
+                if ($rem > 0) {
+                    $mask = (0xff << (8 - $rem)) & 0xff;
+                    if ((ord($bin[$bytes]) & $mask) !== (ord($net_bin[$bytes]) & $mask)) continue;
+                }
+                return true;
+            }
+            if (strcasecmp($ip, $entry) === 0) return true;
+        }
+        return false;
     }
 
     public function handle_chat_front() {
         check_ajax_referer('sky_chat_nonce');
         
-        $rate_key = 'sky_chat_rate_' . md5($_SERVER['REMOTE_ADDR'] ?? '0.0.0.0');
+        $rate_key = 'sky_chat_rate_' . md5($this->get_real_visitor_ip());
         $rate_count = get_transient($rate_key);
         if ($rate_count === false) $rate_count = 0;
         if ((int)$rate_count >= 20) {
@@ -348,7 +422,15 @@ class Skyline_Core {
         set_transient($rate_key, (int)$rate_count + 1, 60);
         
         $msg = sanitize_text_field($_POST['msg'] ?? '');
-        wp_send_json_success($this->call_api([['role'=>'user', 'content'=>$msg]]));
+        // 聊天输入加长度上限：超长输入直通 API 会拖慢调用、放大 token 消耗。
+        if (mb_strlen($msg) > 2000) {
+            wp_send_json_error('消息过长（最多 2000 字符）');
+        }
+        $res = $this->call_api([['role'=>'user', 'content'=>$msg]]);
+        if (is_wp_error($res)) {
+            wp_send_json_error($res->get_error_message());
+        }
+        wp_send_json_success($res);
     }
 
     public function handle_ai_task() {
@@ -377,6 +459,11 @@ class Skyline_Core {
         
         $res = $this->call_api([['role'=>'user', 'content'=>$prompt]]);
         
+        // R2：call_api 失败返回 WP_Error，不再是含 "Error" 的字符串。
+        if (is_wp_error($res)) {
+            wp_send_json_error($res->get_error_message());
+        }
+
         if (is_string($res)) {
             $res = preg_replace('/^(为您生成的.*?是|这里是.*?：|以下是.*?：|Sure!|Okay!|Certainly!)\s*/iu', '', $res);
             $res = trim($res);
@@ -401,6 +488,7 @@ class Skyline_Core {
 
     public function handle_get_prompts() {
         check_ajax_referer('sky_prompt_nonce');
+        if(!current_user_can('manage_options')) wp_send_json_error('Unauthorized');
         wp_send_json_success(get_option('skyline_prompt_library', []));
     }
 
@@ -458,6 +546,7 @@ class Skyline_Core {
 
     public function handle_clear_logs() {
         check_ajax_referer('sky_clear_logs_nonce');
+        if(!current_user_can('manage_options')) wp_send_json_error('Unauthorized');
         $dir = dirname($this->log_file);
         foreach (glob($dir . '/skyline_ai*.log') ?: [] as $f) {
             @unlink($f);

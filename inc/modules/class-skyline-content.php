@@ -110,6 +110,10 @@ class Skyline_Content {
     private function is_public_ip($ip) {
         if (!filter_var($ip, FILTER_VALIDATE_IP)) return false;
         if (filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4)) {
+            // R1：CGNAT 共享地址 100.64.0.0/10——FILTER_FLAG_NO_PRIV_RANGE |
+            // NO_RES_RANGE 不覆盖该段，部分云厂商用它做内部服务地址，显式拒绝。
+            $ip_long = ip2long($ip);
+            if ($ip_long !== false && ($ip_long & 0xffc00000) === 0x64400000) return false;
             return (bool)filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE);
         }
         // IPv6：显式拒绝回环、未指定、链路本地、唯一本地、文档地址
@@ -123,8 +127,15 @@ class Skyline_Content {
             $v4 = @inet_ntop(substr($bin, 12, 4));
             return $v4 !== false && (bool)filter_var($v4, FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE);
         }
-        // 内嵌 IPv4 的过渡前缀：目标实际仍由内嵌 IPv4 决定，一律拒绝。
-        if (substr($bin, 0, 12) === "\x00\x64\xff\x9b\x00\x00\x00\x00\x00\x00\x00\x00") return false; // 64:ff9b::/96 NAT64
+        // R1：IPv4 兼容地址 ::/96（如 ::127.0.0.1）：前 12 字节全 0、后 4 字节
+        // 为 IPv4，不走映射分支，必须同样取后 4 字节按 IPv4 重校验。
+        if (substr($bin, 0, 12) === str_repeat("\x00", 12)) {
+            $v4 = @inet_ntop(substr($bin, 12, 4));
+            return $v4 !== false && (bool)filter_var($v4, FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE);
+        }
+        // R1：NAT64 前缀 64:ff9b::/32——公认前缀 64:ff9b::/96 与本地部署前缀
+        // 64:ff9b:1::/48 等都在此段内，目标实际由内嵌 IPv4 决定，一律拒绝。
+        if (substr($bin, 0, 4) === "\x00\x64\xff\x9b") return false; // 64:ff9b::/32 NAT64
         if (substr($bin, 0, 2) === "\x20\x02") return false; // 2002::/16 6to4
         if (substr($bin, 0, 4) === "\x20\x01\x00\x00") return false; // 2001::/32 Teredo
         if ((ord($bin[0]) & 0xfe) === 0xfc) return false; // fc00::/7 唯一本地
@@ -248,13 +259,39 @@ class Skyline_Content {
     public function auto_spider($pid) {
         $post = get_post($pid);
         if (!$post) return;
-        
-        if(get_post_meta($pid, '_sky_spider_processing', true)) return;
-        update_post_meta($pid, '_sky_spider_processing', 1);
 
+        // R4：锁改存时间戳、10 分钟过期——fatal/超时/OOM 后锁不会永久锁死
+        // 该文章，过期锁可被下一次任务抢占。try/finally 保证任何返回路径
+        // （含 download_image 内抛 Error）都会清锁。旧版锁值是 1（无时间戳），
+        // 无法判断新旧，一律视为过期、可抢占，避免升级前一次崩溃留下的锁
+        // 永久锁死该文章。
+        $lock = get_post_meta($pid, '_sky_spider_processing', true);
+        if ($lock !== '' && $lock !== false && $lock !== null
+            && is_numeric($lock) && (int)$lock > 1000000000 && time() - (int)$lock < 600) {
+            return;
+        }
+        update_post_meta($pid, '_sky_spider_processing', time());
+
+        try {
         $content = $post->post_content;
-        preg_match_all('/(src|data-src)=[\'"]([^\'"]+)[\'"]/i', $content, $m);
-        if(empty($m[2])) { delete_post_meta($pid, '_sky_spider_processing'); return; }
+        // R16：除 src/data-src 外再认 srcset（多倍图 URL 组）与 <video poster>；
+        // 同一 URL 同时出现在 src 与 srcset 时去重，只下载一次。
+        $candidates = [];
+        preg_match_all('/(?:src|data-src)=[\'"]([^\'"]+)[\'"]/i', $content, $m);
+        if (!empty($m[1])) $candidates = array_merge($candidates, $m[1]);
+        preg_match_all('/srcset=[\'"]([^\'"]+)[\'"]/i', $content, $ms);
+        if (!empty($ms[1])) {
+            foreach ($ms[1] as $srcset) {
+                foreach (explode(',', $srcset) as $cand) {
+                    $url = trim(explode(' ', trim($cand))[0]);
+                    if ($url !== '') $candidates[] = $url;
+                }
+            }
+        }
+        preg_match_all('/poster=[\'"]([^\'"]+)[\'"]/i', $content, $mp);
+        if (!empty($mp[1])) $candidates = array_merge($candidates, $mp[1]);
+        $candidates = array_values(array_unique($candidates));
+        if(empty($candidates)) return;
 
         $site_domain = parse_url(get_site_url(), PHP_URL_HOST);
         $success = 0;
@@ -279,8 +316,9 @@ class Skyline_Content {
             if ($bucket !== '' && $endpoint !== '') $oss_hosts[] = strtolower($bucket . '.' . $endpoint);
         }
 
-        foreach($m[2] as $url_raw) {
-            if ($processed_count >= $max_img) break;
+        $has_more = false;
+        foreach($candidates as $url_raw) {
+            if ($processed_count >= $max_img) { $has_more = true; break; }
 
             $url_real = html_entity_decode($url_raw);
             if(strpos($url_real, $site_domain)!==false || strpos($url_real, 'data:image')!==false) continue;
@@ -303,7 +341,16 @@ class Skyline_Content {
             clean_post_cache($pid);
             add_action('save_post', [$this, 'trigger_async_tasks'], 20, 2);
         }
-        delete_post_meta($pid, '_sky_spider_processing');
+
+        // R16：超上限的剩余图片重排一次异步任务续跑——下次运行时已同步的
+        // URL 已是本地/COS 地址会被跳过，只处理剩下的，不再永久漏掉。
+        if ($has_more && !wp_next_scheduled('skyline_async_spider', [$pid])) {
+            wp_schedule_single_event(time() + 30, 'skyline_async_spider', [$pid]);
+            $core->log("图片同步：单篇超过 {$max_img} 张上限，剩余图片已重排续跑 [$pid]", 'info', 'Spider');
+        }
+        } finally {
+            delete_post_meta($pid, '_sky_spider_processing');
+        }
     }
 
     public function auto_seo_meta($pid) {
@@ -322,6 +369,8 @@ class Skyline_Content {
         if (session_status() === PHP_SESSION_ACTIVE) session_write_close();
 
         $updates = [];
+        $any_success = false;
+        $any_attempted = false;
         global $wpdb;
 
         if ($do_polish) {
@@ -331,11 +380,22 @@ class Skyline_Content {
             $content_len = mb_strlen($full_content);
             $polished = false;
 
-            if ($content_len <= 3000) {
+            // R9：含 Gutenberg 区块标记（<!-- wp: -->）的文章跳过全文润色——
+            // AI 返回的纯 Markdown 不含区块注释，直接写库会抹掉区块结构，
+            // 文章退化为经典内容。跳过并记日志，不动正文。
+            $skip_polish_blocks = strpos($full_content, '<!-- wp:') !== false;
+            if ($skip_polish_blocks) {
+                $core->log("AI 润色已跳过 [$pid]：正文含 Gutenberg 区块标记，全文替换会抹掉区块结构", 'info', 'SEO');
+            }
+
+            if (!$skip_polish_blocks && $content_len <= 3000) {
                 $prompt = "请修正以下文章内容的错别字、标点符号错误和语病，保持原意不变，直接返回修正后的 Markdown 内容：\n\n" . $full_content;
+                $any_attempted = true;
                 $res = $core->call_api([['role'=>'user', 'content'=>$prompt]]);
-                if ($res && stripos($res, 'Error') === false && strlen($res) > 100) $polished = $res;
-            } else {
+                // R2：失败的标志是 WP_Error，不再全文搜 "Error"——含 Error 一词
+                // 的合法润色文不再被误判丢弃。
+                if ($res && !is_wp_error($res) && strlen($res) > 100) $polished = $res;
+            } elseif (!$skip_polish_blocks) {
                 // 全文超过 3000 字：按 3000 字分段润色，全部成功才拼接替换；
                 // 任一段失败则不替换正文（只记日志），避免用半截结果覆盖全文。
                 $chunks = [];
@@ -346,8 +406,9 @@ class Skyline_Content {
                 $polish_failed = false;
                 foreach ($chunks as $chunk) {
                     $prompt = "请修正以下文章内容的错别字、标点符号错误和语病，保持原意不变，直接返回修正后的 Markdown 内容：\n\n" . $chunk;
+                    $any_attempted = true;
                     $part = $core->call_api([['role'=>'user', 'content'=>$prompt]]);
-                    if (!$part || stripos($part, 'Error') !== false || strlen($part) < 10) { $polish_failed = true; break; }
+                    if (!$part || is_wp_error($part) || strlen($part) < 10) { $polish_failed = true; break; }
                     $polished_parts[] = $part;
                 }
                 if (!$polish_failed && !empty($polished_parts)) {
@@ -361,29 +422,34 @@ class Skyline_Content {
                 // 替换前先留一个修订版，润色结果异常时可从修订版恢复。
                 if (function_exists('wp_save_post_revision')) wp_save_post_revision($pid);
                 $updates['post_content'] = $polished;
+                $any_success = true;
                 $core->log("AI 润色成功 [$pid]", 'info', 'SEO');
             }
         }
         if ($do_tags) {
             $text = isset($updates['post_content']) ? $updates['post_content'] : $post->post_content;
             $prompt = "请基于以下内容提取5个核心SEO标签，用逗号分隔，不要其他文字和编号：\n\n" . mb_substr(strip_tags($text), 0, 1500);
+            $any_attempted = true;
             $tags = $core->call_api([['role'=>'user', 'content'=>$prompt]]);
-            if ($tags && stripos($tags, 'Error') === false) wp_set_post_tags($pid, str_replace(['，', '、'], ',', $tags), true);
+            if ($tags && !is_wp_error($tags)) { wp_set_post_tags($pid, str_replace(['，', '、'], ',', $tags), true); $any_success = true; }
         }
         if ($do_slug) {
             $prompt = "Generate a concise English URL slug for this title (max 5-8 words). STRICTLY OUTPUT ONLY THE SLUG (lowercase, hyphens). Title: " . $post->post_title;
+            $any_attempted = true;
             $slug = $core->call_api([['role'=>'user', 'content'=>$prompt]]);
-            if ($slug && stripos($slug, 'Error') === false) {
+            if ($slug && !is_wp_error($slug)) {
                 $slug = sanitize_title(strip_tags(preg_replace('/^(Here.*?:\s*)/i', '', $slug)));
-                if ($slug) $updates['post_name'] = substr(trim(preg_replace('/-+/', '-', $slug), '-'), 0, 60);
+                if ($slug) { $updates['post_name'] = substr(trim(preg_replace('/-+/', '-', $slug), '-'), 0, 60); $any_success = true; }
             }
         }
         if ($do_excerpt && empty($post->post_excerpt)) {
             $text = isset($updates['post_content']) ? $updates['post_content'] : $post->post_content;
             $prompt = "Generate a 120-word SEO summary for this content (in Chinese): \n\n" . mb_substr(strip_tags($text), 0, 1500);
+            $any_attempted = true;
             $excerpt = $core->call_api([['role'=>'user', 'content'=>$prompt]]);
-           if ($excerpt && stripos($excerpt, 'Error') === false) {
+           if ($excerpt && !is_wp_error($excerpt)) {
                 $updates['post_excerpt'] = trim(mb_substr(wp_strip_all_tags($excerpt), 0, 260));
+                $any_success = true;
             }
         }
 
@@ -391,7 +457,23 @@ class Skyline_Content {
             $wpdb->update($wpdb->posts, $updates, ['ID' => $pid]);
             clean_post_cache($pid);
         }
-        update_post_meta($pid, '_sky_seo_done', 1);
+
+        // R5：只有至少一项成功才标记 _sky_seo_done；全部失败时不标记，
+        // 允许下次保存时重试。连续失败满 3 次才标记完成、停止重试，
+        // 避免 API 长期故障时每次保存都重复触发失败任务。无任何尝试
+        // （如只要摘要但摘要已存在）时直接标记完成，不算失败。
+        if ($any_success || !$any_attempted) {
+            update_post_meta($pid, '_sky_seo_done', 1);
+            delete_post_meta($pid, '_sky_seo_fail_count');
+        } else {
+            $fails = (int)get_post_meta($pid, '_sky_seo_fail_count', true) + 1;
+            update_post_meta($pid, '_sky_seo_fail_count', $fails);
+            $core->log("自动 SEO 全部失败 [$pid]（第 {$fails} 次），未标记完成，下次保存时重试", 'warn', 'SEO');
+            if ($fails >= 3) {
+                update_post_meta($pid, '_sky_seo_done', 1);
+                $core->log("自动 SEO 连续失败满 3 次 [$pid]，已停止重试", 'warn', 'SEO');
+            }
+        }
     }
 
     private function remove_watermark_crop($path, $mime) {
@@ -480,6 +562,7 @@ class Skyline_Content {
 
     public function ajax_seo_score() {
         check_ajax_referer('sky_seo_nonce');
+        if(!current_user_can('edit_posts')) wp_send_json_error('权限不足');
         $score = 100; $advice = [];
         $title = sanitize_text_field($_POST['title'] ?? ''); 
         $content = wp_kses_post($_POST['content'] ?? '');

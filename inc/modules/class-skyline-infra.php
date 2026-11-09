@@ -290,8 +290,7 @@ class Skyline_Redis_Mod {
         }
 
         $infra = Skyline_Infra::instance();
-        $cache_uri = $uri;
-        $key = 'page_' . md5(home_url($cache_uri));
+        $key = $infra->page_cache_key($uri);
 
         $cached = $infra->cache_get($key);
         if ($cached) $this->serve_page_cache($cached);
@@ -335,6 +334,26 @@ class Skyline_Redis_Mod {
             if ($lock_token) $infra->lock_release($key, $lock_token);
             return $buf;
         });
+    }
+
+    // R10：页面缓存 key 归一化——剥离营销/追踪类查询参数（utm_*、fbclid、
+    // gclid 等），否则任意查询串都会生成独立 key，可被随机串刷爆 Redis。
+    // 只保留影响内容的查询参数，参数按字母序重排（顺序不同也命中同一 key）。
+    // ?s=、?preview=、?amp、rest_route 本就被排除，不受影响。
+    public function page_cache_key($uri) {
+        $parsed = parse_url($uri);
+        $path = $parsed['path'] ?? '/';
+        $query = [];
+        if (!empty($parsed['query'])) {
+            parse_str($parsed['query'], $query);
+            $tracking = ['fbclid', 'gclid', 'gbraid', 'wbraid', 'msclkid', 'mc_cid', 'mc_eid', 'fb_action_ids', 'fb_source', 'igshid', 'dclid', 'yclid', 'twclid', 'li_fat_id', '_ga', '_gac', 'vero_id', 'vero_conv', 'srsltid'];
+            foreach ($query as $k => $v) {
+                if (stripos($k, 'utm_') === 0 || in_array(strtolower($k), $tracking, true)) unset($query[$k]);
+            }
+            ksort($query);
+        }
+        $cache_uri = $path . (!empty($query) ? '?' . http_build_query($query) : '');
+        return 'page_' . md5(home_url($cache_uri));
     }
 
     // 命中时恢复当初缓存的状态码和 Content-Type（旧版只 echo、不恢复，
@@ -431,6 +450,15 @@ class Skyline_Turbo_Mod {
             $file['error'] = '无法读取 SVG 文件';
             return $file;
         }
+        // R26：先做实体解码再匹配——否则 &#106;avascript:（实体编码的 j）
+        // 会绕过正则，浏览器解析后仍还原为 javascript:。循环解码最多 3 遍，
+        // 防双重编码；原始内容与解码后内容都要过一遍正则。
+        $decoded = $content;
+        for ($i = 0; $i < 3; $i++) {
+            $next = html_entity_decode($decoded, ENT_QUOTES | ENT_HTML5, 'UTF-8');
+            if ($next === $decoded) break;
+            $decoded = $next;
+        }
         $dangerous = [
             '/<\s*script/i',                                              // 内嵌脚本
             '/<\s*(iframe|object|embed|form|foreignObject|animate|set|handler)/i',
@@ -438,9 +466,11 @@ class Skyline_Turbo_Mod {
             '/javascript\s*:/i',                                          // JS 伪协议
             '/<\s*!\s*ENTITY/i',                                          // XXE 实体声明
             '/href\s*=\s*["\']\s*(javascript|data\s*:)/i',                // 危险 href
+            '/<\s*style/i',                                               // <style> 可 @import 外部样式表
+            '/@import/i',                                                 // CSS @import 外部资源
         ];
         foreach ($dangerous as $pattern) {
-            if (preg_match($pattern, $content)) {
+            if (preg_match($pattern, $content) || preg_match($pattern, $decoded)) {
                 $file['error'] = 'SVG 文件含有不安全内容，已拒绝上传';
                 return $file;
             }
@@ -484,7 +514,15 @@ class Skyline_Turbo_Mod {
             if (!is_wp_error($editor)) {
                 $editor->set_quality($quality);
                 $size = $editor->get_size();
-                if($size && $size['width'] > 2560) $editor->resize(2560, null, false);
+                // R14：改尺寸是独立行为，默认不做——turbo_max_width 为 0 时只压
+                // 质量、不改尺寸；设为正数时才把宽于该值的原图缩到该宽度，缩
+                // 之前记日志。之前无条件缩到 2560px 是静默不可逆行为，与
+                // Zero-Disk 叠加会永久丢失高清原图。
+                $max_width = (int)$core->get_opt('turbo_max_width', 0);
+                if ($max_width > 0 && $size && $size['width'] > $max_width) {
+                    $core->log("原图宽 {$size['width']}px 超过上限 {$max_width}px，将缩到 {$max_width}px：{$file}", 'info', 'Turbo');
+                    $editor->resize($max_width, null, false);
+                }
 
                 // save() 返回值必须检查：保存失败（磁盘满/权限/内存不足）时原图可能已损坏，
                 // 若继续走 OSS 上传 + Zero-Disk 删除，坏图进桶、本地原图丢失，一步到位。
@@ -636,7 +674,7 @@ if (!class_exists('Skyline_OSS_Mod')) {
                     $core->log("⚠️ [OSS] 附件 #{$attachment_id} 存在失败项（共 " . count($failed_files) . " 个）", 'warn', 'OSS');
                 }
 
-            } catch (Exception $e) {
+            } catch (Throwable $e) {
                 $core->log("💥 [OSS] 处理异常: " . $e->getMessage(), 'error', 'OSS');
             }
 
@@ -644,11 +682,18 @@ if (!class_exists('Skyline_OSS_Mod')) {
         }
 
         // WP-Cron 回调：二次校验待删清单，全部通过才删本地文件。
-        // 校验失败（COS 对象缺失/大小或 ETag 不一致）：清除 _sky_oss_synced
-        // （让系统不再误以为已同步）、保留本地文件并写错误日志。
+        // 校验失败分两种：COS 对象确实不存在（同步声明为假）——清除
+        // _sky_oss_synced、本地文件保留、该项从待删清单移除（不再删）；
+        // 对象在但大小/ETag 不符（可能是 COS 尚未一致）——保留清单、
+        // 1 小时后重试（上限 3 次），不清已同步标记。
         // 注意：本地文件已不在 ≠ 校验失败——本地文件可能被其他途径删掉，
         // 此时只核查 COS 对象是否存在；COS 对象完好就视为已同步，只删待删
         // 清单、不清除 _sky_oss_synced。
+        // R3：回调开头检查 oss_delete_local（关了就不删、登记作废）；读
+        // $pending['time'] 做 24 小时判断（未满按剩余时间重排期）；失败/
+        // 暂缓路径 1 小时后重排期重试（上限 3 次）；只有真正删成功（或本地
+        // 已不在、或 COS 已确认不存在）时才从清单移除，@unlink 失败的项
+        // 保留清单、重排重试。
         public function purge_pending_deletes($attachment_id) {
             $attachment_id = (int)$attachment_id;
             $pending = get_post_meta($attachment_id, self::PENDING_DELETE_META, true);
@@ -656,51 +701,115 @@ if (!class_exists('Skyline_OSS_Mod')) {
 
             $core = Skyline_Core::instance();
             if (!$core->get_opt('oss_enable')) {
-                // OSS 已关闭：不删文件，保留待删清单，等下次 OSS 开启且重新排期后再处理。
+                // OSS 已关闭：不删文件，保留待删清单，1 小时后重试（上限 3 次）。
                 $core->log("⚠️ [OSS-Zero-Disk] OSS 已关闭，附件 #{$attachment_id} 的本地文件暂不删除", 'warn', 'OSS');
+                $this->reschedule_purge($attachment_id, $pending, 'OSS 已关闭');
+                return;
+            }
+
+            // Zero-Disk 开关已关闭时不再删文件——上传成功后、Cron 触发前关掉
+            // 开关，本地文件必须保留；待删登记直接作废。
+            if (!$core->get_opt('oss_delete_local')) {
+                delete_post_meta($attachment_id, self::PENDING_DELETE_META);
+                $core->log("⚠️ [OSS-Zero-Disk] Zero-Disk 已关闭，附件 #{$attachment_id} 的待删登记已作废，本地文件保留", 'warn', 'OSS');
+                return;
+            }
+
+            // $pending['time'] 之前从未被读，24 小时延迟只靠 Cron 排期保证；
+            // 这里直接校验——未满 24 小时不删，按剩余时间重排期（不计入重试）。
+            $registered = isset($pending['time']) ? (int)$pending['time'] : 0;
+            if ($registered > 0 && time() - $registered < self::PURGE_DELAY) {
+                $wait = self::PURGE_DELAY - (time() - $registered);
+                if (!wp_next_scheduled('skyline_oss_purge_pending', [$attachment_id])) {
+                    wp_schedule_single_event(time() + $wait, 'skyline_oss_purge_pending', [$attachment_id]);
+                }
                 return;
             }
 
             try {
                 $client = $this->make_cos_client();
-                if (!$client) return; // 客户端建不起来：保留清单与本地文件，不删
-
-                $all_ok = true;
-                foreach ($pending['files'] as $entry) {
-                    if (!is_array($entry) || empty($entry['path']) || empty($entry['key'])) { $all_ok = false; break; }
-                    if (file_exists($entry['path'])) {
-                        // 本地文件还在：用强校验（大小 + ETag）核对 COS 对象。
-                        if (!$client->verifyFile($entry['key'], $entry['path'])) { $all_ok = false; break; }
-                    } else {
-                        // 本地文件已不在：verifyFile 需要本地文件做比对，用不上；
-                        // 只核查 COS 对象是否存在。COS 对象完好即视为已同步，
-                        // 这一项算通过（不清除 _sky_oss_synced），仅从待删清单里去掉。
-                        if (!$client->remoteExists($entry['key'])) { $all_ok = false; break; }
-                    }
-                }
-
-                if (!$all_ok) {
-                    delete_post_meta($attachment_id, '_sky_oss_synced');
-                    delete_post_meta($attachment_id, self::PENDING_DELETE_META);
-                    $core->log("❌ [OSS-Zero-Disk] 二次校验失败，附件 #{$attachment_id} 已取消已同步标记，本地文件已保留", 'error', 'OSS');
+                if (!$client) {
+                    // 客户端建不起来：保留清单与本地文件，1 小时后重试（上限 3 次）。
+                    $this->reschedule_purge($attachment_id, $pending, 'COS 客户端创建失败');
                     return;
                 }
 
+                $remaining = []; // 待重试的项（校验未通过但对象还在、或格式异常）
+                $to_delete = []; // 校验通过、本地还在的项
+                $cos_missing = false; // COS 对象确实不存在（同步声明为假）
+                foreach ($pending['files'] as $entry) {
+                    if (!is_array($entry) || empty($entry['path']) || empty($entry['key'])) {
+                        $remaining[] = $entry;
+                        continue;
+                    }
+                    if (file_exists($entry['path'])) {
+                        // 本地文件还在：用强校验（大小 + ETag）核对 COS 对象。
+                        if ($client->verifyFile($entry['key'], $entry['path'])) {
+                            $to_delete[] = $entry;
+                            continue;
+                        }
+                        // 校验不通过：区分“对象不存在”与“对象在但内容不符”。
+                        if (!$client->remoteExists($entry['key'])) {
+                            $cos_missing = true;
+                            continue; // 对象不存在：本地是唯一副本，保留、不删，该项丢弃。
+                        }
+                        $remaining[] = $entry; // 对象在但大小/ETag 不符：先重试，不清标记。
+                    } else {
+                        // 本地文件已不在：只核查 COS 对象是否存在（N2）。
+                        // COS 对象完好即视为已同步，该项完成；COS 也无则同步声明为假。
+                        if (!$client->remoteExists($entry['key'])) $cos_missing = true;
+                    }
+                }
+
+                if ($cos_missing) {
+                    delete_post_meta($attachment_id, '_sky_oss_synced');
+                    $core->log("❌ [OSS-Zero-Disk] COS 对象缺失，附件 #{$attachment_id} 已取消已同步标记，本地文件已保留", 'error', 'OSS');
+                }
+
+                // 先删已校验通过的本地文件；删失败的项并入待重试清单。
                 $deleted_count = 0;
                 $seen = [];
-                foreach ($pending['files'] as $entry) {
+                foreach ($to_delete as $entry) {
                     if (isset($seen[$entry['path']])) continue;
                     $seen[$entry['path']] = true;
-                    if (file_exists($entry['path']) && @unlink($entry['path'])) $deleted_count++;
+                    if (file_exists($entry['path'])) {
+                        if (@unlink($entry['path'])) { $deleted_count++; continue; }
+                        $remaining[] = $entry;
+                    }
                 }
+
+                if (!empty($remaining)) {
+                    $pending['files'] = $remaining;
+                    $this->reschedule_purge($attachment_id, $pending, '二次校验未通过或删除失败');
+                    return;
+                }
+
                 delete_post_meta($attachment_id, self::PENDING_DELETE_META);
                 if ($deleted_count > 0) {
                     $core->log("🗑️ [OSS-Zero-Disk] 二次校验通过，安全清理了 {$deleted_count} 个本地文件", 'info', 'OSS');
                 }
             } catch (Throwable $e) {
-                // 校验过程异常：宁可不删。保留清单与本地文件，等下次人工或重新排期处理。
+                // 校验过程异常：宁可不删。保留清单与本地文件，1 小时后重试（上限 3 次）。
                 $core->log("💥 [OSS-Zero-Disk] 二次清理异常，已保留本地文件：附件 #{$attachment_id} | " . $e->getMessage(), 'error', 'OSS');
+                $this->reschedule_purge($attachment_id, $pending, '二次清理异常：' . $e->getMessage());
             }
+        }
+
+        // R3：失败/暂缓时 1 小时后重排期重试，上限 3 次；超限记错误日志
+        // 并保留清单待人工处理，不再重排。
+        private function reschedule_purge($attachment_id, $pending, $reason = '') {
+            $retries = isset($pending['retries']) ? (int)$pending['retries'] : 0;
+            if ($retries >= 3) {
+                $core = Skyline_Core::instance();
+                $core->log("❌ [OSS-Zero-Disk] 附件 #{$attachment_id} 二次清理重试已满 3 次，停止重试，待删清单已保留待人工处理" . ($reason !== '' ? "（{$reason}）" : ''), 'error', 'OSS');
+                return false;
+            }
+            $pending['retries'] = $retries + 1;
+            update_post_meta($attachment_id, self::PENDING_DELETE_META, $pending);
+            if (!wp_next_scheduled('skyline_oss_purge_pending', [$attachment_id])) {
+                wp_schedule_single_event(time() + 3600, 'skyline_oss_purge_pending', [$attachment_id]);
+            }
+            return true;
         }
 
         public function replace_url($url, $post_id) {
@@ -743,6 +852,43 @@ if (!class_exists('Sky_Official_COS_Client')) {
             ]);
         }
 
+        // R12：真实连通性测试——写一个小测试对象、读回核对、再删掉。
+        // 返回 ['ok'=>bool, 'error'=>string]；任何一步失败都说明 bucket
+        // 不存在、凭证错误或权限不足，而不是“能连通 endpoint 就算成功”。
+        public function test_bucket() {
+            $key = 'skyline-test-' . substr(md5(uniqid('sky_test_', true)), 0, 12) . '.txt';
+            $body = 'skyline-oss-test';
+            try {
+                $this->client->putObject([
+                    'Bucket' => $this->bucket,
+                    'Key'    => $key,
+                    'Body'   => $body,
+                    'ACL'    => 'private',
+                ]);
+                $head = $this->client->headObject([
+                    'Bucket' => $this->bucket,
+                    'Key'    => $key
+                ]);
+                $size = isset($head['ContentLength']) ? (int)$head['ContentLength'] : null;
+                if ($size !== null && $size !== strlen($body)) {
+                    $this->delete_test_object($key);
+                    return ['ok' => false, 'error' => 'OSS 写入后读回的大小不一致'];
+                }
+                $this->delete_test_object($key);
+                return ['ok' => true, 'error' => ''];
+            } catch (\Throwable $e) {
+                // 尽力清理测试对象，清理失败也不掩盖原始错误。
+                $this->delete_test_object($key);
+                return ['ok' => false, 'error' => $e->getMessage()];
+            }
+        }
+
+        private function delete_test_object($key) {
+            try {
+                $this->client->deleteObject(['Bucket' => $this->bucket, 'Key' => $key]);
+            } catch (\Throwable $ignored) {}
+        }
+
         // 仅核查 COS 上对象是否存在（不依赖本地文件）。
         // 用于本地文件已缺失时的二次校验：COS 对象在，就说明同步是完好的，
         // 不能因此清除 _sky_oss_synced——否则前台 URL 会从能打开的 COS 地址
@@ -782,6 +928,14 @@ if (!class_exists('Sky_Official_COS_Client')) {
                 if ($etag !== '' && strpos($etag, '-') === false && preg_match('/^[0-9a-f]{32}$/i', $etag)) {
                     $local_md5 = md5_file($file);
                     if ($local_md5 === false || strtolower($etag) !== strtolower($local_md5)) return false;
+                }
+                // R8：两项全缺时 fail-closed——headObject 既不返回 ContentLength
+                // 也不返回 ETag，等于零校验，不能算通过。至少一项能比对且通过才算成功。
+                if ($remote_size === null && $etag === '') {
+                    if (class_exists('Skyline_Core')) {
+                        try { Skyline_Core::instance()->log("⚠️ [OSS] 强校验无据可依（COS 未返回 ContentLength 与 ETag），按失败处理: {$key}", 'warn', 'OSS'); } catch (Throwable $ignored) {}
+                    }
+                    return false;
                 }
                 return true;
             } catch (\Throwable $e) {
@@ -836,7 +990,6 @@ if (!class_exists('Sky_Official_COS_Client')) {
                     // 新分支单独捕获 Throwable：SDK 抛出的 Error（如 TypeError）
                     // 不能穿透到媒体上传导致 fatal；这里只记日志并返回失败，
                     // 让 upload_all_sizes 走失败分支（不写已同步标记、不删本地）。
-                    // 注意：这里只包新分支，旧的 catch (Exception) 原样不动（N4 不在本批）。
                     $core->log("❌ [OSS] 大文件分片上传失败: {$key} | 错误: " . $e->getMessage(), 'error', 'OSS');
                     return false;
                 }
@@ -871,7 +1024,7 @@ if (!class_exists('Sky_Official_COS_Client')) {
                 $core->log("✅ [OSS] 上传并真实验证成功 : {$key}", 'info', 'OSS');
                 return true;
 
-            } catch (\Exception $e) {
+            } catch (\Throwable $e) {
                 $core->log("❌ [OSS] 上传失败: {$key} | 错误: " . $e->getMessage(), 'error', 'OSS');
                 return false;
             }
