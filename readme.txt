@@ -4,7 +4,7 @@ Tags: ai, deepseek, content-automation, seo, productivity
 Requires at least: 5.8
 Tested up to: 7.1
 Requires PHP: 7.4
-Stable tag: 2.1.1
+Stable tag: 2.2.0
 License: GPLv2 or later
 License URI: http://www.gnu.org/licenses/gpl-2.0.html
 
@@ -16,7 +16,7 @@ Skyline AI Pro 是一款为专业内容创作者设计的 WordPress 智能中台
 
 == Features ==
 
-* **多模型集成**：深度集成 DeepSeek V3, GPT-4, Claude 3 等顶尖大模型。
+* **多模型集成**：兼容 OpenAI、DeepSeek、硅基流动等主流大模型。
 * **可视化无感同步**：强大的图片同步系统，支持智能去水印与图片处理。
 * **AI 智能润色**：一键优化错别字、语法错误，提升文章专业度。
 * **Redis 智能缓存**：利用 Redis 极大提升 AI 响应速度，减轻服务器压力。
@@ -30,6 +30,10 @@ Skyline AI Pro 是一款为专业内容创作者设计的 WordPress 智能中台
 3. Go to the 'Skyline Pro' settings page to configure your API keys.
 
 == Changelog ==
+
+= 2.2.0 =
+* 新功能：API Endpoint 改厂商预设下拉——硅基流动、OpenRouter、DeepSeek、OpenAI、智谱AI、Moonshot、通义千问，末位自定义；选定厂商自动填入地址，对话模型、绘图模型联动列出该厂商可用模型（可打字下拉，也能手填新模型）；已存配置按 Endpoint host 反推厂商，未知地址落自定义并保留原值
+* 修复：前台聊天“网络错误”不再一句话吞掉所有失败——按 HTTP 状态、超时、断网给可定位文案（504 回源超时、403、60 秒超时等）；根因多为 EdgeOne 12 秒回源超时撞上模型长回复，治本需调大回源超时
 
 = 2.1.1 =
 * 修复：审核遗留低优先级项全修——内容预览改 DOM 建节点防 XSS（N-A1）、手动单张同步补排除域名检查（N-A2）、英文 Slug 不再带中文人设（N-D2）、聊天每日上限按本地天重置（N-D3）、WebP 原图删失败保留重试记录（N-D5）

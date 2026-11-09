@@ -218,7 +218,8 @@
 /* ─── STATS GRID ─── */
 .sky-stats-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    /* 六张卡固定两行、每行三张（用户定）；窄屏不断列，只缩小字号与内边距。 */
+    grid-template-columns: repeat(3, 1fr);
     gap: 16px;
     margin-bottom: 24px;
 }
@@ -229,6 +230,12 @@
     border-radius: 12px;
     border: 1px solid var(--sky-border);
     text-align: center;
+    position: relative;
+    /* 六张卡等高对齐：网格拉伸给等高，flex 纵向居中让数字与标签基线跨卡一致。 */
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
     transition: all 0.2s ease;
 }
 
@@ -240,17 +247,31 @@
 
 .sky-stat-val {
     display: block;
-    font-size: 28px;
+    font-size: 36px;
     font-weight: 800;
     color: var(--sky-primary);
     margin-bottom: 4px;
     letter-spacing: -0.5px;
+    line-height: 1.2;
 }
 
 .sky-stat-lbl {
     font-size: 12px;
     color: var(--sky-text-muted);
     font-weight: 500;
+    white-space: nowrap;
+    line-height: 1.4;
+}
+
+/* 口径说明收进卡片 title 悬停提示；角标 ⓘ 只做“可悬停查看”的提示。 */
+.sky-stat-tip {
+    position: absolute;
+    top: 8px;
+    right: 10px;
+    font-size: 12px;
+    color: var(--sky-text-muted);
+    cursor: help;
+    line-height: 1;
 }
 
 /* ─── HEALTH TABLE ─── */
@@ -615,7 +636,16 @@ input:checked + .sky-slider:before {
     }
     
     .sky-stats-grid {
-        grid-template-columns: 1fr 1fr;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 10px;
+    }
+
+    .sky-stat-card {
+        padding: 14px 8px;
+    }
+
+    .sky-stat-val {
+        font-size: 24px;
     }
 }
 
@@ -631,7 +661,20 @@ input:checked + .sky-slider:before {
     }
 
     .sky-stats-grid {
-        grid-template-columns: 1fr;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 8px;
+    }
+
+    .sky-stat-card {
+        padding: 10px 6px;
+    }
+
+    .sky-stat-val {
+        font-size: 20px;
+    }
+
+    .sky-stat-lbl {
+        font-size: 11px;
     }
 
     .sky-card {
@@ -657,3 +700,109 @@ input:checked + .sky-slider:before {
     }
 }
 
+
+/* ═══════════════════════════════════════════
+   v2.2.0 收口：浏览器实拍七页排版修复
+   只追加、不改上面已有规则；本段规则都只针对本段注释里点名的元素。
+   ═══════════════════════════════════════════ */
+
+/* ── 1）数据看板 ── */
+/* 统计网格与下方口径小字之间的 24px 太空：收窄到 16px（口径 <p> 的
+   margin-bottom 已在 admin.php 里置 0，统计卡 → D2 表的总间距同步收紧）。 */
+.sky-stats-grid {
+    margin-bottom: 16px;
+}
+
+/* 健康表：标签列与数值列默认按基线对齐，数值换行（定时任务行、
+   GD 长标签）时标签就“飘”在第一行基线上、看着松散；统一改中线对齐。 */
+.sky-health-label,
+.sky-health-val {
+    vertical-align: middle;
+}
+
+/* 看板双栏网格里的两张卡自带 margin-bottom:20px，下一张卡还有
+   margin-top:20px，中间凭空多出 40px；网格内的卡去掉下边距，
+   只留卡片之间的 gap:20px。 */
+.sky-dashboard-grid > .sky-card {
+    margin-bottom: 0;
+}
+
+/* ── 1）/ 5）/ 7）各页末尾留白 ── */
+/* 每页最后一张卡自带 margin-bottom:20px，再叠 .sky-main 的 32px 下内边距，
+   页尾空 52px、看着像没收尾；只去掉每页最后一张卡的下边距。 */
+.sky-main > .sky-card:last-child {
+    margin-bottom: 0;
+}
+
+/* ── 2）/ 3）/ 4）/ 5）/ 6）设置页通用：字段行改上下堆叠 ── */
+/* 根因：两列网格里每块约 430–540px 宽，说明列只剩约 200px、控件列固定
+   220px——长说明被挤成窄条多行换行，长 URL/域名/模型名在 220px 框里看不全，
+   开关徽标又和说明挤在同一行。1024px 以下断点本来就是堆叠（见上面媒体查询），
+   这里把堆叠提前到桌面宽度：说明整行在上、控件整行在下，输入框接近整块宽，
+   开关自然与说明分行；只改布局，不改任何字段与保存逻辑。 */
+.sky-settings-grid .sky-field-row {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 6px;
+}
+
+.sky-settings-grid .sky-field-info {
+    padding-right: 0;
+}
+
+.sky-settings-grid .sky-field-control {
+    width: 100%;
+}
+
+/* 堆叠后说明文字仍嫌密（原 line-height 1.4）：放开到 1.6。 */
+.sky-settings-grid .sky-field-desc {
+    line-height: 1.6;
+}
+
+/* ── 4）密钥字段：密码框 + 显示切换 + 已配置角标 ── */
+/* .sky-password-wrap 是 flex：输入框占满剩余宽，切换按钮与角标纵向居中、
+   贴着同一基线，不再各贴各的边。 */
+.sky-password-wrap {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+}
+
+.sky-password-wrap .sky-password-input {
+    flex: 1;
+    min-width: 0;
+}
+
+.sky-password-wrap .sky-password-toggle {
+    flex: none;
+    white-space: nowrap;
+}
+
+.sky-password-wrap .sky-status-badge {
+    flex: none;
+}
+
+/* ── 5）搜索优化：内链关键词文本框网址不断行 ── */
+/* link_pairs 里每行是“词|网址”，默认软换行会把长网址在中段断开；
+   改不换行 + 横向滚动，一行一个词条、网址保持完整。 */
+.sky-tab-seo .sky-field-input textarea {
+    white-space: pre;
+    overflow-x: auto;
+}
+
+/* ── 7）系统日志 ── */
+/* 卡片标题里的操作按钮原来靠 float:right（flex 容器里 float 失效，
+   按钮贴着标题文字、又被误读成挤在卡片边缘）；flex 下用 margin-left:auto
+   推到右沿，与标题保持 gap 间距。admin.php 里四处按钮的内联 float /
+   margin-top:-4px 已同步去掉（日志清空、聊天清空、OSS/Redis 测试）。 */
+.sky-card-title .button {
+    margin-left: auto;
+    flex: none;
+}
+
+/* 日志 <pre> 本来是 pre-wrap（空格处可断行），但超长 token（URL、长路径）
+   不断行、只能横向滚动；overflow-wrap:anywhere 让长 token 也能在行内断开，
+   日志行按“自动换行”完整显示，不再只剩横向滚动条。 */
+#sky-log-content {
+    overflow-wrap: anywhere;
+}

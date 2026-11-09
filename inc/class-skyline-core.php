@@ -123,15 +123,123 @@ class Skyline_Core {
         if (is_admin() && class_exists('Skyline_Admin')) new Skyline_Admin();
     }
 
-    public function get_config_schema() {
+    // v2.2.0：模型厂商预设表。对话端点 = 各厂商官方 base + /chat/completions，
+    // 2026-11-09 逐家用 web 搜索核对过官方文档/文档引用：
+    // 硅基流动 https://api.siliconflow.cn/v1、OpenRouter https://openrouter.ai/api/v1、
+    // DeepSeek https://api.deepseek.com/v1、OpenAI https://api.openai.com/v1、
+    // 智谱 https://open.bigmodel.cn/api/paas/v4、Moonshot https://api.moonshot.cn/v1、
+    // 通义千问 https://dashscope.aliyuncs.com/compatible-mode/v1。
+    // 生图根地址 = 同厂商 base（handle_gen_img() 拼 /images/generations）：
+    // OpenRouter 生图走 POST /api/v1/images、DashScope 兼容模式只支持对话与
+    // embedding（生图走原生异步接口），两者都不走 /images/generations，故留空；
+    // DeepSeek / Moonshot 无生图模型，同样留空。
+    // 模型清单只列各家稳定常见的（抽查过），模型字段允许手打新模型，不求全。
+    public static function get_api_vendors() {
         return [
+            'siliconflow' => [
+                'label' => '硅基流动',
+                'chat_endpoint' => 'https://api.siliconflow.cn/v1/chat/completions',
+                'img_base' => 'https://api.siliconflow.cn/v1',
+                'chat_models' => ['deepseek-ai/DeepSeek-V3', 'deepseek-ai/DeepSeek-V3.2', 'deepseek-ai/DeepSeek-R1', 'Qwen/Qwen3-8B', 'zai-org/GLM-5.3-Flash', 'moonshotai/Kimi-K2-Instruct'],
+                'image_models' => ['black-forest-labs/FLUX.1-schnell', 'black-forest-labs/FLUX.1-dev'],
+            ],
+            'openrouter' => [
+                'label' => 'OpenRouter',
+                'chat_endpoint' => 'https://openrouter.ai/api/v1/chat/completions',
+                'img_base' => '',
+                'chat_models' => ['openai/gpt-5.2', 'openai/gpt-4o', 'openai/gpt-4o-mini', 'anthropic/claude-sonnet-4.6', 'google/gemini-2.5-pro', 'deepseek/deepseek-chat-v3.1'],
+                'image_models' => [],
+            ],
+            'deepseek' => [
+                'label' => 'DeepSeek',
+                'chat_endpoint' => 'https://api.deepseek.com/v1/chat/completions',
+                'img_base' => '',
+                // 旧 id deepseek-chat / deepseek-reasoner 已于 2026-07-24 退役，
+                // 不再列入；现役为 V4 系列（另有 deepseek-flash = V4.1-Flash 别名）。
+                'chat_models' => ['deepseek-v4-flash', 'deepseek-v4-pro', 'deepseek-flash', 'deepseek-v3.2'],
+                'image_models' => [],
+            ],
+            'openai' => [
+                'label' => 'OpenAI',
+                'chat_endpoint' => 'https://api.openai.com/v1/chat/completions',
+                'img_base' => 'https://api.openai.com/v1',
+                'chat_models' => ['gpt-5.2', 'gpt-5.2-chat', 'gpt-4o', 'gpt-4o-mini', 'gpt-4.1'],
+                'image_models' => ['gpt-image-1', 'gpt-image-1-mini', 'dall-e-3'],
+            ],
+            'zhipu' => [
+                'label' => '智谱AI',
+                'chat_endpoint' => 'https://open.bigmodel.cn/api/paas/v4/chat/completions',
+                'img_base' => 'https://open.bigmodel.cn/api/paas/v4',
+                'chat_models' => ['glm-5.3', 'glm-5.3-flash', 'glm-5.2', 'glm-5.1', 'glm-5', 'glm-4.7'],
+                'image_models' => ['cogview-4', 'glm-image'],
+            ],
+            'moonshot' => [
+                'label' => 'Moonshot',
+                'chat_endpoint' => 'https://api.moonshot.cn/v1/chat/completions',
+                'img_base' => '',
+                'chat_models' => ['kimi-k3', 'kimi-k3.1-pro', 'kimi-k2.6', 'moonshot-v1-128k', 'moonshot-v1-auto'],
+                'image_models' => [],
+            ],
+            'qwen' => [
+                'label' => '通义千问',
+                'chat_endpoint' => 'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions',
+                'img_base' => '',
+                'chat_models' => ['qwen3.7-max', 'qwen3.7-plus', 'qwen3-plus', 'qwen3-turbo', 'qwen-plus', 'qwen-turbo'],
+                'image_models' => [],
+            ],
+            'custom' => [
+                'label' => '自定义',
+                'chat_endpoint' => '',
+                'img_base' => '',
+                'chat_models' => [],
+                'image_models' => [],
+            ],
+        ];
+    }
+
+    // v2.2.0：按已存 api_base 的 host 反推厂商（向后兼容旧配置：旧配置
+    // 没有 api_vendor 键）。host 对得上预设就返回该厂商，对不上、为空或
+    // 解析不出时返回 'custom'，调用方保留原值、不丢配置。只比 host，不比
+    // 完整路径（用户手改过路径/加过斜杠也不影响识别）。
+    public static function detect_api_vendor($api_base) {
+        $raw = strtolower(trim((string)$api_base));
+        if ($raw === '') return 'custom';
+        $host = parse_url($raw, PHP_URL_HOST);
+        // 无 scheme 的裸地址 parse 不出 host，退回整串做子串匹配。
+        if (!is_string($host) || $host === '') $host = $raw;
+        $map = [
+            'api.siliconflow.cn' => 'siliconflow',
+            'openrouter.ai' => 'openrouter',
+            'eu.openrouter.ai' => 'openrouter',
+            'api.deepseek.com' => 'deepseek',
+            'api.openai.com' => 'openai',
+            'open.bigmodel.cn' => 'zhipu',
+            'api.z.ai' => 'zhipu',
+            'api.moonshot.cn' => 'moonshot',
+            'api.moonshot.ai' => 'moonshot',
+            'dashscope.aliyuncs.com' => 'qwen',
+            'dashscope-intl.aliyuncs.com' => 'qwen',
+        ];
+        foreach ($map as $needle => $vendor) {
+            if (strpos($host, $needle) !== false) return $vendor;
+        }
+        return 'custom';
+    }
+
+    public function get_config_schema() {
+        // v2.2.0：厂商下拉选项与厂商表同源（label 取自 get_api_vendors()），
+        // 顺序与厂商表一致：7 家预设在前，“自定义”最后一位。
+        $vendor_options = [];
+        foreach (self::get_api_vendors() as $k => $v) $vendor_options[$k] = $v['label'];
+        return [
+            'api_vendor' => ['group'=>'ai', 'type'=>'select', 'label'=>'模型厂商', 'desc'=>'切换厂商后，下方 API Endpoint、生图根地址与两个模型下拉即时更新（要点“保存本页配置”才生效）；选“自定义”可自由填写任意地址与模型。', 'default'=>'siliconflow', 'options'=>$vendor_options],
             'api_base' => ['group'=>'ai', 'type'=>'url', 'label'=>'API Endpoint', 'default'=>'https://api.siliconflow.cn/v1/chat/completions'],
             // 生图端点根地址（L8）：handle_gen_img() 优先用这里拼 /images/generations；
             // 留空时回退到从 api_base 推导（/chat/completions → /images/generations）并记日志。
             'api_img_base' => ['group'=>'ai', 'type'=>'url', 'label'=>'生图 API 根地址', 'desc'=>'例如 https://api.siliconflow.cn/v1；默认与上方 API Endpoint 同厂商（硅基流动）。留空时从 API Endpoint 推导（仅当它以 /chat/completions 结尾时）；推导不出请填写。', 'default'=>'https://api.siliconflow.cn/v1'],
             'api_key' => ['group'=>'ai', 'type'=>'password', 'label'=>'API Key', 'desc'=>'你的 API 密钥 (sk-...)', 'required'=>true],
-            'chat_model' => ['group'=>'ai', 'type'=>'text', 'label'=>'对话模型', 'default'=>'deepseek-ai/DeepSeek-V3'],
-            'image_model' => ['group'=>'ai', 'type'=>'text', 'label'=>'绘图模型', 'default'=>'black-forest-labs/FLUX.1-schnell'],
+            'chat_model' => ['group'=>'ai', 'type'=>'datalist', 'label'=>'对话模型', 'desc'=>'可点选预设，也可直接输入厂商新出的模型名；切换厂商后下拉随之更新。', 'default'=>'deepseek-ai/DeepSeek-V3'],
+            'image_model' => ['group'=>'ai', 'type'=>'datalist', 'label'=>'绘图模型', 'desc'=>'可点选预设，也可直接输入新模型名；所选厂商无绘图模型时请留空或自由输入。', 'default'=>'black-forest-labs/FLUX.1-schnell'],
             'system_prompt' => ['group'=>'ai', 'type'=>'textarea', 'label'=>'系统人设', 'default'=>"你是灵感屋（lgwu.net）的 AI 助手，专注景观设计：园林方案、施工图与节点详图、植物配置、铺装与工程做法、设计软件与学习资源。用准确的景观专业术语，中文回答，简洁实用。"],
             'robot_enable' => ['group'=>'ai', 'type'=>'bool', 'label'=>'启用前台悬浮助手', 'default'=>true],
             'robot_only_logged' => ['group'=>'ai', 'type'=>'bool', 'label'=>'仅登录用户可见', 'default'=>false],
@@ -164,7 +272,12 @@ class Skyline_Core {
             'oss_enable' => ['group'=>'oss', 'type'=>'bool', 'label'=>'启用 OSS 云存储', 'default'=>false],
             'oss_endpoint' => ['group'=>'oss', 'type'=>'text', 'label'=>'Endpoint'],
             'oss_bucket' => ['group'=>'oss', 'type'=>'text', 'label'=>'Bucket 名称'],
-            'oss_ak' => ['group'=>'oss', 'type'=>'text', 'label'=>'Access Key'],
+            // v2.2.0 收口：Access Key 与 Secret Key 同为凭据（备份排除清单
+            // inc/modules/class-skyline-utils.php 里 oss_ak 已列为明文凭据），
+            // 统一走 password 渲染：不回显原文、留空不改（render_field 的
+            // password 分支 + handle_settings 的 password 分支）；已配置与
+            // 否只看“已配置/未配置”角标，不把值写进页面。
+            'oss_ak' => ['group'=>'oss', 'type'=>'password', 'label'=>'Access Key'],
             'oss_sk' => ['group'=>'oss', 'type'=>'password', 'label'=>'Secret Key'],
             'oss_domain' => ['group'=>'oss', 'type'=>'text', 'label'=>'自定义域名'],
             'oss_delete_local' => ['group'=>'oss', 'type'=>'bool', 'label'=>'Zero-Disk (同步后删除本地文件)', 'desc'=>'开启后，本地文件在同步成功 24 小时后、由 WP-Cron 二次校验通过才删除；关掉开关后，已登记的待删任务作废，本地文件保留。', 'default'=>false],
@@ -544,28 +657,99 @@ class Skyline_Core {
         return false;
     }
 
+    // A1：前台聊天记录——最近 50 条，存 skyline_ai_chat_log option。
+    // 每条：time（Unix 时间戳）、question（问题，截断 200 字）、reply
+    // （回答摘要，截断 200 字；失败时为空）、ms（耗时毫秒）、status
+    // （ok/error）、error（失败时的简短错误，如 API 401/超时/限流；
+    // 成功时为空）、ip_hash（访客 IP 的 sha256，只存哈希、绝不存明文 IP）。
+    // 新记录放最前面；写入时顺带清理超过 30 天的旧记录、上限 50 条。
+    // 回答只存前 200 字摘要，不存全文——全文存 option 会随 50 条记录膨胀。
+    const CHAT_LOG_OPTION = 'skyline_ai_chat_log';
+    const CHAT_LOG_MAX = 50;
+    const CHAT_LOG_KEEP_DAYS = 30;
+
+    public function get_chat_log() {
+        $log = get_option(self::CHAT_LOG_OPTION, []);
+        return is_array($log) ? $log : [];
+    }
+
+    public function clear_chat_log() {
+        delete_option(self::CHAT_LOG_OPTION);
+        return true;
+    }
+
+    // A1：记一条聊天记录。日志绝不能拖垮聊天本身：读写失败一律静默
+    // 跳过，不抛错、不影响本次聊天的返回。
+    public function record_chat_log($question, $reply, $ms, $status, $error, $ip_hash) {
+        try {
+            $entry = [
+                'time' => time(),
+                'question' => mb_substr((string)$question, 0, 200),
+                'reply' => mb_substr((string)$reply, 0, 200),
+                'ms' => max(0, (int)$ms),
+                'status' => $status === 'ok' ? 'ok' : 'error',
+                'error' => mb_substr((string)$error, 0, 200),
+                'ip_hash' => (string)$ip_hash,
+            ];
+            $log = $this->get_chat_log();
+            array_unshift($log, $entry);
+            // 清理超过 30 天的旧记录，再截到上限 50 条（缺 time 的脏行
+            // 也一并清掉）。
+            $cutoff = time() - self::CHAT_LOG_KEEP_DAYS * 86400;
+            $log = array_values(array_filter($log, function ($e) use ($cutoff) {
+                return is_array($e) && isset($e['time']) && (int)$e['time'] >= $cutoff;
+            }));
+            if (count($log) > self::CHAT_LOG_MAX) $log = array_slice($log, 0, self::CHAT_LOG_MAX);
+            // autoload=false：聊天记录只在后台 AI 页读，不要随每个请求进内存。
+            update_option(self::CHAT_LOG_OPTION, $log, false);
+        } catch (Throwable $ignored) {
+            // 记日志失败不影响聊天返回。
+        }
+        return true;
+    }
+
+    // A1：本次聊天已耗时（毫秒，整数）。
+    private function chat_elapsed_ms($started) {
+        return (int)round((microtime(true) - $started) * 1000);
+    }
+
     public function handle_chat_front() {
         check_ajax_referer('sky_chat_nonce');
+        // A1：计时起点与访客 IP 哈希（只存哈希，绝不存明文 IP）。
+        // 注意：nonce 失败在 check_ajax_referer() 里直接 wp_die，到不了
+        // 这里——nonce 失败记不进这条日志（见汇报的诚实边界）。
+        $chat_started = microtime(true);
 
         // M13：限流优先走 Redis 原子 INCR（读-改-写不再互相覆盖），Redis 不可用
         // 时回退到旧的 transient 做法。异常 IP 封禁未做——需要后台 UI 管封禁
         // 名单，见审核报告 M13。
         $ip = $this->get_real_visitor_ip();
+        $ip_hash = hash('sha256', $ip);
         $limit_err = $this->chat_rate_limit_redis($ip);
         if ($limit_err === false) $limit_err = $this->chat_rate_limit_transient($ip);
         if (is_string($limit_err)) {
+            // A1：限流拦截也记一条失败（问题取 sanitize 后的原文；
+            // record_chat_log 里会再截断到 200 字）。
+            $this->record_chat_log(sanitize_text_field($_POST['msg'] ?? ''), '', $this->chat_elapsed_ms($chat_started), 'error', $limit_err, $ip_hash);
             wp_send_json_error($limit_err);
         }
 
         $msg = sanitize_text_field($_POST['msg'] ?? '');
         // 聊天输入加长度上限：超长输入直通 API 会拖慢调用、放大 token 消耗。
         if (mb_strlen($msg) > 2000) {
+            $this->record_chat_log($msg, '', $this->chat_elapsed_ms($chat_started), 'error', '消息过长（最多 2000 字符）', $ip_hash);
             wp_send_json_error('消息过长（最多 2000 字符）');
         }
         $res = $this->call_api([['role'=>'user', 'content'=>$msg]]);
         if (is_wp_error($res)) {
+            // A1：API 报错记失败类型 + 简短错误。call_api 返回的 message
+            // 已是 extract_api_error_message() 提炼的短消息，不含密钥与
+            // 完整响应体；record_chat_log 里再截断到 200 字。
+            $this->record_chat_log($msg, '', $this->chat_elapsed_ms($chat_started), 'error', $res->get_error_message(), $ip_hash);
             wp_send_json_error($res->get_error_message());
         }
+        // A1：成功记回答摘要（前 200 字，不存全文）。
+        $this->record_chat_log($msg, $res, $this->chat_elapsed_ms($chat_started), 'ok', '', $ip_hash);
         wp_send_json_success($res);
     }
 

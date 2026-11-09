@@ -1,15 +1,15 @@
 <?php
 /*
 Plugin Name: Skyline AI Pro
-Description: 灵感屋(lgwu.net) 专属智能运营中台。集成 DeepSeek V3、可视化无感同步系统、智能去水印、AI 润色与 Redis 智能缓存。[V2.1.1 审核遗留小尾巴全修]
-Version: 2.1.1
+Description: 灵感屋(lgwu.net) 专属智能运营中台。集成主流 AI 模型、可视化无感同步系统、智能去水印、AI 润色与 Redis 智能缓存。[V2.2.0 前台聊天报错可定位 + API 厂商预设下拉]
+Version: 2.2.0
 Author:      LingGanWu
 Text Domain: skyline-ai-pro
 */
 
 if (!defined('ABSPATH')) exit;
 
-define('SKY_VERSION', '2.1.1');
+define('SKY_VERSION', '2.2.0');
 
 define('SKY_PATH', plugin_dir_path(__FILE__));
 define('SKY_URL', plugin_dir_url(__FILE__));
