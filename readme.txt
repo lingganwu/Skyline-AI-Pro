@@ -37,7 +37,7 @@ Skyline AI Pro 是一款为专业内容创作者设计的 WordPress 智能中台
 * 性能优化：图片同步使用批量数据库查询
 * 代码规范：所有用户可见字符串添加国际化支持
 * 代码规范：修复版本号不一致问题
-* UI/UX：Copilot 面板移至外部 JS/CSS 文件
+* UI/UX：删除未被引用的 Copilot 外部文件（assets/js/copilot.js、admin/views/copilot.php），Copilot 面板仍为 add_copilot_box() 内联实现
 
 = 2.0.0 =
 * 企业级重构：毛玻璃效果 UI、侧边栏导航
