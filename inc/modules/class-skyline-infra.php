@@ -1142,6 +1142,43 @@ if (!class_exists('Skyline_OSS_Mod')) {
             add_action('skyline_oss_retry_failed', [$this, 'retry_failed_sizes']);
         }
 
+        // D3：Skyline 定时任务健康统计（静态方法，供数据看板调用）。
+        // 覆盖四类 hook：自动 SEO（skyline_async_seo）、图片同步
+        // （skyline_async_spider）、Zero-Disk 待删清理
+        // （skyline_oss_purge_pending）、失败尺寸重试
+        // （skyline_oss_retry_failed）。
+        // 注意不用 wp_next_scheduled($hook) 取下次触发：插件的单次事件
+        // 都带参数（文章/附件 id），不带参数调它匹配不到任何事件、恒返
+        // 回 false；直接读 _get_cron_array()（WP 自己的 cron 表），一次
+        // 扫描同时拿到下次触发时间、待处理数与逾期数。
+        // 逾期 = 计划时间已过当前时间——wp-cron 饿死时事件会一直逾期，
+        // S4 的自动 SEO 静默失败就是这么来的，看板标红就是要让它当天可见。
+        // 返回：['hooks'=>四类 hook, 'pending'=>待处理事件数,
+        // 'overdue'=>逾期事件数, 'next_ts'=>最早计划时间戳|null,
+        // 'by_hook'=>[hook=>事件数]]。无 _get_cron_array 或无事件时
+        // 返回空统计，不让看板 fatal。
+        public static function cron_health() {
+            $hooks = ['skyline_async_seo', 'skyline_async_spider', 'skyline_oss_purge_pending', 'skyline_oss_retry_failed'];
+            $result = ['hooks' => $hooks, 'pending' => 0, 'overdue' => 0, 'next_ts' => null, 'by_hook' => array_fill_keys($hooks, 0)];
+            if (!function_exists('_get_cron_array')) return $result;
+            $crons = _get_cron_array();
+            if (!is_array($crons) || empty($crons)) return $result;
+            $now = time();
+            foreach ($crons as $ts => $events) {
+                if (!is_array($events)) continue;
+                foreach ($events as $hook => $instances) {
+                    if (!in_array($hook, $hooks, true) || !is_array($instances)) continue;
+                    foreach ($instances as $instance) {
+                        $result['pending']++;
+                        $result['by_hook'][$hook]++;
+                        if ($result['next_ts'] === null || (int)$ts < $result['next_ts']) $result['next_ts'] = (int)$ts;
+                        if ((int)$ts < $now) $result['overdue']++;
+                    }
+                }
+            }
+            return $result;
+        }
+
         private function make_cos_client() {
             $core = Skyline_Core::instance();
             try {

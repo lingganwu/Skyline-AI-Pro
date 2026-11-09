@@ -9,6 +9,11 @@ class Skyline_Admin {
         add_action('admin_menu', [$this, 'add_menu']);
         add_action('admin_init', [$this, 'handle_settings']);
         add_action('wp_ajax_skyline_health_check', [$this, 'ajax_health_check']);
+        // C1/S1 批量：扫描 + 分批跑（与 WebP 批量同款：nonce + manage_options）。
+        add_action('wp_ajax_sky_spider_scan', [$this, 'ajax_spider_scan']);
+        add_action('wp_ajax_sky_spider_batch', [$this, 'ajax_spider_batch']);
+        add_action('wp_ajax_sky_seo_scan', [$this, 'ajax_seo_scan']);
+        add_action('wp_ajax_sky_seo_batch', [$this, 'ajax_seo_batch']);
     }
 
     public function add_menu() {
@@ -24,6 +29,21 @@ class Skyline_Admin {
     }
 
     public function handle_settings() {
+        // A1：清空聊天记录（AI 页“最近聊天记录”卡片里的表单按钮，与保存
+        // 配置共用同一个表单与 nonce；先于保存分支处理，清空后直接返回，
+        // 不保存随表单一起提交的配置值）。
+        if (isset($_POST['skyline_clear_chat_log'])) {
+            if (!wp_verify_nonce($_POST['skyline_nonce'] ?? '', 'skyline_save_action')) {
+                return;
+            }
+            if (!current_user_can('manage_options')) {
+                wp_die(__('权限不足', 'skyline-ai-pro'));
+            }
+            $this->core->clear_chat_log();
+            add_settings_error('skyline_messages', 'skyline_msg', '✅ 聊天记录已清空。', 'updated');
+            return;
+        }
+
         if (!isset($_POST['skyline_save_settings']) || !wp_verify_nonce($_POST['skyline_nonce'] ?? '', 'skyline_save_action')) {
             return;
         }
@@ -147,6 +167,40 @@ class Skyline_Admin {
             'curl' => $health['curl']['status'],
             'gd' => $health['gd']['status']
         ]);
+    }
+
+    // C1/S1 批量入口：四个端点都只给管理员（nonce + manage_options，
+    // 与 WebP 批量同款）。响应里只有文章 id/标题/计数/缺项名，不回显
+    // 密钥、不回显完整 API 响应体。
+    public function ajax_spider_scan() {
+        check_ajax_referer('skyline_ajax_nonce');
+        if (!current_user_can('manage_options')) wp_send_json_error('Unauthorized');
+        if (!class_exists('Skyline_Content')) wp_send_json_error('内容模块未加载');
+        wp_send_json_success(Skyline_Content::instance()->scan_external_images());
+    }
+
+    public function ajax_spider_batch() {
+        check_ajax_referer('skyline_ajax_nonce');
+        if (!current_user_can('manage_options')) wp_send_json_error('Unauthorized');
+        if (!class_exists('Skyline_Content')) wp_send_json_error('内容模块未加载');
+        $ids = isset($_POST['ids']) && is_array($_POST['ids']) ? array_map('intval', $_POST['ids']) : [];
+        wp_send_json_success(Skyline_Content::instance()->batch_spider_posts($ids));
+    }
+
+    public function ajax_seo_scan() {
+        check_ajax_referer('skyline_ajax_nonce');
+        if (!current_user_can('manage_options')) wp_send_json_error('Unauthorized');
+        if (!class_exists('Skyline_Content')) wp_send_json_error('内容模块未加载');
+        wp_send_json_success(Skyline_Content::instance()->scan_seo_missing());
+    }
+
+    public function ajax_seo_batch() {
+        check_ajax_referer('skyline_ajax_nonce');
+        if (!current_user_can('manage_options')) wp_send_json_error('Unauthorized');
+        if (!class_exists('Skyline_Content')) wp_send_json_error('内容模块未加载');
+        $ids = isset($_POST['ids']) && is_array($_POST['ids']) ? array_map('intval', $_POST['ids']) : [];
+        $batch_size = isset($_POST['batch_size']) ? (int)$_POST['batch_size'] : Skyline_Content::SEO_BATCH_SIZE_DEFAULT;
+        wp_send_json_success(Skyline_Content::instance()->batch_seo_posts($ids, $batch_size));
     }
 
     private function get_current_tab() {
@@ -431,10 +485,35 @@ class Skyline_Admin {
 
     private function render_dashboard($health) {
         ?>
+        <?php
+        // 概览按实际配置动态显示，不再写死具体模型名：厂商由 api_base
+        // 反推预设（detect_api_vendor），对不上显示 Endpoint host；
+        // 未配 api_base 时用通用描述；模型名读当前 chat_model/image_model。
+        $ov_base = trim((string)$this->core->get_opt('api_base', ''));
+        $ov_chat = trim((string)$this->core->get_opt('chat_model', ''));
+        $ov_img = trim((string)$this->core->get_opt('image_model', ''));
+        if ($ov_base === '') {
+            $ov_text = 'Skyline AI Pro 是您的智能运营中台。配置 API 后可实现 AI 写作与绘图；配合 Redis 缓存与 OSS 云存储，缓存命中时可减少重复生成与回源。';
+        } else {
+            $ov_key = Skyline_Core::detect_api_vendor($ov_base);
+            $ov_vendors = Skyline_Core::get_api_vendors();
+            if ($ov_key !== 'custom' && isset($ov_vendors[$ov_key])) {
+                $ov_vendor = $ov_vendors[$ov_key]['label'];
+            } else {
+                $ov_host = parse_url($ov_base, PHP_URL_HOST);
+                $ov_vendor = '自定义接口' . (is_string($ov_host) && $ov_host !== '' ? '（' . $ov_host . '）' : '');
+            }
+            $ov_models = [];
+            if ($ov_chat !== '') $ov_models[] = '对话模型 ' . $ov_chat;
+            if ($ov_img !== '') $ov_models[] = '绘图模型 ' . $ov_img;
+            $ov_caps = $ov_img !== '' ? '实现 AI 写作与绘图' : '实现 AI 写作';
+            $ov_text = 'Skyline AI Pro 是您的智能运营中台。当前使用' . $ov_vendor . (empty($ov_models) ? '' : '，' . implode('，', $ov_models)) . '，' . $ov_caps . '；配合 Redis 缓存与 OSS 云存储，缓存命中时可减少重复生成与回源。';
+        }
+        ?>
         <div class="sky-card">
             <div class="sky-card-title">✨ 插件能力概览</div>
             <p style="color: var(--sky-text-muted); line-height: 1.6; font-size: 14px;">
-                Skyline AI Pro 是您的智能运营中台。集成 DeepSeek V3，实现 AI 写作与绘图；配合 Redis 缓存与 OSS 云存储，缓存命中时可减少重复生成与回源。
+                <?php echo esc_html($ov_text); ?>
             </p>
         </div>
 
@@ -447,40 +526,94 @@ class Skyline_Admin {
         $hit_rate = ($hits + $miss) > 0 ? round($hits / ($hits + $miss) * 100, 1) : null;
         ?>
         <div class="sky-stats-grid">
-            <div class="sky-stat-card">
+            <div class="sky-stat-card" title="仅计未缓存调用，含测试 Ping 与自动 SEO 的每次子调用，非对话条数">
+                <span class="sky-stat-tip" aria-hidden="true">ⓘ</span>
                 <span class="sky-stat-val"><?php echo esc_html($this->core->stat_get('api_calls')); ?></span>
-                <span class="sky-stat-lbl">AI 调用次数</span>
-                <span class="sky-stat-note" style="display:block; font-size:12px; color: var(--sky-text-muted); line-height:1.5; margin-top:4px;">仅计未缓存调用，含测试 Ping 与自动 SEO 的每次子调用，非对话条数</span>
+                <span class="sky-stat-lbl">AI 调用</span>
             </div>
-            <div class="sky-stat-card">
+            <div class="sky-stat-card" title="计成功下载的图片张数，非文章数；同一张图重复下载会重复计">
+                <span class="sky-stat-tip" aria-hidden="true">ⓘ</span>
                 <span class="sky-stat-val"><?php echo esc_html($this->core->stat_get('spider_count')); ?></span>
-                <span class="sky-stat-lbl">资源同步数</span>
-                <span class="sky-stat-note" style="display:block; font-size:12px; color: var(--sky-text-muted); line-height:1.5; margin-top:4px;">计成功下载的图片张数，非文章数；同一张图重复下载会重复计</span>
+                <span class="sky-stat-lbl">资源同步</span>
             </div>
-            <div class="sky-stat-card">
+            <div class="sky-stat-card" title="API 调用失败次数累计">
+                <span class="sky-stat-tip" aria-hidden="true">ⓘ</span>
                 <span class="sky-stat-val"><?php echo esc_html($this->core->stat_get('api_errors')); ?></span>
                 <span class="sky-stat-lbl">API 错误</span>
-                <span class="sky-stat-note" style="display:block; font-size:12px; color: var(--sky-text-muted); line-height:1.5; margin-top:4px;">API 调用失败次数累计</span>
             </div>
-            <div class="sky-stat-card">
+            <div class="sky-stat-card" title="页面缓存 + API 缓存命中之和，非单纯页面缓存命中">
+                <span class="sky-stat-tip" aria-hidden="true">ⓘ</span>
                 <span class="sky-stat-val"><?php echo esc_html($hits); ?></span>
                 <span class="sky-stat-lbl">缓存命中</span>
-                <span class="sky-stat-note" style="display:block; font-size:12px; color: var(--sky-text-muted); line-height:1.5; margin-top:4px;">页面缓存 + API 缓存命中之和，非单纯页面缓存命中</span>
             </div>
-            <div class="sky-stat-card">
+            <div class="sky-stat-card" title="缓存查询未命中次数；命中率 = 命中 /（命中 + 未命中）">
+                <span class="sky-stat-tip" aria-hidden="true">ⓘ</span>
                 <span class="sky-stat-val"><?php echo esc_html($miss); ?></span>
                 <span class="sky-stat-lbl">缓存未命中</span>
-                <span class="sky-stat-note" style="display:block; font-size:12px; color: var(--sky-text-muted); line-height:1.5; margin-top:4px;">缓存查询未命中次数；命中率 = 命中 /（命中 + 未命中）</span>
             </div>
-            <div class="sky-stat-card">
+            <div class="sky-stat-card" title="<?php echo esc_attr('命中 ' . $hits . ' / 未命中 ' . $miss . '；无请求时不显示'); ?>">
+                <span class="sky-stat-tip" aria-hidden="true">ⓘ</span>
                 <span class="sky-stat-val"><?php echo $hit_rate === null ? '—' : esc_html($hit_rate . '%'); ?></span>
-                <span class="sky-stat-lbl">缓存命中率</span>
-                <span class="sky-stat-note" style="display:block; font-size:12px; color: var(--sky-text-muted); line-height:1.5; margin-top:4px;">命中 <?php echo esc_html($hits); ?> / 未命中 <?php echo esc_html($miss); ?>；无请求时不显示</span>
+                <span class="sky-stat-lbl">命中率</span>
             </div>
         </div>
-        <p style="color: var(--sky-text-muted); font-size: 12px; margin-top: 8px;">
+        <p style="color: var(--sky-text-muted); font-size: 12px; margin-top: 8px; margin-bottom: 0;">
             统计口径：以上数字均为自统计启用起的累计值，无固定时间窗口；缓存命中为 0 时请结合命中率判断——无请求与从不命中都会显示 0。
         </p>
+
+        <?php
+        // D2：最近文章处理状态表——最近 10 篇已发布文章，点标题进编辑页。
+        // SEO 状态直接读已有 meta：有 _sky_seo_done 显示“已完成”；未完成
+        // 且 _sky_seo_fail_count ≥ 1 显示“失败×N 次”；未完成且失败 0 次
+        // 显示“未完成”。图片同步读 auto_spider() 每次跑完写的
+        // _sky_spider_last（成功/失败/跳过数 + 时间）；从未同步过显示“未同步”。
+        $recent_posts = get_posts(['post_type' => 'post', 'post_status' => 'publish', 'numberposts' => 10, 'orderby' => 'date', 'order' => 'DESC']);
+        ?>
+        <div class="sky-card" style="margin-top: 20px;">
+            <div class="sky-card-title">📋 最近文章处理状态</div>
+            <?php if (empty($recent_posts)) : ?>
+                <p style="color: var(--sky-text-muted); font-size: 13px;">暂无已发布文章。</p>
+            <?php else : ?>
+            <table class="sky-health-table">
+                <tr>
+                    <th style="text-align: left; padding: 10px 0; border-bottom: 1px solid var(--sky-border); color: var(--sky-text-muted); font-size: 13px;">标题</th>
+                    <th style="text-align: left; padding: 10px 0; border-bottom: 1px solid var(--sky-border); color: var(--sky-text-muted); font-size: 13px;">发布时间</th>
+                    <th style="text-align: left; padding: 10px 0; border-bottom: 1px solid var(--sky-border); color: var(--sky-text-muted); font-size: 13px;">SEO 状态</th>
+                    <th style="text-align: left; padding: 10px 0; border-bottom: 1px solid var(--sky-border); color: var(--sky-text-muted); font-size: 13px;">图片同步</th>
+                </tr>
+                <?php foreach ($recent_posts as $rp) :
+                    $rp_id = (int)$rp->ID;
+                    $seo_done = get_post_meta($rp_id, '_sky_seo_done', true);
+                    $seo_fails = (int)get_post_meta($rp_id, '_sky_seo_fail_count', true);
+                    if (!empty($seo_done)) { $seo_label = '已完成'; $seo_cls = 'ok'; }
+                    elseif ($seo_fails >= 1) { $seo_label = '失败×' . $seo_fails . ' 次'; $seo_cls = 'error'; }
+                    else { $seo_label = '未完成'; $seo_cls = ''; }
+                    $spider = get_post_meta($rp_id, '_sky_spider_last', true);
+                    if (is_array($spider) && isset($spider['success'])) {
+                        $sp_label = '成功 ' . (int)$spider['success'] . ' / 失败 ' . (int)($spider['failed'] ?? 0);
+                        $sp_cls = ((int)($spider['failed'] ?? 0) > 0) ? 'error' : '';
+                        $sp_time = !empty($spider['time']) ? date('Y-m-d H:i', (int)$spider['time']) : '';
+                    } else {
+                        $sp_label = '未同步'; $sp_cls = ''; $sp_time = '';
+                    }
+                    $rp_date = !empty($rp->post_date) ? date('Y-m-d H:i', strtotime($rp->post_date)) : '—';
+                ?>
+                <tr>
+                    <td style="padding: 10px 0; border-bottom: 1px solid var(--sky-border); font-size: 13px;">
+                        <a href="<?php echo esc_attr(admin_url('post.php?post=' . $rp_id . '&action=edit')); ?>"><?php echo esc_html($rp->post_title); ?></a>
+                    </td>
+                    <td style="padding: 10px 0; border-bottom: 1px solid var(--sky-border); font-size: 13px; color: var(--sky-text-muted);"><?php echo esc_html($rp_date); ?></td>
+                    <td style="padding: 10px 0; border-bottom: 1px solid var(--sky-border); font-size: 13px;">
+                        <?php if ($seo_cls !== '') : ?><span class="sky-status-<?php echo $seo_cls; ?>"><?php echo esc_html($seo_label); ?></span><?php else : ?><?php echo esc_html($seo_label); ?><?php endif; ?>
+                    </td>
+                    <td style="padding: 10px 0; border-bottom: 1px solid var(--sky-border); font-size: 13px;">
+                        <?php if ($sp_cls !== '') : ?><span class="sky-status-<?php echo $sp_cls; ?>"><?php echo esc_html($sp_label); ?></span><?php else : ?><?php echo esc_html($sp_label); ?><?php endif; ?><?php if ($sp_time !== '') : ?> <span style="color: var(--sky-text-muted); font-size: 12px;"><?php echo esc_html($sp_time); ?></span><?php endif; ?>
+                    </td>
+                </tr>
+                <?php endforeach; ?>
+            </table>
+            <?php endif; ?>
+        </div>
 
         <style>@media (max-width: 480px) { .sky-dashboard-grid { grid-template-columns: 1fr !important; } }</style>
         <div class="sky-dashboard-grid" style="display:grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-top: 20px;">
@@ -527,12 +660,35 @@ class Skyline_Admin {
                             </span>
                         </td>
                     </tr>
+                    <?php
+                    // D3：定时任务健康行——下次触发 + 待处理 Skyline 任务数，
+                    // 有逾期任务标红（红字样式与健康表一致）。统计口径见
+                    // Skyline_OSS_Mod::cron_health()（infra.php，cron 注册旁）。
+                    $cron_health = (class_exists('Skyline_OSS_Mod') && method_exists('Skyline_OSS_Mod', 'cron_health'))
+                        ? Skyline_OSS_Mod::cron_health() : null;
+                    ?>
+                    <tr>
+                        <td class="sky-health-label">定时任务（wp-cron）</td>
+                        <td class="sky-health-val">
+                            <?php if ($cron_health === null) : ?>
+                                统计不可用（OSS 模块未加载）
+                            <?php elseif ($cron_health['pending'] === 0) : ?>
+                                无待处理任务
+                            <?php else : ?>
+                                下次 <?php echo esc_html(date('Y-m-d H:i', (int)$cron_health['next_ts'])); ?> · 待处理 <?php echo (int)$cron_health['pending']; ?> 个
+                                <?php if ($cron_health['overdue'] > 0) : ?>
+                                    <span class="sky-status-error">⚠️ 逾期 <?php echo (int)$cron_health['overdue']; ?> 个</span>
+                                <?php endif; ?>
+                            <?php endif; ?>
+                        </td>
+                    </tr>
                 </table>
             </div>
             
             <div class="sky-card">
                 <div class="sky-card-title">📜 更新历史</div>
                 <div style="font-size: 13px; color: var(--sky-text-muted); line-height: 1.8;">
+                    <b>v2.2.0</b> - API 厂商预设下拉 + 模型联动（7 家 + 自定义，已存配置自动反推厂商）；前台聊天报错按原因区分（504 超时/403/60 秒超时/断网）<br>
                     <b>v2.1.1</b> - 审核遗留小尾巴全修：预览防 XSS、手动同步补排除检查、英文 Slug 不带中文人设、每日上限按本地天重置、WebP 原图删失败可重试、生图端点安全默认值；重新保存复活已放弃的自动 SEO、接口报错带出真实 message<br>
                     <b>v2.1.0</b> - 聊天面板美化 + WebP 转换 + 图片同步自动/手动切换 + 看板娘气泡重做；审核 61 项全修（wp-cron 饿死、保存假成功、API 错误统计、9 个摆设开关等）<br>
                     <b>v2.0.0</b> - 旗舰级架构重建，引入企业级视觉语言<br>
@@ -570,7 +726,7 @@ class Skyline_Admin {
         $defs = [];
         if ($current_tab === 'ai') {
             $defs = [
-                '🔌 接口配置' => ['api_base', 'api_img_base', 'api_key', 'chat_model', 'image_model', 'system_prompt'],
+                '🔌 接口配置' => ['api_vendor', 'api_base', 'api_img_base', 'api_key', 'chat_model', 'image_model', 'system_prompt'],
                 '🤖 悬浮助手' => ['robot_enable', 'robot_only_logged', 'robot_img'],
                 '🛡️ 可信代理' => ['trusted_proxy_ips'],
             ];
@@ -602,8 +758,31 @@ class Skyline_Admin {
 
     private function render_ai_tab($schema, $nav_items) {
         $current_tab = 'ai';
+        // v2.2.0：厂商下拉的选中态按已存 api_base 的 host 反推（旧配置没有
+        // api_vendor 键也能对上；对不上落“自定义”并保留原值），不以 schema
+        // 默认值 siliconflow 为准；两个模型 datalist 同样按反推出的厂商填充。
+        // 只在渲染时算，不写库、不覆盖用户已存的自定义值；切厂商的联动只
+        // 在用户主动改下拉时发生（见 assets/js/admin.js），加载页面不改值。
+        $vendor_key = Skyline_Core::detect_api_vendor($this->core->get_opt('api_base', ''));
+        $vendors = Skyline_Core::get_api_vendors();
+        if (!isset($vendors[$vendor_key])) $vendor_key = 'custom';
         ?>
-        <div class="sky-settings-grid">
+        <?php // v2.2.0 收口：Prompt 模板库提到本页最前面（首屏可见）——
+              // 原来在设置网格与聊天记录之间，首屏之外；只挪位置，结构、
+              // id 与 JS（loadPrompts/savePromptTemplate）一字不动。 ?>
+        <div class="sky-card">
+            <div class="sky-card-title">📋 Prompt 模板库</div>
+            <div id="sky-prompt-list"></div>
+            <div style="margin-top: 16px; padding: 16px; background: var(--sky-bg); border-radius: 8px;">
+                <input type="text" id="new-prompt-name" placeholder="模板名称" style="width: 280px; max-width: 100%; box-sizing: border-box;">
+                <textarea id="new-prompt-template" rows="4" style="width: 100%; margin-top: 8px;" placeholder="Prompt 模板内容..."></textarea>
+                <button type="button" class="button button-primary" onclick="savePromptTemplate()" style="margin-top: 8px;">
+                    + 保存新模板
+                </button>
+            </div>
+        </div>
+
+        <div class="sky-settings-grid sky-tab-ai">
             <?php
             $current_group_items = [];
             foreach ($schema as $key => $cfg) {
@@ -622,6 +801,9 @@ class Skyline_Admin {
                         $key = $item['key'];
                         $cfg = $item['cfg'];
                         $val = $this->core->get_opt($key);
+                        if ($key === 'api_vendor') $val = $vendor_key;
+                        if ($key === 'chat_model') $cfg['options'] = $vendors[$vendor_key]['chat_models'];
+                        if ($key === 'image_model') $cfg['options'] = $vendors[$vendor_key]['image_models'];
                     ?>
                         <div class="sky-field-row">
                             <div class="sky-field-info">
@@ -639,16 +821,62 @@ class Skyline_Admin {
             <?php endforeach; ?>
         </div>
 
+        <?php // v2.2.0：厂商表以 JSON 嵌在页面里，供 assets/js/admin.js 做下拉联动；纯 PHP json_encode，不依赖 WP 函数。 ?>
+        <script type="application/json" id="sky-api-vendors"><?php echo json_encode($vendors, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT); ?></script>
+
+        <?php
+        // A1：最近聊天记录——读 core 的 skyline_ai_chat_log option（新记录
+        // 在前，上限 50 条、超 30 天的写入时已清理）。失败行在“回答摘要”
+        // 列显示简短错误（不含密钥与完整响应体），状态列只分成功/失败。
+        // 注意：客户端“网络错误”（fetch 失败、EdgeOne 504、60 秒超时）
+        // 根本到不了服务端 handler，记不进这张表——卡片下方已注明此局限。
+        // 清空按钮是外层表单的 submit（表单 POST + 同表单 nonce，不写新 JS）；
+        // 处理见 handle_settings() 顶部的 skyline_clear_chat_log 分支。
+        $chat_log = method_exists($this->core, 'get_chat_log') ? $this->core->get_chat_log() : [];
+        if (!is_array($chat_log)) $chat_log = [];
+        ?>
         <div class="sky-card" style="margin-top: 24px;">
-            <div class="sky-card-title">📋 Prompt 模板库</div>
-            <div id="sky-prompt-list"></div>
-            <div style="margin-top: 16px; padding: 16px; background: var(--sky-bg); border-radius: 8px;">
-                <input type="text" id="new-prompt-name" placeholder="模板名称" style="width: 280px; max-width: 100%; box-sizing: border-box;">
-                <textarea id="new-prompt-template" rows="4" style="width: 100%; margin-top: 8px;" placeholder="Prompt 模板内容..."></textarea>
-                <button type="button" class="button button-primary" onclick="savePromptTemplate()" style="margin-top: 8px;">
-                    + 保存新模板
+            <div class="sky-card-title">
+                💬 最近聊天记录
+                <button type="submit" name="skyline_clear_chat_log" value="1" class="button">
+                    🗑️ 清空记录
                 </button>
             </div>
+            <?php if (empty($chat_log)) : ?>
+                <p style="color: var(--sky-text-muted); font-size: 13px;">暂无聊天记录。访客通过前台悬浮助手发起的聊天会在这里留一条记录（问题、回答摘要、耗时与成败）。</p>
+            <?php else : ?>
+            <table class="sky-health-table">
+                <tr>
+                    <th style="text-align: left; padding: 10px 0; border-bottom: 1px solid var(--sky-border); color: var(--sky-text-muted); font-size: 13px;">时间</th>
+                    <th style="text-align: left; padding: 10px 0; border-bottom: 1px solid var(--sky-border); color: var(--sky-text-muted); font-size: 13px;">问题</th>
+                    <th style="text-align: left; padding: 10px 0; border-bottom: 1px solid var(--sky-border); color: var(--sky-text-muted); font-size: 13px;">回答摘要</th>
+                    <th style="text-align: left; padding: 10px 0; border-bottom: 1px solid var(--sky-border); color: var(--sky-text-muted); font-size: 13px;">耗时</th>
+                    <th style="text-align: left; padding: 10px 0; border-bottom: 1px solid var(--sky-border); color: var(--sky-text-muted); font-size: 13px;">状态</th>
+                </tr>
+                <?php foreach ($chat_log as $cl_entry) :
+                    if (!is_array($cl_entry)) continue;
+                    $cl_time = !empty($cl_entry['time']) ? date('Y-m-d H:i', (int)$cl_entry['time']) : '—';
+                    $cl_q = (string)($cl_entry['question'] ?? '');
+                    $cl_ok = (($cl_entry['status'] ?? '') === 'ok');
+                    $cl_reply = $cl_ok ? (string)($cl_entry['reply'] ?? '') : (string)($cl_entry['error'] ?? '');
+                    $cl_ms = (int)($cl_entry['ms'] ?? 0);
+                    $cl_dur = $cl_ms >= 1000 ? round($cl_ms / 1000, 1) . ' 秒' : $cl_ms . ' 毫秒';
+                ?>
+                <tr>
+                    <td style="padding: 10px 0; border-bottom: 1px solid var(--sky-border); font-size: 13px; color: var(--sky-text-muted); white-space: nowrap;"><?php echo esc_html($cl_time); ?></td>
+                    <td style="padding: 10px 0; border-bottom: 1px solid var(--sky-border); font-size: 13px;"><?php echo esc_html($cl_q); ?></td>
+                    <td style="padding: 10px 0; border-bottom: 1px solid var(--sky-border); font-size: 13px;"><?php echo $cl_reply !== '' ? esc_html($cl_reply) : '<span style="color: var(--sky-text-muted);">—</span>'; ?></td>
+                    <td style="padding: 10px 0; border-bottom: 1px solid var(--sky-border); font-size: 13px; color: var(--sky-text-muted); white-space: nowrap;"><?php echo esc_html($cl_dur); ?></td>
+                    <td style="padding: 10px 0; border-bottom: 1px solid var(--sky-border); font-size: 13px;">
+                        <?php if ($cl_ok) : ?><span class="sky-status-ok">✅ 成功</span><?php else : ?><span class="sky-status-error">❌ 失败</span><?php endif; ?>
+                    </td>
+                </tr>
+                <?php endforeach; ?>
+            </table>
+            <?php endif; ?>
+            <p style="color: var(--sky-text-muted); font-size: 12px; margin-top: 8px;">
+                仅保留最近 50 条、30 天内的记录；回答只存前 200 字摘要，IP 只存哈希。注意：访客浏览器侧的“网络错误”（请求发不出去、EdgeOne 504、60 秒超时）到不了服务器，记不进这张表；这里只覆盖到达服务端的聊天。
+            </p>
         </div>
         <?php
     }
@@ -697,7 +925,7 @@ class Skyline_Admin {
         <div class="sky-card">
             <div class="sky-card-title">
                 📜 系统日志
-                <button type="button" class="button" onclick="clearLogs()" style="float: right;">
+                <button type="button" class="button" onclick="clearLogs()">
                     🗑️ 清空日志
                 </button>
             </div>
@@ -721,7 +949,7 @@ class Skyline_Admin {
 
     private function render_settings_tab($current_tab, $schema, $nav_items) {
         ?>
-        <div class="sky-settings-grid">
+        <div class="sky-settings-grid sky-tab-<?php echo esc_attr($current_tab); ?>">
             <?php
             $current_group_items = [];
             foreach ($schema as $key => $cfg) {
@@ -736,11 +964,11 @@ class Skyline_Admin {
                     <div class="sky-setting-header">
                         <?php echo $group['title'] !== null ? esc_html($group['title']) : '⚙️ ' . $nav_items[$current_tab]['label']; ?>
                         <?php if ($current_tab === 'oss' && $group_index === 0): ?>
-                            <button type="button" class="button button-primary" onclick="testService('sky_test_oss', this)" style="float: right; margin-top: -4px;">
+                            <button type="button" class="button button-primary" onclick="testService('sky_test_oss', this)">
                                 🔌 测试 OSS 连接
                             </button>
                         <?php elseif ($current_tab === 'speed' && $group_index === 0): ?>
-                            <button type="button" class="button button-primary" onclick="testService('sky_test_redis', this)" style="float: right; margin-top: -4px;">
+                            <button type="button" class="button button-primary" onclick="testService('sky_test_redis', this)">
                                 🔌 测试 Redis 连接
                             </button>
                         <?php endif; ?>
@@ -767,6 +995,12 @@ class Skyline_Admin {
         </div>
         <?php if ($current_tab === 'speed'): ?>
             <?php $this->render_webp_batch_card(); ?>
+        <?php endif; ?>
+        <?php if ($current_tab === 'spider'): ?>
+            <?php $this->render_spider_batch_card(); ?>
+        <?php endif; ?>
+        <?php if ($current_tab === 'seo'): ?>
+            <?php $this->render_seo_batch_card(); ?>
         <?php endif; ?>
         <?php if ($current_tab === 'oss'): ?>
             <?php $this->render_pending_delete_queue(); ?>
@@ -946,6 +1180,323 @@ class Skyline_Admin {
         <?php
     }
 
+    // C1：全站外链图片体检 + 批量同步卡片（内容同步页）。先只读扫描，
+    // 列出含外链图的文章（标题点进编辑页、外链图张数、涉及域名），再一
+    // 键分批同步（复用 auto_spider，每批 5 篇、可随时停）。前端轮询模式
+    // 照抄 WebP 批量卡片（扫描拿 id 列表 → 每批 POST → 进度条 + 停止标记）。
+    private function render_spider_batch_card() {
+        ?>
+        <div class="sky-card" style="margin-top: 20px;">
+            <div class="sky-card-title">🕷️ 全站外链图片体检 + 批量同步</div>
+            <p style="color: var(--sky-text-muted); line-height: 1.6; font-size: 14px;">
+                先扫描全站已发布文章，列出含外链图片的文章（标题、外链图张数、涉及域名），再一键分批同步。
+                同步复用发布时自动同步的同一套逻辑（本站与 COS 图片、排除域名的图不计入外链），结果记在每篇文章的最近一次同步记录里（与看板同一口径）。
+                每批 5 篇，可随时停止；已处理的不受影响。
+            </p>
+            <div style="display: flex; gap: 10px; flex-wrap: wrap;">
+                <button type="button" class="button button-primary" id="sky-spider-scan-btn" onclick="skySpiderScan()">
+                    🔍 扫描外链图片
+                </button>
+                <button type="button" class="button button-primary" id="sky-spider-start-btn" onclick="skySpiderStart()" disabled>
+                    ▶️ 开始批量同步
+                </button>
+                <button type="button" class="button" id="sky-spider-stop-btn" onclick="skySpiderStop()" disabled>
+                    ⏹️ 停止
+                </button>
+            </div>
+            <div id="sky-spider-status" style="margin-top: 12px; font-size: 13px;"></div>
+            <div id="sky-spider-progress" style="display: none; margin-top: 8px; height: 10px; background: #e5e7eb; border-radius: 999px; overflow: hidden;">
+                <div id="sky-spider-bar" style="height: 100%; width: 0%; background: #6366f1;"></div>
+            </div>
+            <div id="sky-spider-list-wrap" style="display: none; margin-top: 12px; max-height: 320px; overflow-y: auto;">
+                <table class="widefat striped">
+                    <thead><tr><th>文章（点标题进编辑页）</th><th style="width: 90px;">外链图</th><th>涉及域名</th></tr></thead>
+                    <tbody id="sky-spider-list"></tbody>
+                </table>
+            </div>
+            <ul id="sky-spider-failures" style="margin-top: 10px; font-size: 13px; color: #b91c1c; list-style: disc inside;"></ul>
+        </div>
+        <script>
+        var skySpiderIds = [], skySpiderPos = 0, skySpiderTotal = 0, skySpiderDone = 0, skySpiderOk = 0, skySpiderFail = 0, skySpiderSkip = 0, skySpiderOkImgs = 0, skySpiderFailImgs = 0, skySpiderStopping = false;
+        function skySpiderSetText(id, txt) { var el = document.getElementById(id); if (el) el.textContent = txt; }
+        function skySpiderScan() {
+            skySpiderSetText('sky-spider-status', '正在扫描全站文章…');
+            jQuery.post(ajaxurl, {
+                action: 'sky_spider_scan',
+                _ajax_nonce: '<?php echo wp_create_nonce('skyline_ajax_nonce'); ?>'
+            }, function(r) {
+                if (!r.success) { skySpiderSetText('sky-spider-status', '❌ 扫描失败：' + (r.data || '未知错误')); return; }
+                var d = r.data || {};
+                skySpiderIds = (d.items || []).map(function(it) { return it.id; });
+                skySpiderTotal = skySpiderIds.length;
+                skySpiderPos = 0; skySpiderDone = 0; skySpiderOk = 0; skySpiderFail = 0; skySpiderSkip = 0; skySpiderOkImgs = 0; skySpiderFailImgs = 0;
+                var tbody = document.getElementById('sky-spider-list');
+                tbody.innerHTML = '';
+                (d.items || []).forEach(function(it) {
+                    var tr = document.createElement('tr');
+                    var tdT = document.createElement('td');
+                    var a = document.createElement('a');
+                    a.href = 'post.php?post=' + it.id + '&action=edit';
+                    a.textContent = it.title || ('文章 #' + it.id);
+                    tdT.appendChild(a);
+                    var tdC = document.createElement('td'); tdC.textContent = it.count + ' 张';
+                    var tdD = document.createElement('td'); tdD.textContent = (it.domains || []).join(', ');
+                    tr.appendChild(tdT); tr.appendChild(tdC); tr.appendChild(tdD);
+                    tbody.appendChild(tr);
+                });
+                document.getElementById('sky-spider-list-wrap').style.display = skySpiderTotal ? 'block' : 'none';
+                var extra = d.truncated ? '（仅列出前 ' + skySpiderTotal + ' 篇，处理完再重扫）' : '';
+                skySpiderSetText('sky-spider-status', '共扫描 ' + (d.total_scanned || 0) + ' 篇文章，发现 ' + (d.total_posts || 0) + ' 篇含外链图、共 ' + (d.total_images || 0) + ' 张。' + extra);
+                document.getElementById('sky-spider-start-btn').disabled = skySpiderTotal === 0;
+                document.getElementById('sky-spider-progress').style.display = skySpiderTotal ? 'block' : 'none';
+                document.getElementById('sky-spider-bar').style.width = '0%';
+                document.getElementById('sky-spider-failures').innerHTML = '';
+            }).fail(function() { skySpiderSetText('sky-spider-status', '❌ 扫描请求失败（网络错误）。'); });
+        }
+        function skySpiderStart() {
+            if (!skySpiderIds.length) return;
+            skySpiderStopping = false;
+            document.getElementById('sky-spider-start-btn').disabled = true;
+            document.getElementById('sky-spider-scan-btn').disabled = true;
+            document.getElementById('sky-spider-stop-btn').disabled = false;
+            skySpiderNext();
+        }
+        function skySpiderStop() {
+            skySpiderStopping = true;
+            skySpiderSetText('sky-spider-status', '已停止：已处理 ' + skySpiderDone + ' / ' + skySpiderTotal + ' 篇，同步成功 ' + skySpiderOk + ' 篇，失败 ' + skySpiderFail + ' 篇，跳过 ' + skySpiderSkip + ' 篇。');
+            document.getElementById('sky-spider-start-btn').disabled = false;
+            document.getElementById('sky-spider-scan-btn').disabled = false;
+            document.getElementById('sky-spider-stop-btn').disabled = true;
+        }
+        function skySpiderNext() {
+            if (skySpiderStopping) return;
+            if (skySpiderPos >= skySpiderIds.length) {
+                skySpiderSetText('sky-spider-status', '✅ 全部完成：共 ' + skySpiderTotal + ' 篇，同步成功 ' + skySpiderOk + ' 篇（成功 ' + skySpiderOkImgs + ' 张 / 失败 ' + skySpiderFailImgs + ' 张），失败 ' + skySpiderFail + ' 篇，跳过 ' + skySpiderSkip + ' 篇。');
+                document.getElementById('sky-spider-start-btn').disabled = false;
+                document.getElementById('sky-spider-scan-btn').disabled = false;
+                document.getElementById('sky-spider-stop-btn').disabled = true;
+                return;
+            }
+            var batch = skySpiderIds.slice(skySpiderPos, skySpiderPos + 5);
+            jQuery.post(ajaxurl, {
+                action: 'sky_spider_batch',
+                ids: batch,
+                _ajax_nonce: '<?php echo wp_create_nonce('skyline_ajax_nonce'); ?>'
+            }, function(r) {
+                if (!r.success) {
+                    skySpiderSetText('sky-spider-status', '❌ 批量同步失败：' + (r.data || '未知错误'));
+                    document.getElementById('sky-spider-start-btn').disabled = false;
+                    document.getElementById('sky-spider-scan-btn').disabled = false;
+                    document.getElementById('sky-spider-stop-btn').disabled = true;
+                    return;
+                }
+                var results = r.data.results || [];
+                results.forEach(function(it) {
+                    skySpiderDone++;
+                    if (it.status === 'done') {
+                        skySpiderOk++;
+                        skySpiderOkImgs += (it.success || 0);
+                        skySpiderFailImgs += (it.failed || 0);
+                    } else if (it.status === 'failed') {
+                        skySpiderFail++;
+                        var li = document.createElement('li');
+                        li.textContent = '《' + (it.title || ('文章 #' + it.id)) + '》：' + (it.reason || '同步失败');
+                        document.getElementById('sky-spider-failures').appendChild(li);
+                    } else if (it.status === 'skipped') {
+                        skySpiderSkip++;
+                    }
+                });
+                skySpiderPos += results.length;
+                document.getElementById('sky-spider-bar').style.width = (skySpiderTotal ? Math.round(skySpiderDone / skySpiderTotal * 100) : 0) + '%';
+                skySpiderSetText('sky-spider-status', '处理中：' + skySpiderDone + ' / ' + skySpiderTotal + ' 篇，同步成功 ' + skySpiderOk + ' 篇，失败 ' + skySpiderFail + ' 篇，跳过 ' + skySpiderSkip + ' 篇。');
+                skySpiderNext();
+            }).fail(function() {
+                skySpiderSetText('sky-spider-status', '❌ 批量请求失败（网络错误），已停止。');
+                document.getElementById('sky-spider-start-btn').disabled = false;
+                document.getElementById('sky-spider-scan-btn').disabled = false;
+                document.getElementById('sky-spider-stop-btn').disabled = true;
+            });
+        }
+        </script>
+        <?php
+    }
+
+    // S1：历史文章 SEO 批量补全卡片（搜索优化页）。先只读扫描，列出缺
+    // 英文 Slug / 缺摘要 / 缺标签的文章（每篇标清缺哪几项），再分批调
+    // auto_seo_meta 补全；已有项跳过不重算。成本写在卡片上：每篇最多
+    // 3 次 AI 调用，全站 3,634 篇全跑约 1 万次——默认只勾选前 20 篇试
+    // 跑，每批篇数可调（默认 5，上限 20），可随时停。前端轮询模式照抄
+    // WebP 批量卡片。
+    private function render_seo_batch_card() {
+        ?>
+        <div class="sky-card" style="margin-top: 20px;">
+            <div class="sky-card-title">🚀 历史文章 SEO 批量补全</div>
+            <p style="color: var(--sky-text-muted); line-height: 1.6; font-size: 14px;">
+                扫描缺英文 Slug / 缺摘要 / 缺标签的老文章，分批调自动 SEO 补全；已有项跳过、不重算，已手动设好的英文 Slug 不会被覆盖。
+            </p>
+            <p style="color: var(--sky-text-muted); line-height: 1.6; font-size: 13px;">
+                💰 成本说明：每篇最多 3 次 AI 调用（标签、Slug、摘要各 1 次；缺哪项补哪项，不缺的不调用）。
+                全站 3,634 篇文章若全部补全，约需 1 万次调用——请先用默认勾选的 20 篇试效果，确认没问题再逐步放大；批量可随时停止，已处理的不受影响。
+            </p>
+            <div style="display: flex; gap: 10px; flex-wrap: wrap; align-items: center;">
+                <button type="button" class="button button-primary" id="sky-seo-scan-btn" onclick="skySeoScan()">
+                    🔍 扫描缺失 SEO 的文章
+                </button>
+                <button type="button" class="button button-primary" id="sky-seo-start-btn" onclick="skySeoStart()" disabled>
+                    ▶️ 开始批量补全
+                </button>
+                <button type="button" class="button" id="sky-seo-stop-btn" onclick="skySeoStop()" disabled>
+                    ⏹️ 停止
+                </button>
+                <label style="font-size: 13px; color: var(--sky-text-muted);">
+                    每批 <input type="number" id="sky-seo-batch-size" value="5" min="1" max="20" step="1" style="width: 64px;"> 篇（1–20）
+                </label>
+            </div>
+            <div id="sky-seo-status" style="margin-top: 12px; font-size: 13px;"></div>
+            <div id="sky-seo-cost" style="margin-top: 4px; font-size: 13px; color: var(--sky-text-muted);"></div>
+            <div id="sky-seo-progress" style="display: none; margin-top: 8px; height: 10px; background: #e5e7eb; border-radius: 999px; overflow: hidden;">
+                <div id="sky-seo-bar" style="height: 100%; width: 0%; background: #6366f1;"></div>
+            </div>
+            <div id="sky-seo-list-wrap" style="display: none; margin-top: 12px; max-height: 320px; overflow-y: auto;">
+                <table class="widefat striped">
+                    <thead><tr><th style="width: 36px;"><input type="checkbox" id="sky-seo-check-all" onclick="skySeoToggleAll(this.checked)" title="全选 / 取消全选"></th><th>文章（点标题进编辑页）</th><th>缺失项</th></tr></thead>
+                    <tbody id="sky-seo-list"></tbody>
+                </table>
+            </div>
+            <ul id="sky-seo-failures" style="margin-top: 10px; font-size: 13px; color: #b91c1c; list-style: disc inside;"></ul>
+        </div>
+        <script>
+        var skySeoIds = [], skySeoPos = 0, skySeoTotal = 0, skySeoDone = 0, skySeoOk = 0, skySeoPartial = 0, skySeoFail = 0, skySeoSkip = 0, skySeoStopping = false;
+        var skySeoMissingLabel = {slug: '缺 Slug', excerpt: '缺摘要', tags: '缺标签'};
+        function skySeoSetText(id, txt) { var el = document.getElementById(id); if (el) el.textContent = txt; }
+        function skySeoCheckedIds() {
+            var ids = [];
+            document.querySelectorAll('.sky-seo-check:checked').forEach(function(cb) { ids.push(parseInt(cb.value, 10)); });
+            return ids;
+        }
+        function skySeoToggleAll(checked) {
+            document.querySelectorAll('.sky-seo-check').forEach(function(cb) { cb.checked = checked; });
+        }
+        function skySeoScan() {
+            skySeoSetText('sky-seo-status', '正在扫描全站文章…');
+            jQuery.post(ajaxurl, {
+                action: 'sky_seo_scan',
+                _ajax_nonce: '<?php echo wp_create_nonce('skyline_ajax_nonce'); ?>'
+            }, function(r) {
+                if (!r.success) { skySeoSetText('sky-seo-status', '❌ 扫描失败：' + (r.data || '未知错误')); return; }
+                var d = r.data || {};
+                var items = d.items || [];
+                skySeoPos = 0; skySeoDone = 0; skySeoOk = 0; skySeoPartial = 0; skySeoFail = 0; skySeoSkip = 0;
+                var tbody = document.getElementById('sky-seo-list');
+                tbody.innerHTML = '';
+                items.forEach(function(it, idx) {
+                    var tr = document.createElement('tr');
+                    var tdCheck = document.createElement('td');
+                    var cb = document.createElement('input');
+                    cb.type = 'checkbox'; cb.className = 'sky-seo-check'; cb.value = it.id;
+                    // 默认只勾选前 20 篇试跑（与 Skyline_Content::SEO_TRIAL_COUNT 一致），不默认全选。
+                    cb.checked = idx < 20;
+                    tdCheck.appendChild(cb);
+                    var tdT = document.createElement('td');
+                    var a = document.createElement('a');
+                    a.href = 'post.php?post=' + it.id + '&action=edit';
+                    a.textContent = it.title || ('文章 #' + it.id);
+                    tdT.appendChild(a);
+                    var tdM = document.createElement('td');
+                    tdM.textContent = (it.missing || []).map(function(m) { return skySeoMissingLabel[m] || m; }).join('、');
+                    tr.appendChild(tdCheck); tr.appendChild(tdT); tr.appendChild(tdM);
+                    tbody.appendChild(tr);
+                });
+                document.getElementById('sky-seo-list-wrap').style.display = items.length ? 'block' : 'none';
+                var extra = d.truncated ? '（仅列出前 ' + items.length + ' 篇，处理完再重扫）' : '';
+                skySeoSetText('sky-seo-status', '共扫描 ' + (d.total_scanned || 0) + ' 篇文章，发现 ' + (d.total_posts || 0) + ' 篇缺 SEO 项。' + extra);
+                skySeoSetText('sky-seo-cost', '本次缺项 ' + (d.total_posts || 0) + ' 篇，全部补全约需最多 ' + ((d.total_posts || 0) * 3) + ' 次 AI 调用（每篇最多 3 次）；默认已勾选前 20 篇，先试效果。');
+                document.getElementById('sky-seo-start-btn').disabled = items.length === 0;
+                document.getElementById('sky-seo-progress').style.display = items.length ? 'block' : 'none';
+                document.getElementById('sky-seo-bar').style.width = '0%';
+                document.getElementById('sky-seo-failures').innerHTML = '';
+                var checkAll = document.getElementById('sky-seo-check-all');
+                if (checkAll) checkAll.checked = false;
+            }).fail(function() { skySeoSetText('sky-seo-status', '❌ 扫描请求失败（网络错误）。'); });
+        }
+        function skySeoStart() {
+            skySeoIds = skySeoCheckedIds();
+            if (!skySeoIds.length) { skySeoSetText('sky-seo-status', '请先勾选要补全的文章（默认勾选前 20 篇）。'); return; }
+            skySeoTotal = skySeoIds.length;
+            skySeoPos = 0; skySeoDone = 0; skySeoOk = 0; skySeoPartial = 0; skySeoFail = 0; skySeoSkip = 0;
+            skySeoStopping = false;
+            document.getElementById('sky-seo-start-btn').disabled = true;
+            document.getElementById('sky-seo-scan-btn').disabled = true;
+            document.getElementById('sky-seo-stop-btn').disabled = false;
+            skySeoNext();
+        }
+        function skySeoStop() {
+            skySeoStopping = true;
+            skySeoSetText('sky-seo-status', '已停止：已处理 ' + skySeoDone + ' / ' + skySeoTotal + ' 篇，全部补全 ' + skySeoOk + ' 篇，部分补全 ' + skySeoPartial + ' 篇，失败 ' + skySeoFail + ' 篇，跳过 ' + skySeoSkip + ' 篇。');
+            document.getElementById('sky-seo-start-btn').disabled = false;
+            document.getElementById('sky-seo-scan-btn').disabled = false;
+            document.getElementById('sky-seo-stop-btn').disabled = true;
+        }
+        function skySeoNext() {
+            if (skySeoStopping) return;
+            if (skySeoPos >= skySeoIds.length) {
+                skySeoSetText('sky-seo-status', '✅ 全部完成：共 ' + skySeoTotal + ' 篇，全部补全 ' + skySeoOk + ' 篇，部分补全 ' + skySeoPartial + ' 篇，失败 ' + skySeoFail + ' 篇，跳过 ' + skySeoSkip + ' 篇。');
+                document.getElementById('sky-seo-start-btn').disabled = false;
+                document.getElementById('sky-seo-scan-btn').disabled = false;
+                document.getElementById('sky-seo-stop-btn').disabled = true;
+                return;
+            }
+            var sizeInput = document.getElementById('sky-seo-batch-size');
+            var size = sizeInput ? parseInt(sizeInput.value, 10) : 5;
+            if (isNaN(size) || size < 1) size = 1;
+            if (size > 20) size = 20;
+            var batch = skySeoIds.slice(skySeoPos, skySeoPos + size);
+            jQuery.post(ajaxurl, {
+                action: 'sky_seo_batch',
+                ids: batch,
+                batch_size: size,
+                _ajax_nonce: '<?php echo wp_create_nonce('skyline_ajax_nonce'); ?>'
+            }, function(r) {
+                if (!r.success) {
+                    skySeoSetText('sky-seo-status', '❌ 批量补全失败：' + (r.data || '未知错误'));
+                    document.getElementById('sky-seo-start-btn').disabled = false;
+                    document.getElementById('sky-seo-scan-btn').disabled = false;
+                    document.getElementById('sky-seo-stop-btn').disabled = true;
+                    return;
+                }
+                var results = r.data.results || [];
+                results.forEach(function(it) {
+                    skySeoDone++;
+                    if (it.status === 'done') { skySeoOk++; }
+                    else if (it.status === 'partial') {
+                        skySeoPartial++;
+                        var liP = document.createElement('li');
+                        liP.textContent = '《' + (it.title || ('文章 #' + it.id)) + '》：部分补全，仍缺 ' + (it.missing || []).map(function(m) { return skySeoMissingLabel[m] || m; }).join('、');
+                        document.getElementById('sky-seo-failures').appendChild(liP);
+                    }
+                    else if (it.status === 'failed') {
+                        skySeoFail++;
+                        var li = document.createElement('li');
+                        li.textContent = '《' + (it.title || ('文章 #' + it.id)) + '》：' + (it.reason || '补全失败');
+                        document.getElementById('sky-seo-failures').appendChild(li);
+                    }
+                    else if (it.status === 'skipped') { skySeoSkip++; }
+                });
+                skySeoPos += results.length;
+                document.getElementById('sky-seo-bar').style.width = (skySeoTotal ? Math.round(skySeoDone / skySeoTotal * 100) : 0) + '%';
+                skySeoSetText('sky-seo-status', '处理中：' + skySeoDone + ' / ' + skySeoTotal + ' 篇，全部补全 ' + skySeoOk + ' 篇，部分补全 ' + skySeoPartial + ' 篇，失败 ' + skySeoFail + ' 篇，跳过 ' + skySeoSkip + ' 篇。');
+                skySeoNext();
+            }).fail(function() {
+                skySeoSetText('sky-seo-status', '❌ 批量请求失败（网络错误），已停止。');
+                document.getElementById('sky-seo-start-btn').disabled = false;
+                document.getElementById('sky-seo-scan-btn').disabled = false;
+                document.getElementById('sky-seo-stop-btn').disabled = true;
+            });
+        }
+        </script>
+        <?php
+    }
+
     // L15：number 字段的默认 min/max（schema 没写时用）。端口 1–65535、
     // DB 号 0–15、质量类 0–100、其余数量类下限 0、无明确上限。
     private function number_field_min($key) {
@@ -971,8 +1522,17 @@ class Skyline_Admin {
                 // M21：绝不把密钥原文回显进 value（页面源码即见明文，且 XSS
                 // 可从 DOM 直接读走）。留空表示不改；保存时空值不覆盖已有值
                 // （见 handle_settings 的 password 分支）。
-                echo '<div class="sky-field-input" style="width:100%;">';
-                echo '<input type="password" name="skyline_settings[' . esc_attr($key) . ']" value="" autocomplete="off" placeholder="留空表示不改">';
+                // v2.2.0 收口：① 加“显示/隐藏”切换（admin.js 的
+                // .sky-password-toggle 处理，只改 input 的 type，不改提交
+                // 值；因 value 恒为空，切换只用于核对刚键入的新值，已存值
+                // 永不进 DOM）；② 已存值与否只用“已配置/未配置”角标表示，
+                // 不把值写进页面（.sky-password-wrap 是 flex，角标与按钮
+                // 纵向居中对齐）。
+                $pw_configured = trim((string)$val) !== '';
+                echo '<div class="sky-field-input sky-password-wrap" style="width:100%;">';
+                echo '<input class="sky-password-input" type="password" id="sky-field-' . esc_attr($key) . '" name="skyline_settings[' . esc_attr($key) . ']" value="" autocomplete="off" placeholder="留空表示不改">';
+                echo '<button type="button" class="button sky-password-toggle" aria-label="显示密钥">👁 显示</button>';
+                echo '<span class="sky-status-badge' . ($pw_configured ? ' active' : '') . '">' . ($pw_configured ? '已配置' : '未配置') . '</span>';
                 echo '</div>';
                 break;
 
@@ -989,8 +1549,10 @@ class Skyline_Admin {
             case 'url':
                 // L15：url 字段用 type="url"，浏览器做格式校验、移动端出
                 // 网址键盘，不再走纯 text 输入框。
+                // v2.2.0 收口：title 悬停显示完整地址——输入框再宽也难一次
+                // 看全超长 URL，title 是兜底（值本身仍可横向滚动查看）。
                 echo '<div class="sky-field-input" style="width:100%;">';
-                echo '<input type="url" name="skyline_settings[' . esc_attr($key) . ']" value="' . esc_attr($val) . '">';
+                echo '<input type="url" id="sky-field-' . esc_attr($key) . '" name="skyline_settings[' . esc_attr($key) . ']" value="' . esc_attr($val) . '" title="' . esc_attr($val) . '">';
                 echo '</div>';
                 break;
                 
@@ -1034,7 +1596,7 @@ class Skyline_Admin {
                 
             case 'select':
                 echo '<div class="sky-field-input" style="width:100%;">';
-                echo '<select name="skyline_settings[' . esc_attr($key) . ']">';
+                echo '<select id="sky-field-' . esc_attr($key) . '" name="skyline_settings[' . esc_attr($key) . ']">';
                 foreach ($cfg['options'] as $opt_val => $opt_label) {
                     echo '<option value="' . esc_attr($opt_val) . '" ' . selected($val, $opt_val, false) . '>';
                     echo esc_html($opt_label);
@@ -1043,10 +1605,31 @@ class Skyline_Admin {
                 echo '</select>';
                 echo '</div>';
                 break;
+
+            case 'datalist':
+                // v2.2.0：可打字下拉（input + datalist）——既能点选预设模型，
+                // 也能直接输入厂商新出的模型名，绝不做成死下拉。$cfg['options']
+                // 是当前厂商的模型清单（render_ai_tab 按反推出的厂商注入）；
+                // 清单为空时（该厂商无绘图模型）不挂 list 属性，就是纯自由
+                // 输入。datalist 元素始终渲染（哪怕空），否则 JS 切厂商后
+                // 找不到节点、重建不了下拉。
+                $dl_opts = isset($cfg['options']) && is_array($cfg['options']) ? array_values($cfg['options']) : [];
+                $list_id = 'sky-list-' . $key;
+                echo '<div class="sky-field-input" style="width:100%;">';
+                // v2.2.0 收口：title 悬停显示完整模型名（同 url 分支的兜底）。
+                echo '<input type="text" id="sky-field-' . esc_attr($key) . '" name="skyline_settings[' . esc_attr($key) . ']" value="' . esc_attr($val) . '" title="' . esc_attr($val) . '"' . (!empty($dl_opts) ? ' list="' . esc_attr($list_id) . '"' : '') . '>';
+                echo '<datalist id="' . esc_attr($list_id) . '">';
+                foreach ($dl_opts as $o) {
+                    echo '<option value="' . esc_attr($o) . '"></option>';
+                }
+                echo '</datalist>';
+                echo '</div>';
+                break;
                 
             default:
                 echo '<div class="sky-field-input" style="width:100%;">';
-                echo '<input type="text" name="skyline_settings[' . esc_attr($key) . ']" value="' . esc_attr($val) . '">';
+                // v2.2.0 收口：title 悬停显示完整值（同 url 分支的兜底）。
+                echo '<input type="text" name="skyline_settings[' . esc_attr($key) . ']" value="' . esc_attr($val) . '" title="' . esc_attr($val) . '">';
                 echo '</div>';
                 break;
         }

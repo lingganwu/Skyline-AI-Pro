@@ -5,7 +5,30 @@ class Skyline_Content {
     // M5：爬虫下载单张图片的大小上限（10MB）。超过直接拒绝，不读进内存。
     private const SPIDER_MAX_IMAGE_BYTES = 10485760;
 
+    // C1/S1 批量：每批篇数与单次 AJAX 请求的墙钟预算（与 WebP 批量同款：
+    // 数量由服务端定死、不信任客户端，超时前停下、剩下的 ID 客户端下一
+    // 批重发）。C1 每批 5 篇（单篇最多同步 spider_max_img 张图，耗时比
+    // WebP 单张转换长）；S1 每篇最多 3 次 AI 调用，默认每批 5 篇、上限
+    // 20 篇（由批量卡片上的输入框调，服务端 clamp）。
+    public const SPIDER_BATCH_SIZE = 5;
+    public const SPIDER_BATCH_TIME_BUDGET = 25;
+    public const SEO_BATCH_SIZE_DEFAULT = 5;
+    public const SEO_BATCH_SIZE_MAX = 20;
+    public const SEO_BATCH_TIME_BUDGET = 25;
+    public const SEO_TRIAL_COUNT = 20; // S1 扫描后默认勾选前 20 篇试跑
+    public const SCAN_MAX_ITEMS = 1000; // C1/S1 扫描清单最多列出的篇数
+
+    // 后台批量入口（admin.php 的 AJAX 处理）要调本类的引擎方法：经此
+    // 取单例，不直接 new（构造器会重复注册钩子）。与 Skyline_OSS_Mod::
+    // instance() 同款模式。
+    private static $instance = null;
+    public static function instance() {
+        if (self::$instance === null) self::$instance = new self();
+        return self::$instance;
+    }
+
     public function __construct() {
+        self::$instance = $this;
         add_action('save_post', [$this, 'trigger_async_tasks'], 20, 2);
         add_action('skyline_async_spider', [$this, 'auto_spider']);
         add_action('skyline_async_seo', [$this, 'auto_seo_meta']); 
@@ -475,26 +498,10 @@ class Skyline_Content {
         return $this->is_host_spider_excluded($host, $this->get_spider_excluded_domains());
     }
 
-    public function auto_spider($pid) {
-        $post = get_post($pid);
-        if (!$post) return;
-
-        // R4：锁改存时间戳、10 分钟过期——fatal/超时/OOM 后锁不会永久锁死
-        // 该文章，过期锁可被下一次任务抢占。try/finally 保证任何返回路径
-        // （含 download_image 内抛 Error）都会清锁。旧版锁值是 1（无时间戳），
-        // 无法判断新旧，一律视为过期、可抢占，避免升级前一次崩溃留下的锁
-        // 永久锁死该文章。
-        $lock = get_post_meta($pid, '_sky_spider_processing', true);
-        if ($lock !== '' && $lock !== false && $lock !== null
-            && is_numeric($lock) && (int)$lock > 1000000000 && time() - (int)$lock < 600) {
-            return;
-        }
-        update_post_meta($pid, '_sky_spider_processing', time());
-
-        try {
-        $content = $post->post_content;
-        // R16：除 src/data-src 外再认 srcset（多倍图 URL 组）与 <video poster>；
-        // 同一 URL 同时出现在 src 与 srcset 时去重，只下载一次。
+    // C1：正文里图片候选 URL 的提取（src / data-src / srcset / video
+    // poster），去重。auto_spider 与 find_external_images 共用同一份
+    // 提取，扫描看到的与自动同步处理的是同一批 URL。
+    private function collect_image_candidates($content) {
         $candidates = [];
         preg_match_all('/(?:src|data-src)=[\'"]([^\'"]+)[\'"]/i', $content, $m);
         if (!empty($m[1])) $candidates = array_merge($candidates, $m[1]);
@@ -509,18 +516,13 @@ class Skyline_Content {
         }
         preg_match_all('/poster=[\'"]([^\'"]+)[\'"]/i', $content, $mp);
         if (!empty($mp[1])) $candidates = array_merge($candidates, $mp[1]);
-        $candidates = array_values(array_unique($candidates));
-        if(empty($candidates)) return;
+        return array_values(array_unique($candidates));
+    }
 
-        $site_domain = parse_url(get_site_url(), PHP_URL_HOST);
-        $success = 0;
-
+    // C1：已同步到 COS 的图片 host 列表（自定义域名与 bucket.endpoint），
+    // 与 auto_spider 原来的内联逻辑一致，抽出来供扫描共用。
+    private function get_oss_hosts() {
         $core = Skyline_Core::instance();
-        $max_img = intval($core->get_opt('spider_max_img', 20));
-        $processed_count = 0;
-
-        // 已同步到 COS 的图片不再当作外站图：否则每次保存文章都会把 COS 图重新
-        // 下载回本地、重新上传 COS，白白再走一遍“上传→删本地”循环。
         $oss_hosts = [];
         if ($core->get_opt('oss_enable')) {
             $oss_domain = trim((string)$core->get_opt('oss_domain'));
@@ -534,6 +536,165 @@ class Skyline_Content {
             $endpoint = trim((string)$core->get_opt('oss_endpoint'));
             if ($bucket !== '' && $endpoint !== '') $oss_hosts[] = strtolower($bucket . '.' . $endpoint);
         }
+        return $oss_hosts;
+    }
+
+    // C1：判断一个 URL 是否为需同步的外链图。复用 auto_spider 的同一套
+    // 排除逻辑（本站域名子串、data URI、COS host、spider_domains 排除域
+    // 名），不另写一套 host 判断——扫描与自动同步的口径必须一致。
+    private function is_external_image_url($url, $site_domain, $oss_hosts, $excluded_domains) {
+        if (strpos($url, $site_domain) !== false || strpos($url, 'data:image') !== false) return false;
+        $url_host = strtolower(parse_url($url, PHP_URL_HOST) ?: '');
+        if ($url_host !== '' && in_array($url_host, $oss_hosts, true)) return false;
+        if ($this->is_host_spider_excluded($url_host, $excluded_domains)) return false;
+        return true;
+    }
+
+    // C1：返回正文里全部外链图片 URL（去重）。本站图、data URI、COS 图、
+    // 排除域名的图都不算外链。
+    public function find_external_images($content) {
+        $candidates = $this->collect_image_candidates($content);
+        if (empty($candidates)) return [];
+        $site_domain = parse_url(get_site_url(), PHP_URL_HOST);
+        $oss_hosts = $this->get_oss_hosts();
+        $excluded_domains = $this->get_spider_excluded_domains();
+        $out = [];
+        foreach ($candidates as $url_raw) {
+            $url = html_entity_decode($url_raw);
+            if (!$this->is_external_image_url($url, $site_domain, $oss_hosts, $excluded_domains)) continue;
+            $out[] = $url;
+        }
+        return array_values(array_unique($out));
+    }
+
+    // C1：只读扫描全站已发布文章，列出含外链图的文章（标题、外链图张
+    // 数、涉及域名）。只读：不下载、不改正文、不写任何 meta。清单最多
+    // 列 SCAN_MAX_ITEMS 篇，超出时 truncated=true（先处理完这批再重扫，
+    // 已同步的文章下次扫描即掉出清单）。
+    public function scan_external_images() {
+        $ids = get_posts([
+            'post_type' => 'post',
+            'post_status' => 'publish',
+            'posts_per_page' => -1,
+            'fields' => 'ids',
+            'orderby' => 'ID',
+            'order' => 'ASC',
+        ]);
+        if (!is_array($ids)) $ids = [];
+        $items = [];
+        $affected = 0;
+        $total_images = 0;
+        $truncated = false;
+        foreach ($ids as $id) {
+            $post = get_post((int)$id);
+            if (!$post) continue;
+            $urls = $this->find_external_images($post->post_content ?? '');
+            if (empty($urls)) continue;
+            $affected++;
+            $total_images += count($urls);
+            if (count($items) >= self::SCAN_MAX_ITEMS) { $truncated = true; continue; }
+            $domains = [];
+            foreach ($urls as $u) {
+                $h = strtolower(parse_url($u, PHP_URL_HOST) ?: '');
+                if ($h !== '') $domains[] = $h;
+            }
+            $items[] = [
+                'id' => (int)$id,
+                'title' => $post->post_title,
+                'count' => count($urls),
+                'domains' => array_values(array_unique($domains)),
+            ];
+        }
+        return [
+            'total_scanned' => count($ids),
+            'total_posts' => $affected,
+            'total_images' => $total_images,
+            'truncated' => $truncated,
+            'items' => $items,
+        ];
+    }
+
+    // C1：分批同步外链图片（每批 SPIDER_BATCH_SIZE 篇，服务端定死）。
+    // 复用 auto_spider()（含下载、写库、_sky_spider_last 结果 meta，
+    // 与 D2 看板同一口径），不重写下载逻辑。返回每篇结果；锁被占的篇
+    // 返回 skipped（不覆盖上次结果），不存在的篇返回 failed。
+    public function batch_spider_posts(array $ids) {
+        $ids = array_slice(array_values(array_unique(array_filter(array_map('intval', $ids)))), 0, self::SPIDER_BATCH_SIZE);
+        if (empty($ids)) return ['results' => [], 'stopped_early' => false];
+        $results = [];
+        $stopped_early = false;
+        $start = microtime(true);
+        foreach ($ids as $id) {
+            // 墙钟预算：超时前停下，剩下的 ID 客户端下一批重发（与 WebP
+            // 批量同款）。
+            if (microtime(true) - $start > self::SPIDER_BATCH_TIME_BUDGET) { $stopped_early = true; break; }
+            $post = get_post($id);
+            if (!$post) {
+                $results[] = ['id' => $id, 'status' => 'failed', 'reason' => '文章不存在'];
+                continue;
+            }
+            // auto_spider() 返回 null = 锁被占（10 分钟内已有任务在跑），
+            // 按跳过记，不覆盖上次的 _sky_spider_last。
+            $res = $this->auto_spider($id);
+            if ($res === null) {
+                $results[] = ['id' => $id, 'status' => 'skipped', 'title' => $post->post_title, 'reason' => '正在同步中，稍后再试'];
+                continue;
+            }
+            $results[] = [
+                'id' => $id,
+                'status' => 'done',
+                'title' => $post->post_title,
+                'success' => (int)$res['success'],
+                'failed' => (int)$res['failed'],
+                'skipped' => (int)$res['skipped'],
+            ];
+        }
+        return ['results' => $results, 'stopped_early' => $stopped_early];
+    }
+
+    public function auto_spider($pid) {
+        $post = get_post($pid);
+        if (!$post) return null;
+
+        // R4：锁改存时间戳、10 分钟过期——fatal/超时/OOM 后锁不会永久锁死
+        // 该文章，过期锁可被下一次任务抢占。try/finally 保证任何返回路径
+        // （含 download_image 内抛 Error）都会清锁。旧版锁值是 1（无时间戳），
+        // 无法判断新旧，一律视为过期、可抢占，避免升级前一次崩溃留下的锁
+        // 永久锁死该文章。
+        $lock = get_post_meta($pid, '_sky_spider_processing', true);
+        if ($lock !== '' && $lock !== false && $lock !== null
+            && is_numeric($lock) && (int)$lock > 1000000000 && time() - (int)$lock < 600) {
+            return null;
+        }
+        update_post_meta($pid, '_sky_spider_processing', time());
+
+        try {
+        $content = $post->post_content;
+        // C1：提取与外链判断抽成公共方法（collect_image_candidates /
+        // is_external_image_url），扫描与自动同步共用同一套口径；下面
+        // 的计数与写库逻辑与原来完全一致。
+        $candidates = $this->collect_image_candidates($content);
+        // D2：无外链图也记一次结果（成功/失败/跳过均为 0），否则看板
+        // 永远显示“未同步”，分不清“没跑过”和“跑过但无图可同步”。
+        if(empty($candidates)) {
+            update_post_meta($pid, '_sky_spider_last', ['success' => 0, 'failed' => 0, 'skipped' => 0, 'time' => time()]);
+            return ['success' => 0, 'failed' => 0, 'skipped' => 0];
+        }
+
+        $site_domain = parse_url(get_site_url(), PHP_URL_HOST);
+        $success = 0;
+        // D2：失败/跳过计数，与 $success 一起写进 _sky_spider_last，
+        // 供看板最近文章处理状态表直接读。
+        $failed = 0;
+        $skipped = 0;
+
+        $core = Skyline_Core::instance();
+        $max_img = intval($core->get_opt('spider_max_img', 20));
+        $processed_count = 0;
+
+        // 已同步到 COS 的图片不再当作外站图：否则每次保存文章都会把 COS 图重新
+        // 下载回本地、重新上传 COS，白白再走一遍“上传→删本地”循环。
+        $oss_hosts = $this->get_oss_hosts();
 
         $has_more = false;
         // M1：spider_domains（排除域名，一行一个）真正生效：按行解析，
@@ -545,17 +706,20 @@ class Skyline_Content {
             if ($processed_count >= $max_img) { $has_more = true; break; }
 
             $url_real = html_entity_decode($url_raw);
-            if(strpos($url_real, $site_domain)!==false || strpos($url_real, 'data:image')!==false) continue;
-            $url_host = strtolower(parse_url($url_real, PHP_URL_HOST) ?: '');
-            if ($url_host !== '' && in_array($url_host, $oss_hosts, true)) continue;
-            // M1：命中排除域名（精确或后缀匹配）就跳过不同步、不占名额。
-            if ($this->is_host_spider_excluded($url_host, $excluded_domains)) continue;
+            // D2：本站图/data URI、COS 图、排除域名的图都不用同步，记跳过
+            // （不占单篇上限名额）。判断走 is_external_image_url，与 C1
+            // 扫描同一套口径。
+            if (!$this->is_external_image_url($url_real, $site_domain, $oss_hosts, $excluded_domains)) { $skipped++; continue; }
             
             $res = $this->download_image($url_real, $pid);
             if(isset($res['id'])) {
                 $local_url = wp_get_attachment_url($res['id']);
                 $content = str_replace($url_raw, $local_url, $content);
                 $success++;
+            } else {
+                // D2：download_image 没返回 id 即本次下载失败（网络错误 /
+                // HTTP 状态 / 文件过大过小等，原因见日志），记失败数。
+                $failed++;
             }
             $processed_count++;
         }
@@ -579,16 +743,33 @@ class Skyline_Content {
             wp_schedule_single_event(time() + 30, 'skyline_async_spider', [$pid]);
             $core->log("图片同步：单篇超过 {$max_img} 张上限，剩余图片已重排续跑 [$pid]", 'info', 'Spider');
         }
+
+        // D2：记最近一次同步结果（成功/失败/跳过数 + 时间），供看板
+        // 最近文章处理状态表直接读，不再翻日志核对。超上限续跑时本次
+        // 只记已跑完的部分，下次跑完会覆盖成本次完整结果。
+        update_post_meta($pid, '_sky_spider_last', ['success' => $success, 'failed' => $failed, 'skipped' => $skipped, 'time' => time()]);
+        return ['success' => $success, 'failed' => $failed, 'skipped' => $skipped];
         } finally {
             delete_post_meta($pid, '_sky_spider_processing');
         }
     }
 
-    public function auto_seo_meta($pid) {
+    // S1：批量补全只跑缺的项（$only 如 ['slug','excerpt']），已有项
+    // 跳过不重算——手动设好的英文 slug、已有摘要/标签一律不动（S4 的
+    // 保护就落在这里：slug 只在缺失时才进 $only）。$only 为 null 时
+    // 保持老行为（全部开关项都跑，供保存时异步任务调用）。
+    // 返回 null = 未跑（文章不存在 / 已标记完成 / 对应开关全关）；
+    // 否则返回 ['attempted'=>[...], 'succeeded'=>[...]]，供批量引擎
+    // 按项判定 done/partial/failed，不用重读文章猜结果。
+    // $reschedule_on_fail：全部失败时是否按 S4 附录约 1 小时后重试。
+    // 保存/定时触发的调用保持默认 true；S1 批量调用传 false——批量
+    // 是只跑缺项的，失败后约一次“全量”重试会把已有好 slug 也重算掉，
+    // 违背“已有项不重算”；失败的篇留在批量结果里由用户决定是否重跑。
+    public function auto_seo_meta($pid, $only = null, $reschedule_on_fail = true) {
         $post = get_post($pid);
-        if (!$post) return;
+        if (!$post) return null;
         
-        if (get_post_meta($pid, '_sky_seo_done', true)) return;
+        if (get_post_meta($pid, '_sky_seo_done', true)) return null;
 
         $core = Skyline_Core::instance();
         $do_tags = $core->get_opt('auto_tags');
@@ -596,15 +777,27 @@ class Skyline_Content {
         $do_excerpt = $core->get_opt('auto_excerpt');
         $do_polish = $core->get_opt('auto_polish');
 
-        if (!$do_tags && !$do_slug && !$do_excerpt && !$do_polish) return;
+        if (!$do_tags && !$do_slug && !$do_excerpt && !$do_polish) return null;
+        if ($only !== null) {
+            $only = array_values(array_intersect((array)$only, ['tags', 'slug', 'excerpt', 'polish']));
+            // 只要缺的项、对应开关却全关着：直接返回，不跑、也不标记完成
+            // （标记完成会让批量误以为这篇已处理完）。
+            $want = ['tags' => $do_tags, 'slug' => $do_slug, 'excerpt' => $do_excerpt, 'polish' => $do_polish];
+            $any_wanted = false;
+            foreach ($only as $it) { if (!empty($want[$it])) { $any_wanted = true; break; } }
+            if (!$any_wanted) return null;
+        }
         if (session_status() === PHP_SESSION_ACTIVE) session_write_close();
 
         $updates = [];
         $any_success = false;
         $any_attempted = false;
+        $attempted = [];
+        $succeeded = [];
         global $wpdb;
 
-        if ($do_polish) {
+        if ($do_polish && ($only === null || in_array('polish', $only, true))) {
+            $attempted[] = 'polish';
             // 之前只把前 3000 字发给 AI，却用返回结果替换全文，3000 字以后的正文
             // 会被直接丢掉，且写库绕过 wp_update_post、不产生修订版，丢了找不回来。
             $full_content = $post->post_content;
@@ -659,17 +852,20 @@ class Skyline_Content {
                 }
                 $updates['post_content'] = $polished;
                 $any_success = true;
+                $succeeded[] = 'polish';
                 $core->log("AI 润色成功 [$pid]", 'info', 'SEO');
             }
         }
-        if ($do_tags) {
+        if ($do_tags && ($only === null || in_array('tags', $only, true))) {
+            $attempted[] = 'tags';
             $text = isset($updates['post_content']) ? $updates['post_content'] : $post->post_content;
             $prompt = "请基于以下内容提取5个核心SEO标签，用逗号分隔，不要其他文字和编号：\n\n" . mb_substr(strip_tags($text), 0, 1500);
             $any_attempted = true;
             $tags = $core->call_api([['role'=>'user', 'content'=>$prompt]]);
-            if ($tags && !is_wp_error($tags)) { wp_set_post_tags($pid, str_replace(['，', '、'], ',', $tags), true); $any_success = true; }
+            if ($tags && !is_wp_error($tags)) { wp_set_post_tags($pid, str_replace(['，', '、'], ',', $tags), true); $any_success = true; $succeeded[] = 'tags'; }
         }
-        if ($do_slug) {
+        if ($do_slug && ($only === null || in_array('slug', $only, true))) {
+            $attempted[] = 'slug';
             $prompt = "Generate a concise English URL slug for this title (max 5-8 words). STRICTLY OUTPUT ONLY THE SLUG (lowercase, hyphens). Title: " . $post->post_title;
             $any_attempted = true;
             // N-D2：slug 要求只输出英文，system 人设里的“中文回答”会与之
@@ -677,10 +873,11 @@ class Skyline_Content {
             $slug = $core->call_api([['role'=>'user', 'content'=>$prompt]], 0.7, false);
             if ($slug && !is_wp_error($slug)) {
                 $slug = sanitize_title(strip_tags(preg_replace('/^(Here.*?:\s*)/i', '', $slug)));
-                if ($slug) { $updates['post_name'] = substr(trim(preg_replace('/-+/', '-', $slug), '-'), 0, 60); $any_success = true; }
+                if ($slug) { $updates['post_name'] = substr(trim(preg_replace('/-+/', '-', $slug), '-'), 0, 60); $any_success = true; $succeeded[] = 'slug'; }
             }
         }
-        if ($do_excerpt && empty($post->post_excerpt)) {
+        if ($do_excerpt && ($only === null || in_array('excerpt', $only, true)) && empty($post->post_excerpt)) {
+            $attempted[] = 'excerpt';
             $text = isset($updates['post_content']) ? $updates['post_content'] : $post->post_content;
             $prompt = "Generate a 120-word SEO summary for this content (in Chinese): \n\n" . mb_substr(strip_tags($text), 0, 1500);
             $any_attempted = true;
@@ -688,6 +885,7 @@ class Skyline_Content {
            if ($excerpt && !is_wp_error($excerpt)) {
                 $updates['post_excerpt'] = trim(mb_substr(wp_strip_all_tags($excerpt), 0, 260));
                 $any_success = true;
+                $succeeded[] = 'excerpt';
             }
         }
 
@@ -715,13 +913,127 @@ class Skyline_Content {
                 // reschedule_purge() 同款模式（上限 3 次——_sky_seo_fail_count
                 // 满 3 次即标记完成、上面分支不再排期）。只靠“下次保存再
                 // 触发”时，定时任务发布的文章发布后无人再保存，一次瞬时
-                // API 失败就等于永久停摆。
-                if (!wp_next_scheduled('skyline_async_seo', [(int)$pid])) {
+                // API 失败就等于永久停摆。批量调用传 $reschedule_on_fail=false，
+                // 不约全量重试（见方法头注释）。
+                if ($reschedule_on_fail && !wp_next_scheduled('skyline_async_seo', [(int)$pid])) {
                     wp_schedule_single_event(time() + 3600, 'skyline_async_seo', [(int)$pid]);
                     $core->log("自动 SEO 全部失败 [$pid]（第 {$fails} 次），已重排 1 小时后重试", 'warn', 'SEO');
                 }
             }
         }
+
+        return ['attempted' => array_values(array_unique($attempted)), 'succeeded' => array_values(array_unique($succeeded))];
+    }
+
+    // S1：slug 是否缺英文版。空、含中文等非 ASCII 字符、纯数字（自动生
+    // 成的 ID 回退）都算缺；已手动设好的英文 slug 不算缺，批量不重写。
+    public function is_slug_missing($slug) {
+        $slug = trim((string)$slug);
+        if ($slug === '') return true;
+        if (preg_match('/[^\x00-\x7F]/', $slug)) return true;
+        if (preg_match('/^\d+$/', $slug)) return true;
+        return false;
+    }
+
+    // S1：这篇文章缺哪几项 SEO（缺其中任一项即列入批量清单）。返回
+    // ['slug','excerpt','tags'] 的子集；三项全有返回 []。
+    public function seo_missing_items($post) {
+        $missing = [];
+        if ($this->is_slug_missing($post->post_name ?? '')) $missing[] = 'slug';
+        if (empty(trim((string)($post->post_excerpt ?? '')))) $missing[] = 'excerpt';
+        $tags = function_exists('wp_get_post_tags') ? wp_get_post_tags((int)$post->ID) : [];
+        if (empty($tags)) $missing[] = 'tags';
+        return $missing;
+    }
+
+    // S1：只读扫描全站已发布文章，列出缺英文 slug / 缺摘要 / 缺标签的
+    // 文章，清单上标清每篇缺哪几项。只读：不调 API、不改文章、不写 meta。
+    // 清单最多列 SCAN_MAX_ITEMS 篇，超出时 truncated=true。
+    public function scan_seo_missing() {
+        $ids = get_posts([
+            'post_type' => 'post',
+            'post_status' => 'publish',
+            'posts_per_page' => -1,
+            'fields' => 'ids',
+            'orderby' => 'ID',
+            'order' => 'ASC',
+        ]);
+        if (!is_array($ids)) $ids = [];
+        // WebP 扫描同款：先预热 meta 缓存，避免每篇一次查库。
+        if (function_exists('update_postmeta_cache')) update_postmeta_cache($ids);
+        if (function_exists('update_object_term_cache')) update_object_term_cache($ids, 'post');
+        $items = [];
+        $affected = 0;
+        $truncated = false;
+        foreach ($ids as $id) {
+            $post = get_post((int)$id);
+            if (!$post) continue;
+            $missing = $this->seo_missing_items($post);
+            if (empty($missing)) continue;
+            $affected++;
+            if (count($items) >= self::SCAN_MAX_ITEMS) { $truncated = true; continue; }
+            $items[] = [
+                'id' => (int)$id,
+                'title' => $post->post_title,
+                'missing' => $missing,
+            ];
+        }
+        return [
+            'total_scanned' => count($ids),
+            'total_posts' => $affected,
+            'truncated' => $truncated,
+            'items' => $items,
+        ];
+    }
+
+    // S1：分批补全历史文章 SEO（每批 $batch_size 篇，默认
+    // SEO_BATCH_SIZE_DEFAULT、上限 SEO_BATCH_SIZE_MAX，服务端 clamp）。
+    // 每篇只跑它缺的项（auto_seo_meta($pid, $missing)），已有项不重算；
+    // _sky_seo_done 会挡住重跑，缺项仍在时先清掉完成标记再跑（与 v2.1.1
+    // 复活逻辑同款），否则以前处理过的文章永远补不上缺的项。返回每篇
+    // 结果：done（缺项全补上）/ partial / failed / skipped。
+    public function batch_seo_posts(array $ids, $batch_size = self::SEO_BATCH_SIZE_DEFAULT) {
+        $batch_size = max(1, min((int)$batch_size, self::SEO_BATCH_SIZE_MAX));
+        $ids = array_slice(array_values(array_unique(array_filter(array_map('intval', $ids)))), 0, $batch_size);
+        if (empty($ids)) return ['results' => [], 'stopped_early' => false];
+        $results = [];
+        $stopped_early = false;
+        $start = microtime(true);
+        foreach ($ids as $id) {
+            // 墙钟预算：超时前停下，剩下的 ID 客户端下一批重发（与 WebP
+            // 批量同款）。
+            if (microtime(true) - $start > self::SEO_BATCH_TIME_BUDGET) { $stopped_early = true; break; }
+            $post = get_post($id);
+            if (!$post) {
+                $results[] = ['id' => $id, 'status' => 'failed', 'reason' => '文章不存在'];
+                continue;
+            }
+            $missing = $this->seo_missing_items($post);
+            if (empty($missing)) {
+                $results[] = ['id' => $id, 'status' => 'skipped', 'title' => $post->post_title, 'reason' => '已无缺失项'];
+                continue;
+            }
+            if (get_post_meta($id, '_sky_seo_done', true)) {
+                delete_post_meta($id, '_sky_seo_done');
+                delete_post_meta($id, '_sky_seo_fail_count');
+            }
+            $res = $this->auto_seo_meta($id, $missing, false);
+            if ($res === null) {
+                $results[] = ['id' => $id, 'status' => 'skipped', 'title' => $post->post_title, 'reason' => '对应开关未开启或已完成'];
+                continue;
+            }
+            $done_items = array_values(array_intersect($missing, $res['succeeded']));
+            $still = array_values(array_diff($missing, $done_items));
+            $status = empty($still) ? 'done' : (empty($done_items) ? 'failed' : 'partial');
+            $results[] = [
+                'id' => $id,
+                'status' => $status,
+                'title' => $post->post_title,
+                'done' => $done_items,
+                'missing' => $still,
+            ];
+        }
+        return ['results' => $results, 'stopped_early' => $stopped_early];
     }
 
     // L13：检测底部 40px 是否像一条水印带（底色近乎均匀的色带）。

@@ -16,6 +16,25 @@ setTimeout(function(){
 // 发送中标志：连续点发送或连按回车不再并发多条请求；输入框在发送期间禁用。
 var skySending = false;
 
+// 前台聊天请求客户端超时：60 秒。WP 端 wp_remote_post 是 30 秒、
+// EdgeOne 回源 12 秒，60 秒仍无响应基本是链路卡住，不再无限等下去。
+var SKY_CHAT_TIMEOUT_MS = 60000;
+
+// 聊天请求失败时显示独立错误气泡（.sky-msg.sky-error）：报错不再改写
+// loading 节点的文字，避免把错误伪装成 AI 回复（与 d.success=false
+// 的失败分支同一样式）。
+function skyShowChatError(text) {
+    var b = document.getElementById('sky-chat-msgs');
+    if (!b) return;
+    var loadingNode = document.getElementById('sky-loading');
+    if (loadingNode) loadingNode.remove();
+    var errDiv = document.createElement('div');
+    errDiv.className = 'sky-msg sky-error';
+    errDiv.textContent = text;
+    b.appendChild(errDiv);
+    b.scrollTop = b.scrollHeight;
+}
+
 // 首次打开面板时显示欢迎语 + 推荐问题（整个页面生命周期只显示一次）。
 // 打开面板本身不发任何请求；聊天区已有内容时不再重复插入。
 function showSkyWelcome() {
@@ -98,10 +117,43 @@ function skySend(){
     b.appendChild(ld);
     b.scrollTop = b.scrollHeight;
 
+    // 客户端超时：60 秒仍无响应就 abort，不再无限等下去；超时后显示
+    // “请求超时”，不再笼统报“网络错误”。
+    var skyController = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+    var skyTimeoutId = null;
+    if (skyController) {
+        skyTimeoutId = setTimeout(function() { skyController.abort(); }, SKY_CHAT_TIMEOUT_MS);
+    }
+
     fetch(sky_ajax.ajax_url, {
         method: 'POST',
-        body: fd
-    }).then(r => r.json()).then(d => {
+        body: fd,
+        signal: skyController ? skyController.signal : undefined
+    }).then(function(r) {
+        if (skyTimeoutId) clearTimeout(skyTimeoutId);
+        // 先看 HTTP 状态再解析 JSON：EdgeOne 504/502、PHP Fatal 500、
+        // nonce 校验失败的 403（响应体是纯文本 -1）都不是 JSON，
+        // 旧代码直接 r.json()，解析抛错后一律显示“网络错误”，无法定位。
+        if (!r.ok) {
+            var httpErr = new Error('HTTP ' + r.status);
+            httpErr.isSkyHttp = true;
+            if (r.status === 504 || r.status === 502) {
+                httpErr.message = '服务器响应超时（HTTP ' + r.status + '），请稍后再试或换个简短的问题。';
+            } else if (r.status === 403) {
+                httpErr.message = '请求被拒绝（HTTP 403），请刷新页面后再试。';
+            } else {
+                httpErr.message = '服务器返回异常（HTTP ' + r.status + '），请稍后再试。';
+            }
+            throw httpErr;
+        }
+        return r.json().then(function(d) { return d; }, function() {
+            // 200 但响应体不是 JSON：nonce 失败的 -1、PHP Fatal 的 HTML 等。
+            var badErr = new Error('bad json');
+            badErr.isSkyHttp = true;
+            badErr.message = '服务器返回了无法解析的响应，请刷新页面后再试。';
+            throw badErr;
+        });
+    }).then(function(d) {
         var loadingNode = document.getElementById('sky-loading');
         if(loadingNode) loadingNode.remove();
         // 报错不再伪装成 AI 回复：失败时用独立的错误样式气泡，而不是
@@ -121,9 +173,19 @@ function skySend(){
         b.scrollTop = b.scrollHeight;
         skySending = false;
         i.disabled = false;
-    }).catch(() => {
-        var loadingNode = document.getElementById('sky-loading');
-        if(loadingNode) loadingNode.textContent = '网络错误';
+    }).catch(function(err) {
+        if (skyTimeoutId) clearTimeout(skyTimeoutId);
+        var msg;
+        if (err && err.name === 'AbortError') {
+            msg = '请求超时（60 秒无响应），请稍后再试或换个简短的问题。';
+        } else if (err && err.isSkyHttp) {
+            msg = err.message;
+        } else {
+            // fetch 本身抛错：断网、DNS 解析失败、连接被重置等——
+            // 只有这种情况才显示“网络错误”。
+            msg = '网络错误，请检查网络连接后重试。';
+        }
+        skyShowChatError(msg);
         skySending = false;
         i.disabled = false;
     });
