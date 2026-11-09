@@ -95,7 +95,7 @@ class Skyline_Core {
             'api_key' => ['group'=>'ai', 'type'=>'password', 'label'=>'API Key', 'desc'=>'你的 API 密钥 (sk-...)', 'required'=>true],
             'chat_model' => ['group'=>'ai', 'type'=>'text', 'label'=>'对话模型', 'default'=>'deepseek-ai/DeepSeek-V3'],
             'image_model' => ['group'=>'ai', 'type'=>'text', 'label'=>'绘图模型', 'default'=>'black-forest-labs/FLUX.1-schnell'],
-            'system_prompt' => ['group'=>'ai', 'type'=>'textarea', 'label'=>'系统人设', 'default'=>"你是由灵感屋(lgwu.net)训练的专业内容创作助手。"],
+            'system_prompt' => ['group'=>'ai', 'type'=>'textarea', 'label'=>'系统人设', 'default'=>"你是灵感屋（lgwu.net）的 AI 助手，专注景观设计：园林方案、施工图与节点详图、植物配置、铺装与工程做法、设计软件与学习资源。用准确的景观专业术语，中文回答，简洁实用。"],
             'robot_enable' => ['group'=>'ai', 'type'=>'bool', 'label'=>'启用前台悬浮助手', 'default'=>true],
             'robot_only_logged' => ['group'=>'ai', 'type'=>'bool', 'label'=>'仅登录用户可见', 'default'=>false],
             'robot_img' => ['group'=>'ai', 'type'=>'url', 'label'=>'自定义图标 URL', 'desc'=>'请用方形图片（非方形图会被裁成圆形显示）。'],
@@ -308,7 +308,7 @@ class Skyline_Core {
         if(!$k) return new WP_Error('sky_api_key_missing', 'Error: API Key missing');
 
         // M1：system_prompt 填了就作为 system 角色消息拼到最前面再发。
-        // 注意：schema 默认值本身就是一句非空人设（“你是由灵感屋训练的……”），
+        // 注意：schema 默认值本身就是一句非空人设（见 system_prompt 的 default），
         // 所以默认情况下每次调用都会带上这句 system 消息；管理员清空该项后不拼。
         $sys = trim((string)$this->get_opt('system_prompt', ''));
         if ($sys !== '') {
