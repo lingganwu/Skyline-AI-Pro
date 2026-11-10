@@ -4,7 +4,7 @@ Tags: ai, content-automation, seo, productivity, image-optimization
 Requires at least: 5.8
 Tested up to: 7.1
 Requires PHP: 7.4
-Stable tag: 2.2.6
+Stable tag: 2.2.7
 License: GPLv2 or later
 License URI: http://www.gnu.org/licenses/gpl-2.0.html
 
@@ -116,6 +116,10 @@ For help, please use the WordPress.org plugin support forum for Skyline AI Pro â
 You can also contact the author by email at admin@lgwu.net. Please include your WordPress version, PHP version, the plugin version, and the steps to reproduce any problem.
 
 == Changelog ==
+
+= 2.2.7 =
+* Security: all `$_POST` / `$_GET` reads now pass through `wp_unslash()` before sanitization (WordPress.org compliance).
+* Tests: new assertions cover slashed input for settings save, chat, templates, WebP scan, OSS purge and spider/SEO endpoints.
 
 = 2.2.6 =
 * Docs: readme.txt rewritten in English for the WordPress.org directory; admin interface remains Chinese (noted in the readme).

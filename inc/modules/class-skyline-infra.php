@@ -939,7 +939,7 @@ class Skyline_Turbo_Mod {
     public function ajax_clear_cache() {
         check_ajax_referer('skyline_ajax_nonce');
         if (!current_user_can('manage_options')) wp_send_json_error('Unauthorized');
-        $scope = isset($_POST['scope']) ? (string)$_POST['scope'] : 'page';
+        $scope = isset($_POST['scope']) ? (string) wp_unslash($_POST['scope']) : 'page';
         if ($scope !== 'page' && $scope !== 'all') wp_send_json_error('scope 参数无效');
         $cleared = Skyline_Infra::instance()->cache_del_prefix($scope === 'all' ? '' : 'page_');
         if ($cleared === null) wp_send_json_error('Redis 不可用，缓存未清理');
@@ -969,8 +969,8 @@ class Skyline_Turbo_Mod {
         if (!self::webp_supported()) {
             wp_send_json_success(['supported' => false, 'total' => 0, 'ids' => [], 'skipped' => [], 'done' => true, 'offset' => 0, 'scanned' => 0]);
         }
-        $offset = isset($_POST['offset']) ? max(0, (int)$_POST['offset']) : 0;
-        $page_size = isset($_POST['page_size']) ? (int)$_POST['page_size'] : 2000;
+        $offset = isset($_POST['offset']) ? max(0, (int) wp_unslash($_POST['offset'])) : 0;
+        $page_size = isset($_POST['page_size']) ? (int) wp_unslash($_POST['page_size']) : 2000;
         $page_size = min(5000, max(100, $page_size));
         // total：一次廉价 COUNT，不拉全表。$wpdb 在 WP 内恒存在；取不到
         // 时退化为“本页即最后一页”（见下面的 done 推导），不静默多算。
@@ -1024,7 +1024,7 @@ class Skyline_Turbo_Mod {
         check_ajax_referer('skyline_ajax_nonce');
         if (!current_user_can('manage_options')) wp_send_json_error('Unauthorized');
         if (!self::webp_supported()) wp_send_json_error('服务器 GD 不支持 WebP');
-        $ids = isset($_POST['ids']) && is_array($_POST['ids']) ? array_map('absint', $_POST['ids']) : [];
+        $ids = isset($_POST['ids']) && is_array($_POST['ids']) ? array_map('absint', wp_unslash($_POST['ids'])) : [];
         // 每批上限 20 张由服务端定死，不信任客户端传的数量。
         $ids = array_slice(array_values(array_unique(array_filter($ids))), 0, self::WEBP_BATCH_SIZE);
         if (empty($ids)) wp_send_json_success(['results' => [], 'stopped_early' => false]);
@@ -1522,7 +1522,7 @@ if (!class_exists('Skyline_OSS_Mod')) {
         public function ajax_oss_purge_retry() {
             check_ajax_referer('skyline_ajax_nonce');
             if (!current_user_can('manage_options')) wp_send_json_error('Unauthorized');
-            $id = isset($_POST['attachment_id']) ? absint($_POST['attachment_id']) : 0;
+            $id = isset($_POST['attachment_id']) ? absint( wp_unslash( $_POST['attachment_id'] ) ) : 0;
             if ($id <= 0) wp_send_json_error('attachment_id 参数无效');
             if (get_post_meta($id, self::PENDING_DELETE_META, true) === '') wp_send_json_error('该附件没有待删登记');
             $this->purge_pending_deletes($id);
@@ -1536,7 +1536,7 @@ if (!class_exists('Skyline_OSS_Mod')) {
         public function ajax_oss_purge_cancel() {
             check_ajax_referer('skyline_ajax_nonce');
             if (!current_user_can('manage_options')) wp_send_json_error('Unauthorized');
-            $id = isset($_POST['attachment_id']) ? absint($_POST['attachment_id']) : 0;
+            $id = isset($_POST['attachment_id']) ? absint( wp_unslash( $_POST['attachment_id'] ) ) : 0;
             if ($id <= 0) wp_send_json_error('attachment_id 参数无效');
             if (get_post_meta($id, self::PENDING_DELETE_META, true) === '') wp_send_json_error('该附件没有待删登记');
             delete_post_meta($id, self::PENDING_DELETE_META);

@@ -33,7 +33,7 @@ class Skyline_Admin {
         // 配置共用同一个表单与 nonce；先于保存分支处理，清空后直接返回，
         // 不保存随表单一起提交的配置值）。
         if (isset($_POST['skyline_clear_chat_log'])) {
-            if (!wp_verify_nonce($_POST['skyline_nonce'] ?? '', 'skyline_save_action')) {
+            if (!wp_verify_nonce( sanitize_text_field( wp_unslash( $_POST['skyline_nonce'] ?? '' ) ), 'skyline_save_action')) {
                 return;
             }
             if (!current_user_can('manage_options')) {
@@ -44,7 +44,7 @@ class Skyline_Admin {
             return;
         }
 
-        if (!isset($_POST['skyline_save_settings']) || !wp_verify_nonce($_POST['skyline_nonce'] ?? '', 'skyline_save_action')) {
+        if (!isset($_POST['skyline_save_settings']) || !wp_verify_nonce( sanitize_text_field( wp_unslash( $_POST['skyline_nonce'] ?? '' ) ), 'skyline_save_action')) {
             return;
         }
         
@@ -52,9 +52,9 @@ class Skyline_Admin {
             wp_die(__('权限不足', 'skyline-ai-pro'));
         }
         
-        $posted = $_POST['skyline_settings'] ?? [];
+        $posted = wp_unslash( $_POST['skyline_settings'] ?? [] );
         $schema = $this->core->get_config_schema();
-        $current_tab = sanitize_key($_GET['tab'] ?? 'dashboard');
+        $current_tab = sanitize_key( wp_unslash( $_GET['tab'] ?? 'dashboard' ) );
 
         $sanitized = get_option('skyline_ai_settings', []);
         if (!is_array($sanitized)) $sanitized = [];
@@ -206,7 +206,7 @@ class Skyline_Admin {
         check_ajax_referer('skyline_ajax_nonce');
         if (!current_user_can('manage_options')) wp_send_json_error('Unauthorized');
         if (!class_exists('Skyline_Content')) wp_send_json_error('内容模块未加载');
-        $ids = isset($_POST['ids']) && is_array($_POST['ids']) ? array_map('intval', $_POST['ids']) : [];
+        $ids = isset($_POST['ids']) && is_array($_POST['ids']) ? array_map('intval', wp_unslash($_POST['ids'])) : [];
         wp_send_json_success(Skyline_Content::instance()->batch_spider_posts($ids));
     }
 
@@ -221,13 +221,13 @@ class Skyline_Admin {
         check_ajax_referer('skyline_ajax_nonce');
         if (!current_user_can('manage_options')) wp_send_json_error('Unauthorized');
         if (!class_exists('Skyline_Content')) wp_send_json_error('内容模块未加载');
-        $ids = isset($_POST['ids']) && is_array($_POST['ids']) ? array_map('intval', $_POST['ids']) : [];
-        $batch_size = isset($_POST['batch_size']) ? (int)$_POST['batch_size'] : Skyline_Content::SEO_BATCH_SIZE_DEFAULT;
+        $ids = isset($_POST['ids']) && is_array($_POST['ids']) ? array_map('intval', wp_unslash($_POST['ids'])) : [];
+        $batch_size = isset($_POST['batch_size']) ? (int) wp_unslash($_POST['batch_size']) : Skyline_Content::SEO_BATCH_SIZE_DEFAULT;
         wp_send_json_success(Skyline_Content::instance()->batch_seo_posts($ids, $batch_size));
     }
 
     private function get_current_tab() {
-        return sanitize_key($_GET['tab'] ?? 'dashboard');
+        return sanitize_key( wp_unslash( $_GET['tab'] ?? 'dashboard' ) );
     }
 
     public function get_system_health() {
@@ -783,6 +783,7 @@ class Skyline_Admin {
             <div class="sky-card">
                 <div class="sky-card-title">📜 更新历史</div>
                 <div style="font-size: 13px; color: var(--sky-text-muted); line-height: 1.8;">
+                    <b>v2.2.7</b> - 全站 $_POST/$_GET 读取先 wp_unslash 再消毒（WordPress.org 合规，设置保存/聊天/模板/WebP 扫描/OSS 待删/图片同步/SEO 评分入口全覆盖）；补测试断言<br>
                     <b>v2.2.6</b> - readme.txt 重写为英文（FAQ/截图/隐私披露/厂商 Terms/Support）；删除去水印功能；默认厂商改中性（留空自选，模型默认亦留空）；系统人设改通用版；插件头补 Plugin URI / Author URI；新增 GPL-2.0 LICENSE 文件<br>
                     <b>v2.2.5</b> - 单站硬编码通用化（前台欢迎语/推荐问题、气泡提示、后台品牌不再写本站名称）；删除损坏的默认头像 robot.png；插件头补齐 WordPress.org 要求字段；COS SDK 缺失时友好提示不致命；卸载时清理插件数据<br>
                     <b>v2.2.4</b> - AI 回复 Markdown 渲染（小标题、列表、代码块、链接）；系统人设改访客视角（接待来访的设计师、学生和景观爱好者，帮访客找站内资源，不提写文章/SEO/内容创作）<br>

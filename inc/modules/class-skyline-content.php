@@ -1265,7 +1265,7 @@ class Skyline_Content {
         // C-5：主开关关时编辑器单张同步也拒绝，并给明确原因。
         if (!Skyline_Core::instance()->get_opt('spider_enable', true)) wp_send_json_error($this->spider_disabled_message('同步图片'));
         $url = isset($_POST['url']) ? esc_url_raw(wp_unslash($_POST['url'])) : '';
-        $pid = isset($_POST['pid']) ? intval($_POST['pid']) : 0;
+        $pid = isset($_POST['pid']) ? intval( wp_unslash( $_POST['pid'] ) ) : 0;
         if(!$url) wp_send_json_error('URL为空');
         // N-A2：手动单张同步同样遵守 spider_domains 排除（与自动同步一致）。
         if ($this->is_spider_excluded_url($url)) wp_send_json_error('该域名在排除列表中，不同步');
@@ -1280,8 +1280,8 @@ class Skyline_Content {
         check_ajax_referer('sky_seo_nonce');
         if(!current_user_can('edit_posts')) wp_send_json_error('权限不足');
         $score = 100; $advice = [];
-        $title = sanitize_text_field($_POST['title'] ?? ''); 
-        $content = wp_kses_post($_POST['content'] ?? '');
+        $title = sanitize_text_field( wp_unslash( $_POST['title'] ?? '' ) );
+        $content = wp_kses_post( wp_unslash( $_POST['content'] ?? '' ) );
         if(mb_strlen($title)<10) { $score-=10; $advice[]='❌ 标题过短'; }
         if(mb_strlen(strip_tags($content))<300) { $score-=20; $advice[]='❌ 内容稀薄'; }
         if($score>=90) $advice[]='🎉 完美！';
