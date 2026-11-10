@@ -1,5 +1,5 @@
 document.addEventListener('DOMContentLoaded', function() {
-    console.log('🚀 Skyline AI Pro v2.2.1 Enterprise Engine Loaded');
+    console.log('🚀 Skyline AI Pro v2.2.2 Enterprise Engine Loaded');
 
     // 表单保存按钮动画增强
     const saveBtn = document.querySelector('.sky-save-btn');
@@ -28,6 +28,16 @@ window.SkyBatchRunner = (function() {
         if (bar) bar.style.width = (total ? Math.round(done / total * 100) : 0) + '%';
         var wrap = el(cfg.progress);
         if (wrap) wrap.style.display = total ? 'block' : 'none';
+    }
+    // v2.2.2：失败文案带上 HTTP 状态——403（登录过期/nonce 失效）、
+    // 504/超时、500、0（断网）之前全被一句“网络错误”混在一起，没法定位。
+    function skyAjaxFailDetail(xhr, textStatus) {
+        var status = (xhr && xhr.status) ? xhr.status : 0;
+        if (status === 403) return 'HTTP 403（可能是登录过期或 nonce 失效，请刷新页面重试）';
+        if (status === 504 || textStatus === 'timeout') return 'HTTP 504/超时（请求超时，请稍后重试）';
+        if (status === 500) return 'HTTP 500（服务端错误，请看服务器日志）';
+        if (status) return 'HTTP ' + status;
+        return '网络中断或超时（HTTP 0）';
     }
     function addLine(cfg, text) {
         var ul = el(cfg.failures);
@@ -86,7 +96,7 @@ window.SkyBatchRunner = (function() {
                     restoreButtons();
                     return;
                 }
-                setText(cfg.status, '❌ 批量请求失败（网络错误），已停止。');
+                setText(cfg.status, '❌ 批量请求失败（' + skyAjaxFailDetail(xhr, textStatus) + '），已停止。');
                 restoreButtons();
             });
         }
@@ -108,7 +118,7 @@ window.SkyBatchRunner = (function() {
                     if (ul) ul.innerHTML = '';
                     setBar(cfg, 0, st.total);
                     setDisabled(cfg.startBtn, st.total === 0);
-                }).fail(function() { setText(cfg.status, '❌ 扫描请求失败（网络错误）。'); });
+                }).fail(function(xhr, textStatus) { setText(cfg.status, '❌ 扫描请求失败（' + skyAjaxFailDetail(xhr, textStatus) + '）。'); });
             },
             start: function() {
                 var ids = cfg.collectIds ? cfg.collectIds(st) : st.ids;
