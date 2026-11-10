@@ -86,6 +86,119 @@ function toggleSkyChat(){
     document.getElementById('sky-chat-in').focus();
 }
 
+// AI 回复 Markdown 渲染（SkyMarkdown.render）。
+// 轻量手写、无第三方依赖：先转义 HTML 再转换 Markdown，AI 输出里的
+// <script>、<img onerror> 等只会原样显示成文本，绝不会执行。
+// 只用于 AI 回复气泡（.sky-msg.ai）：用户输入、欢迎语、报错文案仍用
+// textContent，绝不走这里。
+function skyMdEscape(s) {
+    return String(s)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
+// 行内转换：行内代码 → Markdown 链接 → 裸网址 → 加粗 → 斜体。
+// 代码与链接先占位，避免里面的 *、[、] 被当成 Markdown 处理；
+// 链接只认 http(s)/相对路径，javascript:/data:/vbscript: 一律只留文字。
+function skyMdInline(s) {
+    var codes = [], links = [];
+    s = s.replace(/`([^`\n]+)`/g, function (m, c) {
+        codes.push('<code>' + c + '</code>');
+        return '\u0001' + (codes.length - 1) + '\u0001';
+    });
+    s = s.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, function (m, text, url) {
+        if (/^(javascript|data|vbscript):/i.test(url)) return text;
+        links.push('<a href="' + url + '" target="_blank" rel="noopener">' + text + '</a>');
+        return '\u0002' + (links.length - 1) + '\u0002';
+    });
+    // 裸网址自动变链接：末尾的中英文标点不算进链接。
+    s = s.replace(/https?:\/\/[^\s<>"'\u0001\u0002]+/g, function (m) {
+        var trail = '';
+        var url = m.replace(/[.,;:!?。、，；：！？）)]+$/, function (p) { trail = p; return ''; });
+        return '<a href="' + url + '" target="_blank" rel="noopener">' + url + '</a>' + trail;
+    });
+    s = s.replace(/\*\*([^*]+?)\*\*/g, '<strong>$1</strong>');
+    s = s.replace(/\*([^*]+?)\*/g, '<em>$1</em>');
+    s = s.replace(/\u0001(\d+)\u0001/g, function (m, i) { return codes[+i]; });
+    s = s.replace(/\u0002(\d+)\u0002/g, function (m, i) { return links[+i]; });
+    return s;
+}
+
+// 块级转换：``` 代码块、##/### 标题、段落（空行分段）、-/ * 无序列表、
+// 1. 有序列表、--- 分隔线。代码块先占位，块内不做任何行内转换。
+function skyRenderMarkdown(md) {
+    if (md == null) return '';
+    var text = skyMdEscape(String(md).replace(/\r\n?/g, '\n'));
+    var codeBlocks = [];
+    text = text.replace(/(^|\n)```[^\n]*\n([\s\S]*?)(?:```|$)/g, function (m, pre, code) {
+        codeBlocks.push('<pre><code>' + code.replace(/\n+$/, '') + '</code></pre>');
+        return pre + '\n' + '\u0000' + (codeBlocks.length - 1) + '\u0000' + '\n';
+    });
+    var out = [], buf = [], lines = text.split('\n'), i = 0;
+    function flushPara() {
+        if (!buf.length) return;
+        out.push('<p>' + buf.map(skyMdInline).join('<br>') + '</p>');
+        buf = [];
+    }
+    function flushList(tag, items) {
+        out.push('<' + tag + '>' + items.map(function (it) {
+            return '<li>' + skyMdInline(it) + '</li>';
+        }).join('') + '</' + tag + '>');
+    }
+    function trimLine(l) { return l.replace(/^\s+|\s+$/g, ''); }
+    while (i < lines.length) {
+        var line = trimLine(lines[i]);
+        if (!line) { flushPara(); i++; continue; }
+        var mBlock = line.match(/^\u0000(\d+)\u0000$/);
+        if (mBlock) { flushPara(); out.push(codeBlocks[+mBlock[1]]); i++; continue; }
+        var mHead = line.match(/^(#{2,3})\s+(.*)$/);
+        if (mHead) {
+            flushPara();
+            out.push('<h' + mHead[1].length + '>' + skyMdInline(mHead[2]) + '</h' + mHead[1].length + '>');
+            i++; continue;
+        }
+        if (/^-{3,}$/.test(line)) { flushPara(); out.push('<hr>'); i++; continue; }
+        var mUl = line.match(/^[-*]\s+(.*)$/);
+        if (mUl) {
+            flushPara();
+            var ulItems = [];
+            while (i < lines.length) {
+                var lu = trimLine(lines[i]).match(/^[-*]\s+(.*)$/);
+                if (!lu) break;
+                ulItems.push(lu[1]); i++;
+            }
+            flushList('ul', ulItems);
+            continue;
+        }
+        var mOl = line.match(/^\d+\.\s+(.*)$/);
+        if (mOl) {
+            flushPara();
+            var olItems = [];
+            while (i < lines.length) {
+                var lo = trimLine(lines[i]).match(/^\d+\.\s+(.*)$/);
+                if (!lo) break;
+                olItems.push(lo[1]); i++;
+            }
+            flushList('ol', olItems);
+            continue;
+        }
+        buf.push(line);
+        i++;
+    }
+    flushPara();
+    return out.join('\n');
+}
+
+// 导出给 Node 测试直接调用；浏览器里挂 window.SkyMarkdown。
+// 注意 waifu.js 是浏览器脚本：module 在浏览器里不存在，window 在
+// Node 里不存在，两边都做 typeof 守卫，别一加载就报错。
+var SkyMarkdown = { render: skyRenderMarkdown };
+if (typeof window !== 'undefined') { window.SkyMarkdown = SkyMarkdown; }
+if (typeof module !== 'undefined' && module.exports) { module.exports = SkyMarkdown; }
+
 function skySend(){
     // 发送中直接返回：连续点发送、连按回车、点推荐问题都走这里，不再并发多条。
     if (skySending) return;
@@ -167,7 +280,7 @@ function skySend(){
         } else {
             var aiDiv = document.createElement('div');
             aiDiv.className = 'sky-msg ai';
-            aiDiv.textContent = d.data;
+            aiDiv.innerHTML = SkyMarkdown.render(d.data);
             b.appendChild(aiDiv);
         }
         b.scrollTop = b.scrollHeight;

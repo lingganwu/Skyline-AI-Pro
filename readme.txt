@@ -4,7 +4,7 @@ Tags: ai, deepseek, content-automation, seo, productivity
 Requires at least: 5.8
 Tested up to: 7.1
 Requires PHP: 7.4
-Stable tag: 2.2.3
+Stable tag: 2.2.4
 License: GPLv2 or later
 License URI: http://www.gnu.org/licenses/gpl-2.0.html
 
@@ -30,6 +30,10 @@ Skyline AI Pro 是一款为专业内容创作者设计的 WordPress 智能中台
 3. Go to the 'Skyline Pro' settings page to configure your API keys.
 
 == Changelog ==
+
+= 2.2.4 =
+* 新功能：AI 回复 Markdown 渲染——前台聊天回复按 Markdown 排版呈现（小标题、列表、代码块、链接）
+* 优化：系统人设改访客视角——默认人设改为接待来访的设计师、学生和景观爱好者，帮访客找站内资源、解答景观设计问题，不再提写文章、SEO、内容创作（那是站长的工作）
 
 = 2.2.3 =
 * 修复：WebP 扫描必现 HTTP 524——扫描改分页（每页 2000 张）+ 20 秒墙钟预算 + 续扫，单次请求不再遍历全部约 53,000 个附件；进度条显示“正在扫描…已扫 X/Y 张”
