@@ -24,6 +24,25 @@
 .sky-msg.user { background:#6366f1; color:#fff; align-self:flex-end; border-bottom-right-radius:4px; }
 /* 报错专用气泡（L22①）：与 AI 回复区分开，不再把 'Error: ...' 伪装成 AI 说的话 */
 .sky-msg.sky-error { background:#fef2f2; border:1px solid #fecaca; color:#b91c1c; align-self:flex-start; border-bottom-left-radius:4px; box-shadow:0 1px 2px rgba(15,23,42,0.05); }
+/* AI 回复 Markdown 渲染样式：只影响聊天面板内的 AI 气泡（.sky-msg.ai），
+   不动看板娘本体（浮动、气泡位置等）。 */
+#sky-chat-msgs .sky-msg.ai p { margin:0 0 8px; }
+#sky-chat-msgs .sky-msg.ai p:last-child { margin-bottom:0; }
+#sky-chat-msgs .sky-msg.ai h2 { font-size:16px; line-height:1.4; margin:10px 0 6px; }
+#sky-chat-msgs .sky-msg.ai h2:first-child { margin-top:0; }
+#sky-chat-msgs .sky-msg.ai h3 { font-size:15px; line-height:1.4; margin:10px 0 6px; }
+#sky-chat-msgs .sky-msg.ai h3:first-child { margin-top:0; }
+#sky-chat-msgs .sky-msg.ai ul, #sky-chat-msgs .sky-msg.ai ol { margin:0 0 8px; padding-left:20px; }
+#sky-chat-msgs .sky-msg.ai ul:last-child, #sky-chat-msgs .sky-msg.ai ol:last-child { margin-bottom:0; }
+#sky-chat-msgs .sky-msg.ai li { margin-bottom:3px; }
+#sky-chat-msgs .sky-msg.ai li:last-child { margin-bottom:0; }
+#sky-chat-msgs .sky-msg.ai code { background:#f1f5f9; color:#be185d; padding:1px 5px; border-radius:4px; font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size:13px; }
+#sky-chat-msgs .sky-msg.ai pre { background:#1e293b; color:#e2e8f0; border-radius:8px; padding:10px 12px; margin:0 0 8px; overflow-x:auto; }
+#sky-chat-msgs .sky-msg.ai pre:last-child { margin-bottom:0; }
+#sky-chat-msgs .sky-msg.ai pre code { background:none; color:inherit; padding:0; font-size:13px; }
+#sky-chat-msgs .sky-msg.ai a { color:#4f46e5; text-decoration:underline; }
+#sky-chat-msgs .sky-msg.ai a:hover { color:#4338ca; }
+#sky-chat-msgs .sky-msg.ai hr { border:none; border-top:1px solid #e2e8f0; margin:10px 0; }
 /* 推荐问题小卡片（欢迎语下方，一行排不下自动换行） */
 .sky-suggest { display:flex; flex-wrap:wrap; gap:6px; margin:0 0 10px; align-self:flex-start; max-width:100%; }
 .sky-suggest-btn { border:1px solid #c7d2fe; background:#fff; color:#4f46e5; border-radius:999px; padding:5px 11px; font-size:12.5px; line-height:1.4; cursor:pointer; transition:background .2s, color .2s; }

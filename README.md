@@ -7,7 +7,7 @@
 <a id="english"></a>
 ## 🇬🇧 English Version
 
-[![WordPress Version](https://img.shields.io/badge/WordPress-v2.2.3-blue.svg)](https://github.com/lingganwu/Skyline-AI-Pro/releases)
+[![WordPress Version](https://img.shields.io/badge/WordPress-v2.2.4-blue.svg)](https://github.com/lingganwu/Skyline-AI-Pro/releases)
 [![License](https://img.shields.io/badge/License-GPLv2%2B-green.svg)](https://creativecommons.org/licenses/by/2.0/)
 [![Security](https://img.shields.io/badge/Security-WP.org%20Standard-brightgreen.svg)]()
 

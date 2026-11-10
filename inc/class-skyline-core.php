@@ -276,7 +276,7 @@ class Skyline_Core {
             'api_img_key' => ['group'=>'ai', 'type'=>'password', 'label'=>'生图 API Key', 'desc'=>'生图专用的 API 密钥；留空时跟随上方“API Key”。对话切到 FreeLLMAPI、生图继续用硅基流动时，在此填硅基流动的密钥；整站都切同一家时留空即可（单密钥）。', 'default'=>''],
             'chat_model' => ['group'=>'ai', 'type'=>'datalist', 'label'=>'对话模型', 'desc'=>'可点选预设，也可直接输入厂商新出的模型名；切换厂商后下拉随之更新。', 'default'=>'zai-org/GLM-5.3-Flash'],
             'image_model' => ['group'=>'ai', 'type'=>'datalist', 'label'=>'绘图模型', 'desc'=>'可点选预设，也可直接输入新模型名；所选厂商无绘图模型时请留空或自由输入。', 'default'=>'black-forest-labs/FLUX.1-schnell'],
-            'system_prompt' => ['group'=>'ai', 'type'=>'textarea', 'label'=>'系统人设', 'default'=>"你是灵感屋（lgwu.net）的 AI 助手，专注景观设计：园林方案、施工图与节点详图、植物配置、铺装与工程做法、设计软件与学习资源。用准确的景观专业术语，中文回答，简洁实用。"],
+            'system_prompt' => ['group'=>'ai', 'type'=>'textarea', 'label'=>'系统人设', 'default'=>"你是灵感屋（lgwu.net）的 AI 助手，接待来访的设计师、学生和景观爱好者。帮访客找站内资源、解答景观设计问题：推荐景观方案、SU 模型、CAD 施工图、植物配置、铺装做法、软件教程；访客想找什么，就帮他找到。说话亲切、简洁，像接待一位来访的朋友。用中文回答。回答用 Markdown 排版：小标题分段、列表列要点、段落留空；代码放代码块、网址给成链接。不要提写文章、SEO、内容创作——那是站长的工作。"],
             'robot_enable' => ['group'=>'ai', 'type'=>'bool', 'label'=>'启用前台悬浮助手', 'default'=>true],
             'robot_only_logged' => ['group'=>'ai', 'type'=>'bool', 'label'=>'仅登录用户可见', 'default'=>false],
             'robot_img' => ['group'=>'ai', 'type'=>'url', 'label'=>'自定义图标 URL', 'desc'=>'请用方形图片（非方形图会被裁成圆形显示）。'],
