@@ -473,7 +473,6 @@ class Skyline_Content {
         $file_path = $upload['file'];
         $mime = $content_type ?: 'image/jpeg';
 
-        if($core->get_opt('spider_rm_wm')) $this->remove_watermark_crop($file_path, $mime);
         if($core->get_opt('spider_wm_enable')) $this->watermark($file_path);
 
         $aid = wp_insert_attachment(['post_mime_type'=>$mime, 'post_title'=>'Spider Img'], $file_path, $pid);
@@ -1192,66 +1191,6 @@ class Skyline_Content {
             $results[] = $row;
         }
         return ['results' => $results, 'stopped_early' => $stopped_early];
-    }
-
-    // L13：检测底部 40px 是否像一条水印带（底色近乎均匀的色带）。
-    // 采样统计：底部色带的主导色（按 16 级量化）占比 >=85%，且其上方
-    // 40px 色带主导色占比 <85% 或平均亮度相差 >25，才判定为水印带。
-    // 正常照片底部也是内容、主导色占比低——检测不到时返回 0、不裁。
-    // 保守方向：判不准时不裁，宁可留水印、不误删正文底部内容。
-    private function detect_watermark_band_height($src, $w, $h) {
-        $band = 40;
-        if ($h < 150 || $w < 10) return 0;
-        $sample = function ($y0, $y1) use ($src, $w) {
-            $counts = [];
-            $total = 0;
-            $bright = 0;
-            $step_x = max(1, (int)($w / 50));
-            for ($y = $y0; $y < $y1; $y += 4) {
-                for ($x = 0; $x < $w; $x += $step_x) {
-                    $rgb = imagecolorat($src, $x, $y);
-                    $r = ($rgb >> 16) & 0xff;
-                    $g = ($rgb >> 8) & 0xff;
-                    $b = $rgb & 0xff;
-                    $key = (($r >> 4) << 8) | (($g >> 4) << 4) | ($b >> 4);
-                    $counts[$key] = ($counts[$key] ?? 0) + 1;
-                    $bright += ($r + $g + $b) / 3;
-                    $total++;
-                }
-            }
-            if ($total === 0) return ['dominant' => 0, 'mean' => 0];
-            return ['dominant' => max($counts) / $total, 'mean' => $bright / $total];
-        };
-        $bottom = $sample($h - $band, $h);
-        $above = $sample($h - 2 * $band, $h - $band);
-        if ($bottom['dominant'] >= 0.85 && ($above['dominant'] < 0.85 || abs($bottom['mean'] - $above['mean']) > 25)) {
-            return $band;
-        }
-        return 0;
-    }
-
-    private function remove_watermark_crop($path, $mime) {
-        if(!extension_loaded('gd')) return;
-        $info = @getimagesize($path); if(!$info) return;
-        $w = $info[0]; $h = $info[1];
-        if($h < 150) return;
-        $src = ($mime == 'image/jpeg') ? @imagecreatefromjpeg($path) : @imagecreatefrompng($path);
-        if(!$src) return;
-        // L13：先检测底部水印区域再裁，检测不到水印时不裁（旧写法无条件裁 40px，
-        // 会误删正文底部内容；“智能去除水印”名不副实）。
-        $crop_h = $this->detect_watermark_band_height($src, $w, $h);
-        if ($crop_h <= 0) { imagedestroy($src); return; }
-        if($h - $crop_h < 50) $crop_h = 20;
-        $dst = imagecreatetruecolor($w, $h - $crop_h);
-        // L13：alpha 处理——透明 PNG 不变黑底。
-        imagealphablending($dst, false);
-        imagesavealpha($dst, true);
-        $transparent = imagecolorallocatealpha($dst, 0, 0, 0, 127);
-        imagefill($dst, 0, 0, $transparent);
-        imagecopy($dst, $src, 0, 0, 0, 0, $w, $h - $crop_h);
-        $quality = max(0, min(100, (int)Skyline_Core::instance()->get_opt('turbo_quality', 85)));
-        if($mime == 'image/jpeg') imagejpeg($dst, $path, $quality); else imagepng($dst, $path, 9);
-        imagedestroy($src); imagedestroy($dst);
     }
 
     private function watermark($path) {

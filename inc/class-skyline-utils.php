@@ -47,7 +47,7 @@ class Skyline_Utils {
         return min(100, $score);
     }
 
-    public static function batch_process($posts, $model = 'deepseek-v3') {
+    public static function batch_process($posts, $model = '') {
         $results = [];
         $core = Skyline_Core::instance();
         foreach ($posts as $post) {
