@@ -770,11 +770,11 @@ class Skyline_Core {
         if (is_string($limit_err)) {
             // A1：限流拦截也记一条失败（问题取 sanitize 后的原文；
             // record_chat_log 里会再截断到 200 字）。
-            $this->record_chat_log(sanitize_text_field($_POST['msg'] ?? ''), '', $this->chat_elapsed_ms($chat_started), 'error', $limit_err, $ip_hash);
+            $this->record_chat_log(sanitize_text_field( wp_unslash( $_POST['msg'] ?? '' ) ), '', $this->chat_elapsed_ms($chat_started), 'error', $limit_err, $ip_hash);
             wp_send_json_error($limit_err);
         }
 
-        $msg = sanitize_text_field($_POST['msg'] ?? '');
+        $msg = sanitize_text_field( wp_unslash( $_POST['msg'] ?? '' ) );
         // 聊天输入加长度上限：超长输入直通 API 会拖慢调用、放大 token 消耗。
         if (mb_strlen($msg) > 2000) {
             $this->record_chat_log($msg, '', $this->chat_elapsed_ms($chat_started), 'error', '消息过长（最多 2000 字符）', $ip_hash);
@@ -864,8 +864,8 @@ class Skyline_Core {
     public function handle_ai_task() {
         check_ajax_referer('sky_ai_task_nonce');
         if(!current_user_can('edit_posts')) wp_send_json_error('Unauthorized');
-        $t = sanitize_key($_POST['task'] ?? '');
-        $i = wp_kses_post($_POST['input'] ?? '');
+        $t = sanitize_key( wp_unslash( $_POST['task'] ?? '' ) );
+        $i = wp_kses_post( wp_unslash( $_POST['input'] ?? '' ) );
         // 长度限制，防止超长输入拖垮 API 调用与请求超时
         $i = mb_substr($i, 0, 6000);
         
@@ -905,8 +905,8 @@ class Skyline_Core {
     public function handle_save_prompt() {
         check_ajax_referer('sky_prompt_nonce');
         if(!current_user_can('manage_options')) wp_send_json_error('Unauthorized');
-        $name = sanitize_text_field($_POST['name'] ?? '');
-        $template = wp_kses_post($_POST['template'] ?? '');
+        $name = sanitize_text_field( wp_unslash( $_POST['name'] ?? '' ) );
+        $template = wp_kses_post( wp_unslash( $_POST['template'] ?? '' ) );
         if(!$name || !$template) wp_send_json_error('Missing data');
         
         $lib = get_option('skyline_prompt_library', []);
@@ -925,7 +925,7 @@ class Skyline_Core {
     public function handle_delete_prompt() {
         check_ajax_referer('sky_prompt_nonce');
         if(!current_user_can('manage_options')) wp_send_json_error('Unauthorized');
-        $id = sanitize_text_field($_POST['id'] ?? '');
+        $id = sanitize_text_field( wp_unslash( $_POST['id'] ?? '' ) );
         if(!$id) wp_send_json_error('Missing id');
         $lib = get_option('skyline_prompt_library', []);
         if (!is_array($lib)) $lib = [];
@@ -940,14 +940,14 @@ class Skyline_Core {
     public function handle_check_quality() {
         check_ajax_referer('sky_quality_nonce');
         if(!current_user_can('edit_posts')) wp_send_json_error('Unauthorized');
-        $content = wp_kses_post($_POST['content'] ?? '');
+        $content = wp_kses_post( wp_unslash( $_POST['content'] ?? '' ) );
         wp_send_json_success(Skyline_Utils::assess_quality($content));
     }
 
     public function handle_gen_img() {
         check_ajax_referer('sky_ai_task_nonce');
         if(!current_user_can('edit_posts')) wp_send_json_error('Unauthorized');
-        $prompt = sanitize_text_field($_POST['prompt'] ?? '');
+        $prompt = sanitize_text_field( wp_unslash( $_POST['prompt'] ?? '' ) );
         // L8：prompt 为空直接报错，不发请求。
         if ($prompt === '') wp_send_json_error('生图提示词为空');
         $k = $this->get_img_api_key();
