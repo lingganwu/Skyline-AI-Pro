@@ -4,7 +4,7 @@ Tags: ai, deepseek, content-automation, seo, productivity
 Requires at least: 5.8
 Tested up to: 7.1
 Requires PHP: 7.4
-Stable tag: 2.2.1
+Stable tag: 2.2.2
 License: GPLv2 or later
 License URI: http://www.gnu.org/licenses/gpl-2.0.html
 
@@ -30,6 +30,11 @@ Skyline AI Pro 是一款为专业内容创作者设计的 WordPress 智能中台
 3. Go to the 'Skyline Pro' settings page to configure your API keys.
 
 == Changelog ==
+
+= 2.2.2 =
+* 修复：批量卡片全瘫——admin.js 改页头加载（$in_footer=false）。v2.2.1 把批量驱动抽进 admin.js（页脚加载），而三张卡片的内联脚本在正文里直接调 SkyBatchRunner.create()，执行时驱动尚不存在 → ReferenceError，整段内联脚本中断、点击静默失败；页头加载后内联脚本执行前驱动已定义
+* 修复：批量/扫描失败文案带 HTTP 状态——403（登录过期或 nonce 失效）、504/超时、500、断网不再混成一句“网络错误”
+* 优化：数据看板“插件能力概览”改成功能介绍，不再写当前厂商/模型名（那些是用户可改的设置，在“智能核心”里看）
 
 = 2.2.1 =
 * 新功能：批量进度实时显示——WebP 转换、图片同步、SEO 补全共用一个批量进度组件：发每批前显示“正在处理第 N/M 批”，停止立即中断在途请求；失败与跳过的文章逐条列出原因，不再只写“补全失败”

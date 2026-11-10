@@ -325,12 +325,14 @@ class Skyline_Admin {
         if (!is_array($schema)) $schema = [];
 
         // 加载外部资源
+        // v2.2.2：admin.js 页头加载（主入口的 admin_enqueue_scripts 钩子
+        // 已挂好，这里再挂一次是兜底——同一 handle 重复挂是 no-op，以钩
+        // 子那次为准）。三张批量卡片的内联脚本在正文里直接调
+        // SkyBatchRunner.create()，页脚加载时 SkyBatchRunner 尚不存在 →
+        // ReferenceError，整段内联脚本中断、点击静默失败。
+        // skyline_ajax 的 localize 已移到钩子（页头打印前挂好）。
         wp_enqueue_style('skyline-admin-css', SKY_URL . 'assets/css/admin.css', [], SKY_VERSION);
-        wp_enqueue_script('skyline-admin-js', SKY_URL . 'assets/js/admin.js', ['jquery'], SKY_VERSION, true);
-        wp_localize_script('skyline-admin-js', 'skyline_ajax', [
-            'ajax_url' => admin_url('admin-ajax.php'),
-            'nonce' => wp_create_nonce('skyline_ajax_nonce')
-        ]);
+        wp_enqueue_script('skyline-admin-js', SKY_URL . 'assets/js/admin.js', ['jquery'], SKY_VERSION, false);
 
         $nav_items = [
             'dashboard' => ['label' => '📊 数据看板', 'icon' => '📊'],
@@ -509,29 +511,11 @@ class Skyline_Admin {
     private function render_dashboard($health) {
         ?>
         <?php
-        // 概览按实际配置动态显示，不再写死具体模型名：厂商由 api_base
-        // 反推预设（detect_api_vendor），对不上显示 Endpoint host；
-        // 未配 api_base 时用通用描述；模型名读当前 chat_model/image_model。
-        $ov_base = trim((string)$this->core->get_opt('api_base', ''));
-        $ov_chat = trim((string)$this->core->get_opt('chat_model', ''));
-        $ov_img = trim((string)$this->core->get_opt('image_model', ''));
-        if ($ov_base === '') {
-            $ov_text = 'Skyline AI Pro 是您的智能运营中台。配置 API 后可实现 AI 写作与绘图；配合 Redis 缓存与 OSS 云存储，缓存命中时可减少重复生成与回源。';
-        } else {
-            $ov_key = Skyline_Core::detect_api_vendor($ov_base);
-            $ov_vendors = Skyline_Core::get_api_vendors();
-            if ($ov_key !== 'custom' && isset($ov_vendors[$ov_key])) {
-                $ov_vendor = $ov_vendors[$ov_key]['label'];
-            } else {
-                $ov_host = parse_url($ov_base, PHP_URL_HOST);
-                $ov_vendor = '自定义接口' . (is_string($ov_host) && $ov_host !== '' ? '（' . $ov_host . '）' : '');
-            }
-            $ov_models = [];
-            if ($ov_chat !== '') $ov_models[] = '对话模型 ' . $ov_chat;
-            if ($ov_img !== '') $ov_models[] = '绘图模型 ' . $ov_img;
-            $ov_caps = $ov_img !== '' ? '实现 AI 写作与绘图' : '实现 AI 写作';
-            $ov_text = 'Skyline AI Pro 是您的智能运营中台。当前使用' . $ov_vendor . (empty($ov_models) ? '' : '，' . implode('，', $ov_models)) . '，' . $ov_caps . '；配合 Redis 缓存与 OSS 云存储，缓存命中时可减少重复生成与回源。';
-        }
+        // v2.2.2：概览只介绍模型的功能，不写当前配置——厂商/模型名是
+        // 用户可改的设置（在“智能核心”里看），写进概览既多余、换了
+        // 配置还得跟着改。原来按 api_base 是否为空分两支、反推厂商
+        // 再拼模型名的整段逻辑整个去掉，固定一段功能介绍。
+        $ov_text = 'Skyline AI Pro 是您的智能运营中台。AI 对话：回答访客问题、撰写文章与文案、自动补全英文 Slug、摘要与标签；AI 绘图：按文字描述生成文章配图；图片同步：把文章里的外链图片一键转成本地并同步到云存储；配合 Redis 缓存与 OSS 云存储，缓存命中时可减少重复生成与回源。';
         ?>
         <div class="sky-card">
             <div class="sky-card-title">✨ 插件能力概览</div>
@@ -711,6 +695,7 @@ class Skyline_Admin {
             <div class="sky-card">
                 <div class="sky-card-title">📜 更新历史</div>
                 <div style="font-size: 13px; color: var(--sky-text-muted); line-height: 1.8;">
+                    <b>v2.2.2</b> - 修复批量卡片全瘫：admin.js 改页头加载（内联脚本调 SkyBatchRunner.create() 时驱动已定义）；批量/扫描失败文案带 HTTP 状态（403/504/500/断网可区分）；数据看板概览改成功能介绍，不再写当前厂商/模型名<br>
                     <b>v2.2.1</b> - 批量进度实时显示（WebP/图片同步/SEO 共用组件，在途批次可见、停止立即生效）+ 失败/跳过逐篇给原因；敏感字段防浏览器自动填充（密码框默认禁用、生图密钥独立）；生图 API Key 独立（留空跟随主 Key）；Prompt 模板库移到聊天记录上方<br>
                     <b>v2.2.0</b> - API 厂商预设下拉 + 模型联动（7 家 + 自定义，已存配置自动反推厂商）；前台聊天报错按原因区分（504 超时/403/60 秒超时/断网）<br>
                     <b>v2.1.1</b> - 审核遗留小尾巴全修：预览防 XSS、手动同步补排除检查、英文 Slug 不带中文人设、每日上限按本地天重置、WebP 原图删失败可重试、生图端点安全默认值；重新保存复活已放弃的自动 SEO、接口报错带出真实 message<br>

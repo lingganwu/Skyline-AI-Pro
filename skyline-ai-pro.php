@@ -1,15 +1,15 @@
 <?php
 /*
 Plugin Name: Skyline AI Pro
-Description: 灵感屋(lgwu.net) 专属智能运营中台。集成主流 AI 模型、可视化无感同步系统、智能去水印、AI 润色与 Redis 智能缓存。[V2.2.1 批量进度实时显示 + 防自动填充 + 独立生图密钥]
-Version: 2.2.1
+Description: 灵感屋(lgwu.net) 专属智能运营中台。集成主流 AI 模型、可视化无感同步系统、智能去水印、AI 润色与 Redis 智能缓存。[V2.2.2 加载顺序回归修复 + 概览文案改成功能介绍]
+Version: 2.2.2
 Author:      LingGanWu
 Text Domain: skyline-ai-pro
 */
 
 if (!defined('ABSPATH')) exit;
 
-define('SKY_VERSION', '2.2.1');
+define('SKY_VERSION', '2.2.2');
 
 define('SKY_PATH', plugin_dir_path(__FILE__));
 define('SKY_URL', plugin_dir_url(__FILE__));
@@ -28,10 +28,21 @@ spl_autoload_register(function ($class) {
 });
 
 // 修复：遵守 WP 规范，在正确的钩子加载后台 CSS/JS 资源
+// v2.2.2：admin.js 必须页头加载（$in_footer=false）。三张批量卡片
+// （WebP/蜘蛛/SEO）的内联脚本在正文里直接调 SkyBatchRunner.create()，
+// 页脚加载时内联脚本执行时 SkyBatchRunner 尚不存在 → ReferenceError，
+// 整段内联脚本中断、点击静默失败（连“正在扫描…”都不出）。页头加载
+// 保证内联脚本执行前 SkyBatchRunner 已定义。
+// skyline_ajax 的 localize 也随脚本挂到这个钩子——页头打印前就得挂好，
+// 否则脚本已打出、localize 数据打不出来。
 add_action('admin_enqueue_scripts', function($hook) {
     if (strpos($hook, 'skyline-pro') !== false) {
         wp_enqueue_style('skyline-admin-css', plugins_url('assets/css/admin.css', __FILE__), array(), SKY_VERSION);
-        wp_enqueue_script('skyline-admin-js', plugins_url('assets/js/admin.js', __FILE__), array('jquery'), SKY_VERSION, true);
+        wp_enqueue_script('skyline-admin-js', plugins_url('assets/js/admin.js', __FILE__), array('jquery'), SKY_VERSION, false);
+        wp_localize_script('skyline-admin-js', 'skyline_ajax', [
+            'ajax_url' => admin_url('admin-ajax.php'),
+            'nonce' => wp_create_nonce('skyline_ajax_nonce')
+        ]);
     }
 });
 
