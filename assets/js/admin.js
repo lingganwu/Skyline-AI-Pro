@@ -1,5 +1,5 @@
 document.addEventListener('DOMContentLoaded', function() {
-    console.log('🚀 Skyline AI Pro v2.2.4 Enterprise Engine Loaded');
+    console.log('🚀 Skyline AI Pro v2.2.6 Enterprise Engine Loaded');
 
     // 表单保存按钮动画增强
     const saveBtn = document.querySelector('.sky-save-btn');

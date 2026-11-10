@@ -1,15 +1,21 @@
 <?php
 /*
 Plugin Name: Skyline AI Pro
-Description: 灵感屋(lgwu.net) 专属智能运营中台。集成主流 AI 模型、可视化无感同步系统、智能去水印、AI 润色与 Redis 智能缓存。[V2.2.4 AI 回复 Markdown 渲染 + 系统人设改访客视角]
-Version: 2.2.4
+Plugin URI: https://github.com/lingganwu/Skyline-AI-Pro
+Description: AI 运营中台：集成主流 AI 模型，提供访客聊天助手、AI 绘图、SEO 自动补全、图片同步与缓存优化。
+Version: 2.2.6
+Requires at least: 5.8
+Requires PHP: 7.4
 Author:      LingGanWu
+Author URI: https://www.lgwu.net
+License: GPL-2.0-or-later
+License URI: https://www.gnu.org/licenses/gpl-2.0.html
 Text Domain: skyline-ai-pro
 */
 
 if (!defined('ABSPATH')) exit;
 
-define('SKY_VERSION', '2.2.4');
+define('SKY_VERSION', '2.2.6');
 
 define('SKY_PATH', plugin_dir_path(__FILE__));
 define('SKY_URL', plugin_dir_url(__FILE__));
@@ -104,7 +110,7 @@ if (!function_exists('skyline_ai_assess_quality')) {
     function skyline_ai_assess_quality($content) { return Skyline_Utils::assess_quality($content); }
 }
 if (!function_exists('skyline_batch_process')) {
-    function skyline_batch_process($posts, $model = 'deepseek-v3') { return Skyline_Utils::batch_process($posts, $model); }
+    function skyline_batch_process($posts, $model = '') { return Skyline_Utils::batch_process($posts, $model); }
 }
 if (!function_exists('skyline_create_backup')) {
     function skyline_create_backup() { return Skyline_Utils::create_backup(); }

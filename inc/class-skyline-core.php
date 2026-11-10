@@ -227,7 +227,7 @@ class Skyline_Core {
     }
 
     // v2.2.1：对话端点归一化。call_api() 直接拿 api_base 当 POST 目标，
-    // 用户只填裸根地址（如 https://www.lgwu.de:3001/v1）时会 POST 到
+    // 用户只填裸根地址（如 https://api.example.com/v1）时会 POST 到
     // /v1 而失败（404/405）。v2.2.3 扩展：以版本号段结尾（如 /v1、/v4，
     // 覆盖智谱裸根 https://open.bigmodel.cn/api/paas/v4）补
     // /chat/completions；以 /chat 结尾（缺 completions）补 /completions；
@@ -265,18 +265,18 @@ class Skyline_Core {
 
     public function get_config_schema() {
         return [
-            'api_base' => ['group'=>'ai', 'type'=>'url', 'label'=>'API Endpoint', 'default'=>'https://api.siliconflow.cn/v1/chat/completions'],
+            'api_base' => ['group'=>'ai', 'type'=>'url', 'label'=>'API Endpoint', 'default'=>''],
             // 生图端点根地址（L8）：handle_gen_img() 优先用这里拼 /images/generations；
             // 留空时回退到从 api_base 推导（/chat/completions → /images/generations）并记日志。
-            'api_img_base' => ['group'=>'ai', 'type'=>'url', 'label'=>'生图 API 根地址', 'desc'=>'例如 https://api.siliconflow.cn/v1；默认与上方 API Endpoint 同厂商（硅基流动）。留空时从 API Endpoint 推导（仅当它以 /chat/completions 结尾时）；推导不出请填写。', 'default'=>'https://api.siliconflow.cn/v1'],
+            'api_img_base' => ['group'=>'ai', 'type'=>'url', 'label'=>'生图 API 根地址', 'desc'=>'例如 https://api.example.com/v1；留空时从 API Endpoint 推导（仅当它以 /chat/completions 结尾时）；推导不出请填写。', 'default'=>''],
             'api_key' => ['group'=>'ai', 'type'=>'password', 'label'=>'API Key', 'desc'=>'你的 API 密钥 (sk-...)；对话与生图共用，生图未填独立密钥时也用它。', 'required'=>true],
             // v2.2.1：独立的生图密钥（对话与生图分属不同厂商时用）。留空
             // 时跟随上方 API Key；整站都切同一家（如 FreeLLMAPI）时留
             // 空即可，单密钥。生图请求优先用它（见 handle_gen_img）。
             'api_img_key' => ['group'=>'ai', 'type'=>'password', 'label'=>'生图 API Key', 'desc'=>'生图专用的 API 密钥；留空时跟随上方“API Key”。对话切到 FreeLLMAPI、生图继续用硅基流动时，在此填硅基流动的密钥；整站都切同一家时留空即可（单密钥）。', 'default'=>''],
-            'chat_model' => ['group'=>'ai', 'type'=>'datalist', 'label'=>'对话模型', 'desc'=>'可点选预设，也可直接输入厂商新出的模型名；切换厂商后下拉随之更新。', 'default'=>'zai-org/GLM-5.3-Flash'],
-            'image_model' => ['group'=>'ai', 'type'=>'datalist', 'label'=>'绘图模型', 'desc'=>'可点选预设，也可直接输入新模型名；所选厂商无绘图模型时请留空或自由输入。', 'default'=>'black-forest-labs/FLUX.1-schnell'],
-            'system_prompt' => ['group'=>'ai', 'type'=>'textarea', 'label'=>'系统人设', 'default'=>"你是灵感屋（lgwu.net）的 AI 助手，接待来访的设计师、学生和景观爱好者。帮访客找站内资源、解答景观设计问题：推荐景观方案、SU 模型、CAD 施工图、植物配置、铺装做法、软件教程；访客想找什么，就帮他找到。说话亲切、简洁，像接待一位来访的朋友。用中文回答。回答用 Markdown 排版：小标题分段、列表列要点、段落留空；代码放代码块、网址给成链接。不要提写文章、SEO、内容创作——那是站长的工作。"],
+            'chat_model' => ['group'=>'ai', 'type'=>'datalist', 'label'=>'对话模型', 'desc'=>'可点选预设，也可直接输入厂商新出的模型名；切换厂商后下拉随之更新。', 'default'=>''],
+            'image_model' => ['group'=>'ai', 'type'=>'datalist', 'label'=>'绘图模型', 'desc'=>'可点选预设，也可直接输入新模型名；所选厂商无绘图模型时请留空或自由输入。', 'default'=>''],
+            'system_prompt' => ['group'=>'ai', 'type'=>'textarea', 'label'=>'系统人设', 'default'=>"你是本站的 AI 助手，接待来访的访客。帮访客找站内内容、解答与本站主题相关的问题；访客想找什么，就帮他找到。说话亲切、简洁，像接待一位来访的朋友。用中文回答。回答用 Markdown 排版：小标题分段、列表列要点、段落留空；代码放代码块、网址给成链接。不要提写文章、SEO、内容创作——那是站长的工作。"],
             'robot_enable' => ['group'=>'ai', 'type'=>'bool', 'label'=>'启用前台悬浮助手', 'default'=>true],
             'robot_only_logged' => ['group'=>'ai', 'type'=>'bool', 'label'=>'仅登录用户可见', 'default'=>false],
             'robot_img' => ['group'=>'ai', 'type'=>'url', 'label'=>'自定义图标 URL', 'desc'=>'请用方形图片（非方形图会被裁成圆形显示）。'],
@@ -302,7 +302,6 @@ class Skyline_Core {
             'spider_ssl_verify' => ['group'=>'spider', 'type'=>'bool', 'label'=>'验证 SSL 证书', 'default'=>true],
             'spider_domains' => ['group'=>'spider', 'type'=>'textarea', 'label'=>'排除域名 (一行一个)'],
             'spider_wm_enable' => ['group'=>'spider', 'type'=>'bool', 'label'=>'启用添加水印', 'default'=>false],
-            'spider_rm_wm' => ['group'=>'spider', 'type'=>'bool', 'label'=>'智能去除水印 (裁剪底部)', 'desc'=>'先检测图片底部 40px 是否为均匀色带（主导色占比 ≥85% 且与上方色带不同），检测到才裁掉该色带、检测不到不裁；矮于 150px 的图跳过。', 'default'=>false],
             'spider_wm_text' => ['group'=>'spider', 'type'=>'text', 'label'=>'文字水印内容', 'default'=>'@Skyline'],
             
             'oss_enable' => ['group'=>'oss', 'type'=>'bool', 'label'=>'启用 OSS 云存储', 'default'=>false],
@@ -954,7 +953,7 @@ class Skyline_Core {
         $k = $this->get_img_api_key();
         if(!$k) wp_send_json_error('API Key 未配置');
         // L8：生图端点优先用独立配置项 api_img_base（根地址，schema 默认
-        // 与 API Endpoint 同厂商：https://api.siliconflow.cn/v1）。
+        // 留空；留空时从 API Endpoint 推导）。
         // 留空时只从以 /chat/completions 结尾的 api_base 推导（/chat/completions → /images/generations）并记日志。
         // 推导逻辑与 get_effective_img_base() 同源；推导不出时直接报错，
         // 不再静默回退 SiliconFlow 默认地址——api_base 换了厂商时，偷偷
@@ -1034,8 +1033,8 @@ class Skyline_Core {
         if(!$this->get_opt('robot_enable')) return;
         // 补上缺失的登录可见逻辑！
         if ($this->get_opt('robot_only_logged') && !is_user_logged_in()) return;
-        // 注意：插件自带的 assets/images/robot.png 本身就是坏文件（从 v2.0.1
-        // 起 PNG 头就损坏，getimagesize() 失败），绝不能把它当头像 fallback。
+        // 注意：插件自带的默认头像文件已在 v2.2.5 移除，不要再把任何内置
+        // 图片当头像 fallback——坏图一旦被引用，前台就会出现破图图标。
         // robot_img 没设置时，浮动入口与标题栏都不输出 <img>，改用 emoji
         // 入口，避免前台出现破图图标。
         $img_url = $this->get_opt('robot_img');
@@ -1048,7 +1047,7 @@ class Skyline_Core {
             . ($has_img
                 ? '<img src="' . esc_url($img_url) . '" alt="AI Assistant">'
                 : '<span class="sky-waifu-fallback" role="img" aria-label="AI Assistant">💬</span>')
-            . '<div id="sky-waifu-tips" class="show">你好！我是灵感屋 AI 助手，有什么可以帮您？</div>
+            . '<div id="sky-waifu-tips" class="show">你好！我是本站的 AI 助手，有什么可以帮您？</div>
         </div>
         <div id="sky-chat-box">
             <div class="sky-head">'

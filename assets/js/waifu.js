@@ -1,8 +1,8 @@
 // 前台悬浮助手（Skyline Copilot）。
 // 欢迎语与推荐问题只在浏览器里显示，不发给 API、不计入聊天限流；
 // 点推荐问题才会走正常发送流程（skySend），与手动输入完全一致。
-var SKY_WELCOME_TEXT = '你好！我是灵感屋 AI 助手，可以帮你找案例、找模型、找施工图，也可以聊聊景观设计。';
-var SKY_SUGGESTIONS = ['中式庭院案例有哪些？', 'SU 模型怎么下载？', '施工图节点详图怎么找？', '效果图渲染教程有吗？'];
+var SKY_WELCOME_TEXT = '你好！我是本站的 AI 助手，可以帮你找文章、找资源，也可以聊聊相关问题。';
+var SKY_SUGGESTIONS = ['这个插件能帮我做什么？', '如何写一篇好文章？', '怎么生成文章配图？', '如何补全文章的 SEO 信息？'];
 var skyWelcomeShown = false;
 
 setTimeout(function(){

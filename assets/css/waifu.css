@@ -4,7 +4,7 @@
    :hover，等于死的；改成动画不控制的 filter 亮度，hover 才真正可见。 */
 #sky-waifu:hover { filter:brightness(1.12); }
 @keyframes skyFloat{0%,100%{transform:translateY(0) rotate(-2deg)}50%{transform:translateY(-8px) rotate(2deg)}}
-/* robot_img 未设置时的 emoji 入口（绝不用坏掉的 robot.png，避免破图） */
+/* robot_img 未设置时的 emoji 入口（不输出 <img>，避免破图） */
 .sky-waifu-fallback { display:flex; align-items:center; justify-content:center; width:100%; height:100%; border-radius:50%; background:linear-gradient(135deg,#6366f1,#a855f7); color:#fff; font-size:32px; box-shadow:0 5px 15px rgba(0,0,0,0.2); }
 /* 气泡必须是 #sky-waifu 的子元素：#sky-waifu 是 fixed（钉在视口上），
    气泡 absolute 相对它定位才能跟着小房子走；做兄弟元素时 absolute 相对
