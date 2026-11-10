@@ -4,7 +4,7 @@ Tags: ai, content-automation, seo, productivity, image-optimization
 Requires at least: 5.8
 Tested up to: 7.1
 Requires PHP: 7.4
-Stable tag: 2.2.7
+Stable tag: 2.2.8
 License: GPLv2 or later
 License URI: http://www.gnu.org/licenses/gpl-2.0.html
 
@@ -117,6 +117,9 @@ You can also contact the author by email at admin@lgwu.net. Please include your 
 
 == Changelog ==
 
+= 2.2.8 =
+* WordPress.org automated-check remediation: replaced parse_url with wp_parse_url, rename with WP_Filesystem::move, unlink with wp_delete_file, date with wp_date, strip_tags with wp_strip_all_tags, raw filesystem calls with WP_Filesystem methods, escaped all admin output, and removed the deprecated wp_get_sites fallback (87 ERROR + 1 WARNING fixed).
+* Spider batch sync and SEO scan + batch now run with a ~20-second wall-clock budget and resume (paged scans, 500 posts per page, per-article deadline in the spider batch), modeled on the WebP paged scan — no more HTTP 554 / network-error timeouts on large sites; every post and image is still processed, only chunked.
 = 2.2.7 =
 * Security: all `$_POST` / `$_GET` reads now pass through `wp_unslash()` before sanitization (WordPress.org compliance).
 * Tests: new assertions cover slashed input for settings save, chat, templates, WebP scan, OSS purge and spider/SEO endpoints.

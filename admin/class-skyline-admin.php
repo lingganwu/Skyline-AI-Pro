@@ -37,7 +37,7 @@ class Skyline_Admin {
                 return;
             }
             if (!current_user_can('manage_options')) {
-                wp_die(__('权限不足', 'skyline-ai-pro'));
+                wp_die(esc_html__('权限不足', 'skyline-ai-pro'));
             }
             $this->core->clear_chat_log();
             add_settings_error('skyline_messages', 'skyline_msg', '✅ 聊天记录已清空。', 'updated');
@@ -49,7 +49,7 @@ class Skyline_Admin {
         }
         
         if (!current_user_can('manage_options')) {
-            wp_die(__('权限不足', 'skyline-ai-pro'));
+            wp_die(esc_html__('权限不足', 'skyline-ai-pro'));
         }
         
         $posted = wp_unslash( $_POST['skyline_settings'] ?? [] );
@@ -199,7 +199,12 @@ class Skyline_Admin {
         check_ajax_referer('skyline_ajax_nonce');
         if (!current_user_can('manage_options')) wp_send_json_error('Unauthorized');
         if (!class_exists('Skyline_Content')) wp_send_json_error('内容模块未加载');
-        wp_send_json_success(Skyline_Content::instance()->scan_external_images());
+        // v2.2.8：分页扫描（WebP 同款）：offset/page_size/already 由
+        // 前端 scanPaged 循环传入，缺省即第一页。
+        $offset = isset($_POST['offset']) ? max(0, (int) wp_unslash($_POST['offset'])) : 0;
+        $page_size = isset($_POST['page_size']) ? (int) wp_unslash($_POST['page_size']) : Skyline_Content::SCAN_PAGE_SIZE;
+        $already = isset($_POST['already']) ? max(0, (int) wp_unslash($_POST['already'])) : 0;
+        wp_send_json_success(Skyline_Content::instance()->scan_external_images($offset, $page_size, $already));
     }
 
     public function ajax_spider_batch() {
@@ -214,7 +219,11 @@ class Skyline_Admin {
         check_ajax_referer('skyline_ajax_nonce');
         if (!current_user_can('manage_options')) wp_send_json_error('Unauthorized');
         if (!class_exists('Skyline_Content')) wp_send_json_error('内容模块未加载');
-        wp_send_json_success(Skyline_Content::instance()->scan_seo_missing());
+        // v2.2.8：分页扫描（与 ajax_spider_scan 同款）。
+        $offset = isset($_POST['offset']) ? max(0, (int) wp_unslash($_POST['offset'])) : 0;
+        $page_size = isset($_POST['page_size']) ? (int) wp_unslash($_POST['page_size']) : Skyline_Content::SCAN_PAGE_SIZE;
+        $already = isset($_POST['already']) ? max(0, (int) wp_unslash($_POST['already'])) : 0;
+        wp_send_json_success(Skyline_Content::instance()->scan_seo_missing($offset, $page_size, $already));
     }
 
     public function ajax_seo_batch() {
@@ -351,14 +360,14 @@ class Skyline_Admin {
                     <div class="sky-brand-logo">S</div>
                     <div>
                         <span class="sky-brand-text">Skyline AI Pro</span>
-                        <span class="sky-brand-ver">Enterprise v<?php echo SKY_VERSION; ?></span>
+                        <span class="sky-brand-ver">Enterprise v<?php echo esc_html(SKY_VERSION); ?></span>
                     </div>
                 </div>
                 <div class="sky-nav">
                     <?php foreach ($nav_items as $id => $item): ?>
                         <a href="?page=skyline-pro&tab=<?php echo esc_attr($id); ?>" 
                            class="sky-nav-item <?php echo $current_tab === $id ? 'active' : ''; ?>">
-                            <?php echo $item['label']; ?>
+                            <?php echo esc_html($item['label']); ?>
                         </a>
                     <?php endforeach; ?>
                 </div>
@@ -406,7 +415,7 @@ class Skyline_Admin {
             if ($btn) $btn.prop('disabled', true).html('⏳ 诊断中…');
             jQuery.post(ajaxurl, {
                 action: actionName,
-                _ajax_nonce: '<?php echo wp_create_nonce('sky_ai_test_nonce'); ?>'
+                _ajax_nonce: '<?php echo esc_attr(wp_create_nonce('sky_ai_test_nonce')); ?>'
             }, function(r) {
                 if (r.success) {
                     // r.data 可能是字符串（Redis/OSS 测试）或对象（API 测试
@@ -448,7 +457,7 @@ class Skyline_Admin {
             $btns.prop('disabled', true);
             var $st = statusId ? jQuery('#' + statusId) : jQuery();
             if ($st.length) $st.text(workingText || '处理中…');
-            var params = { action: action, _ajax_nonce: '<?php echo wp_create_nonce('skyline_ajax_nonce'); ?>' };
+            var params = { action: action, _ajax_nonce: '<?php echo esc_attr(wp_create_nonce('skyline_ajax_nonce')); ?>' };
             if (extra) for (var k in extra) params[k] = extra[k];
             jQuery.post(ajaxurl, params, function(r) {
                 var msg = '';
@@ -498,7 +507,7 @@ class Skyline_Admin {
                 action: 'sky_save_prompt',
                 name: name,
                 template: template,
-                _ajax_nonce: '<?php echo wp_create_nonce('sky_prompt_nonce'); ?>'
+                _ajax_nonce: '<?php echo esc_attr(wp_create_nonce('sky_prompt_nonce')); ?>'
             }, function(r) {
                 if (r.success) {
                     alert('✅ 模板保存成功');
@@ -525,7 +534,7 @@ class Skyline_Admin {
         function loadPrompts() {
             jQuery.post(ajaxurl, {
                 action: 'sky_get_prompts',
-                _ajax_nonce: '<?php echo wp_create_nonce('sky_prompt_nonce'); ?>'
+                _ajax_nonce: '<?php echo esc_attr(wp_create_nonce('sky_prompt_nonce')); ?>'
             }, function(r) {
                 if (r.success) {
                     skyPromptCache = r.data || {};
@@ -565,7 +574,7 @@ class Skyline_Admin {
                 jQuery.post(ajaxurl, {
                     action: 'sky_delete_prompt',
                     id: id,
-                    _ajax_nonce: '<?php echo wp_create_nonce('sky_prompt_nonce'); ?>'
+                    _ajax_nonce: '<?php echo esc_attr(wp_create_nonce('sky_prompt_nonce')); ?>'
                 }, function(r) {
                     if (r.success) {
                         alert('✅ 模板已删除');
@@ -580,7 +589,7 @@ class Skyline_Admin {
         function clearLogs() {
             jQuery.post(ajaxurl, {
                 action: 'sky_clear_logs',
-                _ajax_nonce: '<?php echo wp_create_nonce('sky_clear_logs_nonce'); ?>'
+                _ajax_nonce: '<?php echo esc_attr(wp_create_nonce('sky_clear_logs_nonce')); ?>'
             }, function(r) {
                 if (r.success) {
                     alert('日志已清空');
@@ -687,11 +696,15 @@ class Skyline_Admin {
                     if (is_array($spider) && isset($spider['success'])) {
                         $sp_label = '成功 ' . (int)$spider['success'] . ' / 失败 ' . (int)($spider['failed'] ?? 0);
                         $sp_cls = ((int)($spider['failed'] ?? 0) > 0) ? 'error' : '';
-                        $sp_time = !empty($spider['time']) ? date('Y-m-d H:i', (int)$spider['time']) : '';
+                        $sp_time = !empty($spider['time']) ? wp_date('Y-m-d H:i', (int)$spider['time']) : '';
                     } else {
                         $sp_label = '未同步'; $sp_cls = ''; $sp_time = '';
                     }
-                    $rp_date = !empty($rp->post_date) ? date('Y-m-d H:i', strtotime($rp->post_date)) : '—';
+                    // post_date 本身已是站点本地时间：wp_date() 会把 strtotime
+                    // 得到的时间戳再按站点时区换算一次，导致显示时间整体
+                    // 偏移（东八区 +8 小时）。mysql2date(..., false) 只做
+                    // 格式化、不换算时区，显示值与 post_date 一致。
+                    $rp_date = !empty($rp->post_date) ? mysql2date('Y-m-d H:i', $rp->post_date, false) : '—';
                 ?>
                 <tr>
                     <td style="padding: 10px 0; border-bottom: 1px solid var(--sky-border); font-size: 13px;">
@@ -699,10 +712,10 @@ class Skyline_Admin {
                     </td>
                     <td style="padding: 10px 0; border-bottom: 1px solid var(--sky-border); font-size: 13px; color: var(--sky-text-muted);"><?php echo esc_html($rp_date); ?></td>
                     <td style="padding: 10px 0; border-bottom: 1px solid var(--sky-border); font-size: 13px;">
-                        <?php if ($seo_cls !== '') : ?><span class="sky-status-<?php echo $seo_cls; ?>"><?php echo esc_html($seo_label); ?></span><?php else : ?><?php echo esc_html($seo_label); ?><?php endif; ?>
+                        <?php if ($seo_cls !== '') : ?><span class="sky-status-<?php echo esc_attr($seo_cls); ?>"><?php echo esc_html($seo_label); ?></span><?php else : ?><?php echo esc_html($seo_label); ?><?php endif; ?>
                     </td>
                     <td style="padding: 10px 0; border-bottom: 1px solid var(--sky-border); font-size: 13px;">
-                        <?php if ($sp_cls !== '') : ?><span class="sky-status-<?php echo $sp_cls; ?>"><?php echo esc_html($sp_label); ?></span><?php else : ?><?php echo esc_html($sp_label); ?><?php endif; ?><?php if ($sp_time !== '') : ?> <span style="color: var(--sky-text-muted); font-size: 12px;"><?php echo esc_html($sp_time); ?></span><?php endif; ?>
+                        <?php if ($sp_cls !== '') : ?><span class="sky-status-<?php echo esc_attr($sp_cls); ?>"><?php echo esc_html($sp_label); ?></span><?php else : ?><?php echo esc_html($sp_label); ?><?php endif; ?><?php if ($sp_time !== '') : ?> <span style="color: var(--sky-text-muted); font-size: 12px;"><?php echo esc_html($sp_time); ?></span><?php endif; ?>
                     </td>
                 </tr>
                 <?php endforeach; ?>
@@ -722,7 +735,7 @@ class Skyline_Admin {
                     <tr>
                         <td class="sky-health-label">内存限制</td>
                         <td class="sky-health-val">
-                            <span class="sky-status-<?php echo $health['memory']['status']; ?>">
+                            <span class="sky-status-<?php echo esc_attr($health['memory']['status']); ?>">
                                 <?php echo esc_html($health['memory']['label']); ?>
                             </span>
                         </td>
@@ -734,7 +747,7 @@ class Skyline_Admin {
                     <tr>
                         <td class="sky-health-label">Redis 扩展</td>
                         <td class="sky-health-val">
-                            <span class="sky-status-<?php echo $health['redis']['status']; ?>">
+                            <span class="sky-status-<?php echo esc_attr($health['redis']['status']); ?>">
                                 <?php echo esc_html($health['redis']['label']); ?>
                             </span>
                         </td>
@@ -742,7 +755,7 @@ class Skyline_Admin {
                     <tr>
                         <td class="sky-health-label">CURL 扩展</td>
                         <td class="sky-health-val">
-                            <span class="sky-status-<?php echo $health['curl']['status']; ?>">
+                            <span class="sky-status-<?php echo esc_attr($health['curl']['status']); ?>">
                                 <?php echo esc_html($health['curl']['label']); ?>
                             </span>
                         </td>
@@ -750,7 +763,7 @@ class Skyline_Admin {
                     <tr>
                         <td class="sky-health-label">GD 库 (水印 / WebP)</td>
                         <td class="sky-health-val">
-                            <span class="sky-status-<?php echo $health['gd']['status']; ?>">
+                            <span class="sky-status-<?php echo esc_attr($health['gd']['status']); ?>">
                                 <?php echo esc_html($health['gd']['label']); ?>
                             </span>
                         </td>
@@ -770,7 +783,7 @@ class Skyline_Admin {
                             <?php elseif ($cron_health['pending'] === 0) : ?>
                                 无待处理任务
                             <?php else : ?>
-                                下次 <?php echo esc_html(date('Y-m-d H:i', (int)$cron_health['next_ts'])); ?> · 待处理 <?php echo (int)$cron_health['pending']; ?> 个
+                                下次 <?php echo esc_html(wp_date('Y-m-d H:i', (int)$cron_health['next_ts'])); ?> · 待处理 <?php echo (int)$cron_health['pending']; ?> 个
                                 <?php if ($cron_health['overdue'] > 0) : ?>
                                     <span class="sky-status-error">⚠️ 逾期 <?php echo (int)$cron_health['overdue']; ?> 个</span>
                                 <?php endif; ?>
@@ -783,6 +796,7 @@ class Skyline_Admin {
             <div class="sky-card">
                 <div class="sky-card-title">📜 更新历史</div>
                 <div style="font-size: 13px; color: var(--sky-text-muted); line-height: 1.8;">
+                    <b>v2.2.8</b> - WordPress.org 自动检查整改：parse_url→wp_parse_url、rename→WP_Filesystem::move、unlink→wp_delete_file、date→wp_date、strip_tags→wp_strip_all_tags、文件系统调用走 WP_Filesystem、后台输出全转义、删弃用 wp_get_sites 回退；图片同步与 SEO 扫描/批量加约 20 秒时间预算断点续跑（分页扫描 500 篇/页、单篇截止点），不再报 HTTP 554 / 网络错误<br>
                     <b>v2.2.7</b> - 全站 $_POST/$_GET 读取先 wp_unslash 再消毒（WordPress.org 合规，设置保存/聊天/模板/WebP 扫描/OSS 待删/图片同步/SEO 评分入口全覆盖）；补测试断言<br>
                     <b>v2.2.6</b> - readme.txt 重写为英文（FAQ/截图/隐私披露/厂商 Terms/Support）；删除去水印功能；默认厂商改中性（留空自选，模型默认亦留空）；系统人设改通用版；插件头补 Plugin URI / Author URI；新增 GPL-2.0 LICENSE 文件<br>
                     <b>v2.2.5</b> - 单站硬编码通用化（前台欢迎语/推荐问题、气泡提示、后台品牌不再写本站名称）；删除损坏的默认头像 robot.png；插件头补齐 WordPress.org 要求字段；COS SDK 缺失时友好提示不致命；卸载时清理插件数据<br>
@@ -981,7 +995,7 @@ class Skyline_Admin {
                 </tr>
                 <?php foreach ($chat_log as $cl_entry) :
                     if (!is_array($cl_entry)) continue;
-                    $cl_time = !empty($cl_entry['time']) ? date('Y-m-d H:i', (int)$cl_entry['time']) : '—';
+                    $cl_time = !empty($cl_entry['time']) ? wp_date('Y-m-d H:i', (int)$cl_entry['time']) : '—';
                     $cl_q = (string)($cl_entry['question'] ?? '');
                     $cl_ok = (($cl_entry['status'] ?? '') === 'ok');
                     $cl_reply = $cl_ok ? (string)($cl_entry['reply'] ?? '') : (string)($cl_entry['error'] ?? '');
@@ -1007,25 +1021,14 @@ class Skyline_Admin {
         <?php
     }
 
-    // L16：日志页只读末尾 N 行（默认 200 行），不把整个文件读进内存；
-    // 从文件尾部按 8KB 块倒读，凑够行数即停。
+    // L16：日志页只读末尾 N 行（默认 200 行）。v2.2.8：改走 WP_Filesystem
+    // get_contents()（fopen/fread/fclose 会被 WordPress.org 自动检查报）；
+    // 日志按天轮转、单文件有 10MB 上限，后台单次读入再取尾行可以接受。
     private function read_log_tail($file, $lines = 200) {
-        $fp = @fopen($file, 'rb');
-        if (!$fp) return '';
-        $size = filesize($file);
-        $chunk = 8192;
-        $pos = $size;
-        $buf = '';
-        $count = 0;
-        while ($pos > 0 && $count <= $lines) {
-            $read = min($chunk, $pos);
-            $pos -= $read;
-            fseek($fp, $pos);
-            $buf = fread($fp, $read) . $buf;
-            $count = substr_count($buf, "\n");
-        }
-        fclose($fp);
-        $all = explode("\n", $buf);
+        if (!class_exists('Skyline_Core') || !method_exists('Skyline_Core', 'fs_get_contents')) return '';
+        $content = Skyline_Core::fs_get_contents($file);
+        if ($content === false || $content === '' || $content === null) return '';
+        $all = explode("\n", (string)$content);
         if (count($all) > $lines) $all = array_slice($all, -$lines);
         return implode("\n", $all);
     }
@@ -1034,13 +1037,13 @@ class Skyline_Admin {
         if (preg_match('/skyline_ai-(\d{8})/', basename($file), $m)) {
             return substr($m[1], 0, 4) . '-' . substr($m[1], 4, 2) . '-' . substr($m[1], 6, 2);
         }
-        return date('Y-m-d', filemtime($file));
+        return wp_date('Y-m-d', filemtime($file));
     }
 
     private function render_logs_tab() {
         $log_dir = SKY_PATH . 'logs';
         $log_files = glob($log_dir . '/skyline_ai*.log') ?: [];
-        $today = date('Ymd');
+        $today = wp_date('Ymd');
         $today_log = '';
         foreach ($log_files as $f) {
             if (strpos(basename($f), 'skyline_ai-' . $today) === 0) { $today_log = $f; break; }
@@ -1057,12 +1060,12 @@ class Skyline_Admin {
             </div>
             <?php if ($today_log && file_exists($today_log)): ?>
                 <p style="color: var(--sky-text-muted); font-size: 13px;">
-                    日志文件：<?php echo esc_html(basename($today_log)); ?>（<?php echo esc_html(date('Y-m-d')); ?>，仅显示末尾 200 行）
+                    日志文件：<?php echo esc_html(basename($today_log)); ?>（<?php echo esc_html(wp_date('Y-m-d')); ?>，仅显示末尾 200 行）
                 </p>
                 <pre id="sky-log-content"><?php echo esc_html($this->read_log_tail($today_log, 200)); ?></pre>
             <?php else: ?>
                 <p style="color: var(--sky-text-muted); font-size: 13px;">
-                    今天（<?php echo esc_html(date('Y-m-d')); ?>）暂无日志记录。
+                    今天（<?php echo esc_html(wp_date('Y-m-d')); ?>）暂无日志记录。
                     <?php if ($latest_log): ?>
                         最近一次日志文件：<?php echo esc_html(basename($latest_log)); ?>（<?php echo esc_html($this->log_file_date($latest_log)); ?>），非今日日志，故不在此显示。
                     <?php endif; ?>
@@ -1088,7 +1091,7 @@ class Skyline_Admin {
             ?>
                 <div class="sky-setting-block">
                     <div class="sky-setting-header">
-                        <?php echo $group['title'] !== null ? esc_html($group['title']) : '⚙️ ' . $nav_items[$current_tab]['label']; ?>
+                        <?php echo $group['title'] !== null ? esc_html($group['title']) : '⚙️ ' . esc_html($nav_items[$current_tab]['label']); ?>
                         <?php if ($current_tab === 'oss' && $group_index === 0): ?>
                             <button type="button" class="button button-primary" onclick="testService('sky_test_oss', this)">
                                 🔌 测试 OSS 连接
@@ -1190,8 +1193,8 @@ class Skyline_Admin {
                     ?>
                         <tr>
                             <td>#<?php echo esc_html($id); ?></td>
-                            <td><?php echo $reg_time ? esc_html(date('Y-m-d H:i:s', $reg_time)) : '—'; ?></td>
-                            <td><?php echo $reg_time ? esc_html(date('Y-m-d H:i:s', $reg_time + DAY_IN_SECONDS)) : '—'; ?></td>
+                            <td><?php echo $reg_time ? esc_html(wp_date('Y-m-d H:i:s', $reg_time)) : '—'; ?></td>
+                            <td><?php echo $reg_time ? esc_html(wp_date('Y-m-d H:i:s', $reg_time + DAY_IN_SECONDS)) : '—'; ?></td>
                             <td><?php echo esc_html(implode('、', $file_names)); ?></td>
                             <td><?php echo esc_html('重试 ' . $retries . ' 次'); ?><?php if ($retries >= 3): ?> <span class="sky-status-error">已停止重试</span><?php endif; ?></td>
                             <td style="white-space: nowrap;">
@@ -1318,7 +1321,7 @@ class Skyline_Admin {
             // 单请求遍历全部约 53,000 个附件会撞 EdgeOne 60 秒回源超时
             // （HTTP 524），分页后每请求只扫一段、带 offset 直到 done。
             scanPaged: true,
-            nonce: '<?php echo wp_create_nonce('skyline_ajax_nonce'); ?>',
+            nonce: '<?php echo esc_attr(wp_create_nonce('skyline_ajax_nonce')); ?>',
             batchSize: function() { return 20; },
             resetCounts: function(st) { skyWebpOk = 0; skyWebpFail = 0; skyWebpSkip = 0; },
             summaryText: function(st) { return '已处理 ' + st.done + ' / ' + st.total + ' 张，成功 ' + skyWebpOk + '，失败 ' + skyWebpFail + '，跳过 ' + skyWebpSkip + '。'; },
@@ -1413,8 +1416,12 @@ class Skyline_Admin {
             status: 'sky-spider-status', progress: 'sky-spider-progress', bar: 'sky-spider-bar', failures: 'sky-spider-failures',
             scanBtn: 'sky-spider-scan-btn', startBtn: 'sky-spider-start-btn', stopBtn: 'sky-spider-stop-btn',
             scanAction: 'sky_spider_scan', batchAction: 'sky_spider_batch', batchFailLabel: '批量同步',
+            // v2.2.8：扫描改分页循环（与 WebP 同款）：单请求遍历全站
+            // 3640 篇、无预算会撞 EdgeOne 60 秒回源超时（“网络错误”），
+            // 分页后每请求只扫 500 篇、带 offset 直到 done。
+            scanPaged: true, scanPageSize: 500, scanUnit: '篇', scanItems: true,
             scanText: '正在扫描全站文章…',
-            nonce: '<?php echo wp_create_nonce('skyline_ajax_nonce'); ?>',
+            nonce: '<?php echo esc_attr(wp_create_nonce('skyline_ajax_nonce')); ?>',
             batchSize: function() { return 5; },
             resetCounts: function(st) { skySpiderOk = 0; skySpiderFail = 0; skySpiderSkip = 0; skySpiderOkImgs = 0; skySpiderFailImgs = 0; },
             summaryText: function(st) { return '已处理 ' + st.done + ' / ' + st.total + ' 篇，同步成功 ' + skySpiderOk + ' 篇（成功 ' + skySpiderOkImgs + ' 张 / 失败 ' + skySpiderFailImgs + ' 张），失败 ' + skySpiderFail + ' 篇，跳过 ' + skySpiderSkip + ' 篇。'; },
@@ -1533,8 +1540,10 @@ class Skyline_Admin {
             status: 'sky-seo-status', cost: 'sky-seo-cost', progress: 'sky-seo-progress', bar: 'sky-seo-bar', failures: 'sky-seo-failures',
             scanBtn: 'sky-seo-scan-btn', startBtn: 'sky-seo-start-btn', stopBtn: 'sky-seo-stop-btn',
             scanAction: 'sky_seo_scan', batchAction: 'sky_seo_batch', batchFailLabel: '批量补全',
+            // v2.2.8：扫描改分页循环（与 C1 同款，见上）。
+            scanPaged: true, scanPageSize: 500, scanUnit: '篇', scanItems: true,
             scanText: '正在扫描全站文章…',
-            nonce: '<?php echo wp_create_nonce('skyline_ajax_nonce'); ?>',
+            nonce: '<?php echo esc_attr(wp_create_nonce('skyline_ajax_nonce')); ?>',
             batchSize: function() {
                 var sizeInput = document.getElementById('sky-seo-batch-size');
                 var size = sizeInput ? parseInt(sizeInput.value, 10) : 5;
@@ -1666,7 +1675,7 @@ class Skyline_Admin {
                 $num_min = isset($cfg['min']) ? (int)$cfg['min'] : $this->number_field_min($key);
                 $num_max = isset($cfg['max']) ? (int)$cfg['max'] : $this->number_field_max($key);
                 echo '<div class="sky-field-input" style="width:100%;">';
-                echo '<input type="number" name="skyline_settings[' . esc_attr($key) . ']" value="' . esc_attr($val) . '" min="' . $num_min . '"' . ($num_max !== null ? ' max="' . $num_max . '"' : '') . ' step="1">';
+                echo '<input type="number" name="skyline_settings[' . esc_attr($key) . ']" value="' . esc_attr($val) . '" min="' . esc_attr($num_min) . '"' . ($num_max !== null ? ' max="' . esc_attr($num_max) . '"' : '') . ' step="1">';
                 echo '</div>';
                 break;
 
@@ -1680,13 +1689,16 @@ class Skyline_Admin {
                 // 生图根地址留空时，placeholder 显示真实生效值（与
                 // handle_gen_img 同源的 get_effective_img_base()），而不
                 // 是让用户对着空框猜。
-                $url_extra = ' autocomplete="off"';
+                // placeholder 只在生图根地址留空时显示真实生效值；autocomplete
+                // 是字面量、直接写进标签，不再拼 $url_extra 变量（自动检查
+                // 要求 echo 里的变量都经过转义）。
+                $url_placeholder = '';
                 if ($key === 'api_img_base' && trim((string)$val) === '' && method_exists($this->core, 'get_effective_img_base')) {
                     $effective = $this->core->get_effective_img_base();
-                    $url_extra .= ' placeholder="' . esc_attr($effective !== '' ? ('当前生效：' . $effective . '（留空则自动推导）') : '留空：无法从 API Endpoint 推导，请填写') . '"';
+                    $url_placeholder = $effective !== '' ? ('当前生效：' . $effective . '（留空则自动推导）') : '留空：无法从 API Endpoint 推导，请填写';
                 }
                 echo '<div class="sky-field-input" style="width:100%;">';
-                echo '<input type="url" id="sky-field-' . esc_attr($key) . '" name="skyline_settings[' . esc_attr($key) . ']" value="' . esc_attr($val) . '" title="' . esc_attr($val) . '"' . $url_extra . '>';
+                echo '<input type="url" id="sky-field-' . esc_attr($key) . '" name="skyline_settings[' . esc_attr($key) . ']" value="' . esc_attr($val) . '" title="' . esc_attr($val) . '" autocomplete="off"' . ($url_placeholder !== '' ? ' placeholder="' . esc_attr($url_placeholder) . '"' : '') . '>';
                 echo '</div>';
                 break;
                 

@@ -3,7 +3,7 @@
 Plugin Name: Skyline AI Pro
 Plugin URI: https://github.com/lingganwu/Skyline-AI-Pro
 Description: AI 运营中台：集成主流 AI 模型，提供访客聊天助手、AI 绘图、SEO 自动补全、图片同步与缓存优化。
-Version: 2.2.7
+Version: 2.2.8
 Requires at least: 5.8
 Requires PHP: 7.4
 Author:      LingGanWu
@@ -15,7 +15,7 @@ Text Domain: skyline-ai-pro
 
 if (!defined('ABSPATH')) exit;
 
-define('SKY_VERSION', '2.2.7');
+define('SKY_VERSION', '2.2.8');
 
 define('SKY_PATH', plugin_dir_path(__FILE__));
 define('SKY_URL', plugin_dir_url(__FILE__));
