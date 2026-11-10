@@ -91,7 +91,7 @@ class Skyline_Admin {
                     switch ($type) {
                         case 'url':
                             // v2.2.1：浏览器自动填充会把已保存的用户名（如
-                            // “管理员用户名”）填进 URL 框；无 scheme 的假值绝不能
+                            // “灵感屋”）填进 URL 框；无 scheme 的假值绝不能
                             // 覆盖已存配置。空值 = 用户清空（沿旧语义存 ''）；
                             // 非空但不是 http(s) 地址的拒绝保存、保留旧值，
                             // 并报错提示（http(s) 才放行，FreeLLMAPI 的
@@ -748,7 +748,7 @@ class Skyline_Admin {
                         </td>
                     </tr>
                     <tr>
-                        <td class="sky-health-label">GD 库 (水印 / WebP)</td>
+                        <td class="sky-health-label">GD 库 (去水印)</td>
                         <td class="sky-health-val">
                             <span class="sky-status-<?php echo $health['gd']['status']; ?>">
                                 <?php echo esc_html($health['gd']['label']); ?>
@@ -783,7 +783,6 @@ class Skyline_Admin {
             <div class="sky-card">
                 <div class="sky-card-title">📜 更新历史</div>
                 <div style="font-size: 13px; color: var(--sky-text-muted); line-height: 1.8;">
-                    <b>v2.2.6</b> - readme.txt 重写为英文（FAQ/截图/隐私披露/厂商 Terms/Support）；删除去水印功能；默认厂商改中性（留空自选，模型默认亦留空）；系统人设改通用版；插件头补 Plugin URI / Author URI；新增 GPL-2.0 LICENSE 文件<br>
                     <b>v2.2.5</b> - 单站硬编码通用化（前台欢迎语/推荐问题、气泡提示、后台品牌不再写本站名称）；删除损坏的默认头像 robot.png；插件头补齐 WordPress.org 要求字段；COS SDK 缺失时友好提示不致命；卸载时清理插件数据<br>
                     <b>v2.2.4</b> - AI 回复 Markdown 渲染（小标题、列表、代码块、链接）；系统人设改访客视角（接待来访的设计师、学生和景观爱好者，帮访客找站内资源，不提写文章/SEO/内容创作）<br>
                     <b>v2.2.3</b> - 修复 WebP 扫描 HTTP 524（分页 + 20 秒预算 + 续扫）；模型厂商下拉改不入库的预设选择器；模板库可一键填入系统人设；手动清缓存与 OSS 失败重试/待删队列操作入口；SEO Meta 输出（默认关）；对话端点补 /v4 与 /v1/chat；蜘蛛主开关三路生效；定时任务回调提到主文件注册<br>

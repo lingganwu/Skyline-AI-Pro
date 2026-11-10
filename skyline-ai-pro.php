@@ -1,13 +1,11 @@
 <?php
 /*
 Plugin Name: Skyline AI Pro
-Plugin URI: https://github.com/lingganwu/Skyline-AI-Pro
 Description: AI 运营中台：集成主流 AI 模型，提供访客聊天助手、AI 绘图、SEO 自动补全、图片同步与缓存优化。
-Version: 2.2.6
+Version: 2.2.5
 Requires at least: 5.8
 Requires PHP: 7.4
 Author:      LingGanWu
-Author URI: https://www.lgwu.net
 License: GPL-2.0-or-later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 Text Domain: skyline-ai-pro
@@ -15,7 +13,7 @@ Text Domain: skyline-ai-pro
 
 if (!defined('ABSPATH')) exit;
 
-define('SKY_VERSION', '2.2.6');
+define('SKY_VERSION', '2.2.5');
 
 define('SKY_PATH', plugin_dir_path(__FILE__));
 define('SKY_URL', plugin_dir_url(__FILE__));
@@ -110,7 +108,7 @@ if (!function_exists('skyline_ai_assess_quality')) {
     function skyline_ai_assess_quality($content) { return Skyline_Utils::assess_quality($content); }
 }
 if (!function_exists('skyline_batch_process')) {
-    function skyline_batch_process($posts, $model = '') { return Skyline_Utils::batch_process($posts, $model); }
+    function skyline_batch_process($posts, $model = 'deepseek-v3') { return Skyline_Utils::batch_process($posts, $model); }
 }
 if (!function_exists('skyline_create_backup')) {
     function skyline_create_backup() { return Skyline_Utils::create_backup(); }
