@@ -281,8 +281,12 @@ class Skyline_Infra {
 
     // 按前缀批量删（发文清理用）：Redis SCAN + DEL 分批删，绝不用 KEYS
     // （KEYS 会阻塞整个 Redis，站上 2 核机扛不住）。
+    // v2.2.3（P-6）：返回 redis_safe() 的结果——true 表示已执行清理，
+    // null 表示 Redis 不可用（未连接或中途断开），供手动清缓存入口
+    // 区分“已清”与“未清”，不静默成功。空前缀对应模式 'sky:*'（清
+    // 全部 Skyline 键），调用方只传 '' 或 'page_' 两种前缀。
     public function cache_del_prefix($prefix) {
-        $this->redis_safe(function ($redis) use ($prefix) {
+        return $this->redis_safe(function ($redis) use ($prefix) {
             $pattern = 'sky:' . $prefix . '*';
             $it = null;
             do {
@@ -368,7 +372,7 @@ class Skyline_Redis_Mod {
             }
         }
 
-        // 页面缓存 TTL 上限 600 秒：EdgeOne 的 HTML 缓存只有 2 分钟，
+        // 页面缓存 TTL 上限 600 秒：EdgeOne 的 HTML 缓存只有 30 分钟，
         // 源站 Redis 若还提供 1 小时前的旧页面，实际新鲜度以最长 TTL 为准。
         // redis_ttl 选项仍管 API 缓存等其他缓存；页面缓存取二者较小值。
         $page_ttl = (int)$core->get_opt('redis_ttl', 3600);
@@ -513,6 +517,8 @@ class Skyline_Turbo_Mod {
         // 批量转 WebP 工具（后台性能体检页）：扫描 + 分批转换。
         add_action('wp_ajax_sky_webp_scan', [$this, 'ajax_webp_scan']);
         add_action('wp_ajax_sky_webp_batch', [$this, 'ajax_webp_batch']);
+        // v2.2.3（P-6）：手动清缓存入口（后台性能体检页“缓存清理”卡片）。
+        add_action('wp_ajax_sky_clear_cache', [$this, 'ajax_clear_cache']);
     }
 
     public function force_lazy_load($default, $tag_name, $context) {
@@ -651,6 +657,16 @@ class Skyline_Turbo_Mod {
     const WEBP_MAX_FILESIZE = 10 * 1024 * 1024; // 与 compress() 同一上限：超大图不转
     const WEBP_BATCH_SIZE = 20;                 // 批量工具每批张数（防超时）
     const WEBP_BATCH_TIME_BUDGET = 25;          // 单次 AJAX 请求的墙钟预算（秒）
+    // v2.2.3（P0）：单次扫描请求的墙钟预算（秒）。旧扫描单请求遍历全部
+    // 约 53,000 个附件、逐个走 COS FUSE 挂载做 file_exists/filesize，
+    // 超 EdgeOne 60 秒回源超时报 524；20 秒远低于该超时，页内超时即停、
+    // 客户端按 offset 续扫。
+    const WEBP_SCAN_TIME_BUDGET = 20;
+
+    // 墙钟预算取值点（protected，便于测试用子类覆盖为极小值验证“超时
+    // 提前返回”；生产值就是 WEBP_SCAN_TIME_BUDGET）。与 load_image /
+    // encode_webp 的“可被测试替身覆盖”同款模式。
+    protected static function webp_scan_time_budget() { return self::WEBP_SCAN_TIME_BUDGET; }
 
     // 能力检测结果缓存（类属性而非函数内 static，便于测试用反射重置 /
     // 模拟 GD 支持 WebP 的服务器环境；生产行为不变）。
@@ -915,31 +931,93 @@ class Skyline_Turbo_Mod {
     // ---------- 批量转 WebP（后台 AJAX）----------
     // 两个端点都只给管理员：nonce + manage_options（N5/R18 的教训：
     // 只有 nonce 不够，必须验权限）。
+    // v2.2.3（P-6）：手动清缓存入口（后台性能体检页“缓存清理”卡片调）。
+    // 只清 Skyline 自己的 sky: 键：scope=page 清 page_ 前缀，scope=all
+    // 清全部 sky: 键（cache_del_prefix('') 对应模式 'sky:*'，见该方法）。
+    // 只清 Redis 层，不碰 EdgeOne 缓存（2026-11-09 三层同清拖垮 FPM 的
+    // 教训，message 里写明）；Redis 不可用时明确报错，不静默成功。
+    public function ajax_clear_cache() {
+        check_ajax_referer('skyline_ajax_nonce');
+        if (!current_user_can('manage_options')) wp_send_json_error('Unauthorized');
+        $scope = isset($_POST['scope']) ? (string)$_POST['scope'] : 'page';
+        if ($scope !== 'page' && $scope !== 'all') wp_send_json_error('scope 参数无效');
+        $cleared = Skyline_Infra::instance()->cache_del_prefix($scope === 'all' ? '' : 'page_');
+        if ($cleared === null) wp_send_json_error('Redis 不可用，缓存未清理');
+        $message = $scope === 'all'
+            ? '已清空全部 Skyline 缓存（仅 Redis 层，未动 EdgeOne 缓存）'
+            : '已清空页面缓存（仅 Redis 层，未动 EdgeOne 缓存）';
+        wp_send_json_success(['scope' => $scope, 'message' => $message]);
+    }
+
+    // v2.2.3（P0）：分页扫描。旧实现单请求 get_posts(posts_per_page=-1)
+    // 取全部约 53,000 个附件 ID 再逐个 webp_eligibility()（每附件多次
+    // file_exists/filesize，走 COS FUSE 挂载 /lhcos-data）+ 读库，无分
+    // 页、无墙钟预算，超 EdgeOne 60 秒回源超时 → HTTP 524。
+    // 新实现：每次只取一页（offset/page_size，服务端钳制 100–5000，
+    // 默认 2000），页内仍先 update_postmeta_cache($ids) 再逐个分类；
+    // 页内超 WEBP_SCAN_TIME_BUDGET（20 秒）即停，返回 done=false、
+    // offset=下一未处理位置，客户端按 offset 续扫。
+    // total 是“符合查询条件的附件总数”（$wpdb 一次廉价 COUNT，不拉全
+    // 表），供客户端显示“已扫 X/Y 张”与判断 done；最终交给 parseScan
+    // 的合并结果里 total 改为累积可转 ID 数（与旧单次扫描语义相同，
+    // 见 admin.js 的 scanPaged 合并逻辑）。
+    // 注意：offset 分页在扫描中途有附件增删时会漂移（新增的附件可能被
+    // 跳过或重复扫到）——可接受，扫描是管理操作，重扫一次即纠正。
     public function ajax_webp_scan() {
         check_ajax_referer('skyline_ajax_nonce');
         if (!current_user_can('manage_options')) wp_send_json_error('Unauthorized');
         if (!self::webp_supported()) {
-            wp_send_json_success(['supported' => false, 'total' => 0, 'ids' => [], 'skipped' => []]);
+            wp_send_json_success(['supported' => false, 'total' => 0, 'ids' => [], 'skipped' => [], 'done' => true, 'offset' => 0, 'scanned' => 0]);
+        }
+        $offset = isset($_POST['offset']) ? max(0, (int)$_POST['offset']) : 0;
+        $page_size = isset($_POST['page_size']) ? (int)$_POST['page_size'] : 2000;
+        $page_size = min(5000, max(100, $page_size));
+        // total：一次廉价 COUNT，不拉全表。$wpdb 在 WP 内恒存在；取不到
+        // 时退化为“本页即最后一页”（见下面的 done 推导），不静默多算。
+        global $wpdb;
+        $total_known = isset($wpdb) && method_exists($wpdb, 'get_var');
+        $total = 0;
+        if ($total_known) {
+            $total = (int)$wpdb->get_var("SELECT COUNT(*) FROM {$wpdb->posts} WHERE post_type = 'attachment' AND post_mime_type IN ('image/jpeg', 'image/png', 'image/webp') AND post_status = 'inherit'");
         }
         $ids = get_posts([
             'post_type' => 'attachment',
             'post_mime_type' => ['image/jpeg', 'image/png', 'image/webp'],
             'post_status' => 'inherit',
-            'posts_per_page' => -1,
+            'posts_per_page' => $page_size,
+            'offset' => $offset,
             'fields' => 'ids',
             'orderby' => 'ID',
             'order' => 'ASC',
         ]);
         if (!is_array($ids)) $ids = [];
         if (function_exists('update_postmeta_cache')) update_postmeta_cache($ids);
+        $start = microtime(true);
         $eligible = [];
         $skipped = ['converted' => 0, 'missing' => 0, 'toolarge' => 0, 'pending_delete' => 0, 'invalid' => 0];
+        $scanned = 0;
         foreach ($ids as $id) {
+            // 墙钟预算：超时前停下（与 ajax_webp_batch 同款），剩下的
+            // 附件客户端按 offset 续扫，不丢。
+            if (microtime(true) - $start > static::webp_scan_time_budget()) break;
+            $scanned++;
             $e = self::webp_eligibility((int)$id);
             if ($e['eligible']) { $eligible[] = (int)$id; continue; }
             if (isset($skipped[$e['code']])) $skipped[$e['code']]++;
         }
-        wp_send_json_success(['supported' => true, 'total' => count($eligible), 'ids' => $eligible, 'skipped' => $skipped]);
+        $next_offset = $offset + $scanned;
+        if ($scanned < count($ids)) {
+            // 页内超时：本页没扫完，一定还有下一页。
+            $done = false;
+        } elseif ($total_known) {
+            $done = $next_offset >= $total;
+        } else {
+            // 无 COUNT 可用（仅测试替身会出现）：页未满即最后一页；页满
+            // 则假设还有下一页，客户端下次拿到空页即结束。total 取下界。
+            $done = count($ids) < $page_size;
+            $total = $next_offset;
+        }
+        wp_send_json_success(['supported' => true, 'total' => $total, 'ids' => $eligible, 'skipped' => $skipped, 'done' => $done, 'offset' => $next_offset, 'scanned' => $scanned]);
     }
 
     public function ajax_webp_batch() {
@@ -1138,8 +1216,16 @@ if (!class_exists('Skyline_OSS_Mod')) {
             add_filter('wp_generate_attachment_metadata', [$this, 'upload_all_sizes'], 99, 2);
             add_filter('wp_get_attachment_url', [$this, 'replace_url'], 99, 2);
             add_filter('wp_get_attachment_image_src', [$this, 'replace_image_src'], 99, 4);
-            add_action('skyline_oss_purge_pending', [$this, 'purge_pending_deletes']);
-            add_action('skyline_oss_retry_failed', [$this, 'retry_failed_sizes']);
+            // v2.2.3（X-3）：skyline_oss_purge_pending / skyline_oss_retry_failed
+            // 的 cron 回调改到插件主文件（skyline-ai-pro.php）加载期直接注
+            // 册，不再依赖本构造器执行（Infra 初始化若抛错被 try/catch 吞
+            // 掉，回调会全程不注册、已排期事件被 WP 静默消费）。
+            // v2.2.3（O-7/O-8）：OSS 手动操作 AJAX 入口（后台 OSS 页按钮调，
+            // 全部 nonce + manage_options，与 sky_webp_scan/batch 同款）。
+            add_action('wp_ajax_sky_oss_retry_failed', [$this, 'ajax_oss_retry_failed']);
+            add_action('wp_ajax_sky_oss_purge_now', [$this, 'ajax_oss_purge_now']);
+            add_action('wp_ajax_sky_oss_purge_retry', [$this, 'ajax_oss_purge_retry']);
+            add_action('wp_ajax_sky_oss_purge_cancel', [$this, 'ajax_oss_purge_cancel']);
         }
 
         // D3：Skyline 定时任务健康统计（静态方法，供数据看板调用）。
@@ -1395,6 +1481,103 @@ if (!class_exists('Skyline_OSS_Mod')) {
             if (!wp_next_scheduled('skyline_oss_retry_failed', [$attachment_id])) {
                 wp_schedule_single_event(time() + self::RETRY_DELAY, 'skyline_oss_retry_failed', [$attachment_id]);
             }
+        }
+
+        // v2.2.3（O-7/O-8）：OSS 手动操作 AJAX 入口（后台 OSS 页按钮调）。
+        // 全部 nonce + manage_options；只复用现有引擎方法，不改 cron 语义。
+        // sky_oss_retry_failed：手动重试全部失败尺寸（无额外参数）。
+        public function ajax_oss_retry_failed() {
+            check_ajax_referer('skyline_ajax_nonce');
+            if (!current_user_can('manage_options')) wp_send_json_error('Unauthorized');
+            $count = $this->retry_all_failed_sizes();
+            if ($count === 0) {
+                wp_send_json_success(['count' => 0, 'message' => '没有待重试的失败尺寸']);
+            }
+            wp_send_json_success(['count' => $count, 'message' => "已重试 {$count} 个附件的失败尺寸"]);
+        }
+
+        // sky_oss_purge_now：手动跑一次待删清理（无额外参数）。
+        public function ajax_oss_purge_now() {
+            check_ajax_referer('skyline_ajax_nonce');
+            if (!current_user_can('manage_options')) wp_send_json_error('Unauthorized');
+            $count = $this->purge_all_pending();
+            if ($count === 0) {
+                wp_send_json_success(['count' => 0, 'message' => '待删队列为空，无需清理']);
+            }
+            wp_send_json_success(['count' => $count, 'message' => "已对 {$count} 个附件跑了一次待删校验"]);
+        }
+
+        // sky_oss_purge_retry：单个附件重跑一次待删校验。purge_pending_deletes()
+        // 本身就是单附件入口（cron 与手动共用，行为一字不变），无需另抽方法；
+        // 跑完后看登记还在不在，判断本次是否已结案（done）还是仍在队列（pending，
+        // 如未满 24 小时或二次校验未通过、已自动重排）。
+        public function ajax_oss_purge_retry() {
+            check_ajax_referer('skyline_ajax_nonce');
+            if (!current_user_can('manage_options')) wp_send_json_error('Unauthorized');
+            $id = isset($_POST['attachment_id']) ? absint($_POST['attachment_id']) : 0;
+            if ($id <= 0) wp_send_json_error('attachment_id 参数无效');
+            if (get_post_meta($id, self::PENDING_DELETE_META, true) === '') wp_send_json_error('该附件没有待删登记');
+            $this->purge_pending_deletes($id);
+            if (get_post_meta($id, self::PENDING_DELETE_META, true) === '') {
+                wp_send_json_success(['status' => 'done', 'message' => "附件 #{$id} 的待删登记已清除"]);
+            }
+            wp_send_json_success(['status' => 'pending', 'message' => "附件 #{$id} 仍在待删队列中（未满 24 小时或二次校验未通过，已自动重排）"]);
+        }
+
+        // sky_oss_purge_cancel：删除该附件的待删登记，本地文件保留。
+        public function ajax_oss_purge_cancel() {
+            check_ajax_referer('skyline_ajax_nonce');
+            if (!current_user_can('manage_options')) wp_send_json_error('Unauthorized');
+            $id = isset($_POST['attachment_id']) ? absint($_POST['attachment_id']) : 0;
+            if ($id <= 0) wp_send_json_error('attachment_id 参数无效');
+            if (get_post_meta($id, self::PENDING_DELETE_META, true) === '') wp_send_json_error('该附件没有待删登记');
+            delete_post_meta($id, self::PENDING_DELETE_META);
+            wp_send_json_success(['message' => "已取消附件 #{$id} 的待删登记，本地文件保留"]);
+        }
+
+        // 手动重试全部失败尺寸：逐个附件调现有 retry_failed_sizes()（单附件
+        // 签名，cron 回调同款；重试次数存在 _sky_oss_retry_attempts 里，
+        // 满 3 次后不再自动重排、清单保留待人工处理）。返回处理附件数。
+        // 失败清单本身是小集合，上限 500 足够（超限的极端情况留给下次手动点）。
+        public function retry_all_failed_sizes() {
+            $ids = get_posts([
+                'post_type' => 'attachment',
+                'post_status' => 'inherit',
+                'meta_key' => '_sky_oss_failed_sizes',
+                'posts_per_page' => 500,
+                'fields' => 'ids',
+                'orderby' => 'ID',
+                'order' => 'ASC',
+            ]);
+            if (!is_array($ids)) return 0;
+            $count = 0;
+            foreach ($ids as $id) {
+                $this->retry_failed_sizes((int)$id);
+                $count++;
+            }
+            return $count;
+        }
+
+        // 手动跑一次待删清理：逐个附件调现有 purge_pending_deletes()（单附件
+        // 签名，cron 回调同款；24 小时未满、OSS 关闭等分支行为与 cron 一致）。
+        // 返回处理附件数。
+        public function purge_all_pending() {
+            $ids = get_posts([
+                'post_type' => 'attachment',
+                'post_status' => 'inherit',
+                'meta_key' => self::PENDING_DELETE_META,
+                'posts_per_page' => 500,
+                'fields' => 'ids',
+                'orderby' => 'ID',
+                'order' => 'ASC',
+            ]);
+            if (!is_array($ids)) return 0;
+            $count = 0;
+            foreach ($ids as $id) {
+                $this->purge_pending_deletes((int)$id);
+                $count++;
+            }
+            return $count;
         }
 
         // M22：把本地文件移入回收站（wp-content/uploads/.trash/），返回

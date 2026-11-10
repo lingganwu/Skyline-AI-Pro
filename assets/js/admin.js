@@ -1,5 +1,5 @@
 document.addEventListener('DOMContentLoaded', function() {
-    console.log('🚀 Skyline AI Pro v2.2.2 Enterprise Engine Loaded');
+    console.log('🚀 Skyline AI Pro v2.2.3 Enterprise Engine Loaded');
 
     // 表单保存按钮动画增强
     const saveBtn = document.querySelector('.sky-save-btn');
@@ -54,6 +54,48 @@ window.SkyBatchRunner = (function() {
             setDisabled(cfg.stopBtn, true);
         }
         function summary() { return cfg.summaryText(st); }
+        // 扫描成功后的收尾（单次扫描与分页扫描共用）：把解析出的 id 列表
+        // 交给驱动、刷新状态区与进度条、启用开始按钮。
+        function finishScan(parsed) {
+            st.ids = parsed.ids || [];
+            st.total = st.ids.length;
+            st.pos = 0; st.done = 0;
+            cfg.resetCounts(st);
+            setText(cfg.status, parsed.statusText);
+            if (parsed.costText !== undefined) setText(cfg.cost, parsed.costText);
+            var ul = el(cfg.failures);
+            if (ul) ul.innerHTML = '';
+            setBar(cfg, 0, st.total);
+            setDisabled(cfg.startBtn, st.total === 0);
+        }
+        // v2.2.3（P0）：分页扫描。cfg.scanPaged 为 true 时扫描阶段循环
+        // 发请求（每次带 offset），累积 ids 与 skipped，状态区显示进度
+        // “正在扫描…已扫 X/Y 张”，直到服务端 done 才把累积结果
+        // {supported:true, total:累积 ids 数, ids:累积 ids, skipped:累积
+        // skipped} 交给现有的 parseScan（total 语义与旧单次扫描相同，
+        // 是可转 ID 数；服务端每页返回的 total 是符合条件的附件总数，
+        // 只用于进度显示与判断 done）。中途某页请求失败走现有 .fail()
+        // 处理（带 HTTP 状态）；服务端 supported=false 时直接收尾、不翻页。
+        function scanPaged(offset, accIds, accSkipped, accScanned, total) {
+            jQuery.post(ajaxurl, { action: cfg.scanAction, _ajax_nonce: cfg.nonce, offset: offset, page_size: cfg.scanPageSize || 2000 }, function(r) {
+                if (!r.success) { setText(cfg.status, '❌ 扫描失败：' + (r.data || '未知错误')); return; }
+                var d = r.data || {};
+                if (d.supported === false) { finishScan(cfg.parseScan(d)); return; }
+                var ids = d.ids || [];
+                var skipped = d.skipped || {};
+                for (var i = 0; i < ids.length; i++) accIds.push(ids[i]);
+                var keys = ['converted', 'missing', 'toolarge', 'pending_delete', 'invalid'];
+                for (var j = 0; j < keys.length; j++) accSkipped[keys[j]] = (accSkipped[keys[j]] || 0) + (skipped[keys[j]] || 0);
+                accScanned += (d.scanned || ids.length);
+                total = d.total || total;
+                if (!d.done) {
+                    setText(cfg.status, '正在扫描…已扫 ' + accScanned + '/' + total + ' 张');
+                    scanPaged(d.offset, accIds, accSkipped, accScanned, total);
+                    return;
+                }
+                finishScan(cfg.parseScan({ supported: true, total: accIds.length, ids: accIds, skipped: accSkipped }));
+            }).fail(function(xhr, textStatus) { setText(cfg.status, '❌ 扫描请求失败（' + skyAjaxFailDetail(xhr, textStatus) + '）。'); });
+        }
         function next() {
             if (st.stopping) return;
             if (st.pos >= st.ids.length) {
@@ -105,19 +147,13 @@ window.SkyBatchRunner = (function() {
                 st.stopping = false;
                 st.pos = 0; st.done = 0;
                 setText(cfg.status, cfg.scanText || '正在扫描…');
+                if (cfg.scanPaged) {
+                    scanPaged(0, [], { converted: 0, missing: 0, toolarge: 0, pending_delete: 0, invalid: 0 }, 0, 0);
+                    return;
+                }
                 jQuery.post(ajaxurl, { action: cfg.scanAction, _ajax_nonce: cfg.nonce }, function(r) {
                     if (!r.success) { setText(cfg.status, '❌ 扫描失败：' + (r.data || '未知错误')); return; }
-                    var parsed = cfg.parseScan(r.data || {});
-                    st.ids = parsed.ids || [];
-                    st.total = st.ids.length;
-                    st.pos = 0; st.done = 0;
-                    cfg.resetCounts(st);
-                    setText(cfg.status, parsed.statusText);
-                    if (parsed.costText !== undefined) setText(cfg.cost, parsed.costText);
-                    var ul = el(cfg.failures);
-                    if (ul) ul.innerHTML = '';
-                    setBar(cfg, 0, st.total);
-                    setDisabled(cfg.startBtn, st.total === 0);
+                    finishScan(cfg.parseScan(r.data || {}));
                 }).fail(function(xhr, textStatus) { setText(cfg.status, '❌ 扫描请求失败（' + skyAjaxFailDetail(xhr, textStatus) + '）。'); });
             },
             start: function() {

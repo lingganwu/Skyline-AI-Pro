@@ -22,6 +22,10 @@ class Skyline_Content {
     // 取单例，不直接 new（构造器会重复注册钩子）。与 Skyline_OSS_Mod::
     // instance() 同款模式。
     private static $instance = null;
+    // F-11(b)：flush_page_cache_for_post() 用的 Redis 模块实例缓存——
+    // new 一次 Skyline_Redis_Mod 会多挂一个 transition_post_status
+    // 回调（幂等删缓存，无害），故只建一次。
+    private static $redis_mod = null;
     public static function instance() {
         if (self::$instance === null) self::$instance = new self();
         return self::$instance;
@@ -30,10 +34,14 @@ class Skyline_Content {
     public function __construct() {
         self::$instance = $this;
         add_action('save_post', [$this, 'trigger_async_tasks'], 20, 2);
-        add_action('skyline_async_spider', [$this, 'auto_spider']);
-        add_action('skyline_async_seo', [$this, 'auto_seo_meta']); 
+        // X-3：skyline_async_spider / skyline_async_seo 两个 cron 回调
+        // 不再在此注册——改由插件主文件 skyline-ai-pro.php 在加载期
+        // 用懒加载闭包直接注册（与类实例化解耦），此处只删、不另注册。
         
         add_filter('the_content', [$this, 'auto_internal_links']);
+        // F-10：插件侧 SEO meta 输出（output_seo_meta 内再查
+        // seo_output_meta 开关，默认关）。
+        add_action('wp_head', [$this, 'output_seo_meta']);
         
         add_action('wp_ajax_sky_seo_score', [$this, 'ajax_seo_score']);
         add_action('wp_ajax_sky_spider_single', [$this, 'ajax_spider_single']); 
@@ -135,6 +143,29 @@ class Skyline_Content {
             }
             return implode('', $parts);
         }
+
+    // F-10：插件侧 SEO meta 输出层。开关 seo_output_meta 的 schema
+    // 定义在 core.php（group seo，bool，默认 false；由协调人补进
+    // schema），此处用 get_opt('seo_output_meta', false) 读，未配置
+    // 按 false 处理。默认关闭的原因：子比主题已输出 description /
+    // OG，默认开启会在现网造成重复 meta。仅 is_singular('post')
+    // 且摘要非空时输出 description（截 160 字）+ OG 标签。
+    public function output_seo_meta() {
+        $core = Skyline_Core::instance();
+        if (!$core->get_opt('seo_output_meta', false)) return;
+        if (!function_exists('is_singular') || !is_singular('post')) return;
+        global $post;
+        if (!is_object($post) || empty($post->post_excerpt)) return;
+        $desc = trim(mb_substr(wp_strip_all_tags((string)$post->post_excerpt), 0, 160));
+        if ($desc === '') return;
+        $title = (string)($post->post_title ?? '');
+        $url = function_exists('get_permalink') ? (string)get_permalink((int)$post->ID) : '';
+        echo '<meta name="description" content="' . esc_attr($desc) . '">' . "\n";
+        echo '<meta property="og:title" content="' . esc_attr($title) . '">' . "\n";
+        echo '<meta property="og:description" content="' . esc_attr($desc) . '">' . "\n";
+        echo '<meta property="og:type" content="article">' . "\n";
+        if ($url !== '') echo '<meta property="og:url" content="' . esc_url($url) . '">' . "\n";
+    }
 
     // 校验一个 URL 的目标主机是否可公开访问：解析全部 A/AAAA 记录，任一 IP
     // 是内网/保留地址即拒绝。返回 null 表示通过，返回字符串表示错误原因。
@@ -614,6 +645,27 @@ class Skyline_Content {
         ];
     }
 
+    // C-5：spider_enable 关闭时的统一提示（批量与编辑器单张共用）。
+    private function spider_disabled_message($action) {
+        return '内容同步已关闭，请在内容同步页开启‘启用内容同步’后再' . $action . '。';
+    }
+
+    // F-11(b)：直接写库（$wpdb->update）绕过 wp_update_post，
+    // Skyline_Redis_Mod::smart_flush() 收不到，Redis 页面缓存里的
+    // 旧 slug/摘要/正文要等 TTL 才过期——写库后显式清一次本篇。
+    // smart_flush($new_status, $old_status, $post) 的全清分支只在
+    // 新/旧任一为 publish 且 redis_smart_purge 开时触发（清全部
+    // page_ 前缀）；此处只想清本篇、不全清，故传非 publish 状态走
+    // 其退化路径（只清首页 + 本篇）。Redis 模块不存在时跳过（如
+    // 单元测试未加载 infra.php）。
+    private function flush_page_cache_for_post($pid) {
+        if (!class_exists('Skyline_Redis_Mod') || !method_exists('Skyline_Redis_Mod', 'smart_flush')) return;
+        $post = get_post((int)$pid);
+        if (!is_object($post)) $post = (object)['ID' => (int)$pid, 'post_type' => 'post'];
+        if (self::$redis_mod === null) self::$redis_mod = new Skyline_Redis_Mod();
+        self::$redis_mod->smart_flush('draft', 'draft', $post);
+    }
+
     // C1：分批同步外链图片（每批 SPIDER_BATCH_SIZE 篇，服务端定死）。
     // 复用 auto_spider()（含下载、写库、_sky_spider_last 结果 meta，
     // 与 D2 看板同一口径），不重写下载逻辑。返回每篇结果；锁被占的篇
@@ -621,6 +673,20 @@ class Skyline_Content {
     public function batch_spider_posts(array $ids) {
         $ids = array_slice(array_values(array_unique(array_filter(array_map('intval', $ids)))), 0, self::SPIDER_BATCH_SIZE);
         if (empty($ids)) return ['results' => [], 'stopped_early' => false];
+        // C-5：spider_enable 是主开关——关时批量不跑，逐篇返回明确
+        // 原因（经 ajax_spider_batch 的 wp_send_json_success 原样回
+        // 前台，界面逐条展示），不要静默空跑。
+        if (!Skyline_Core::instance()->get_opt('spider_enable', true)) {
+            $msg = $this->spider_disabled_message('批量同步');
+            $results = [];
+            foreach ($ids as $id) {
+                $row = ['id' => $id, 'status' => 'failed', 'reason' => $msg];
+                $post = get_post($id);
+                if ($post) $row['title'] = $post->post_title;
+                $results[] = $row;
+            }
+            return ['results' => $results, 'stopped_early' => false];
+        }
         $results = [];
         $stopped_early = false;
         $start = microtime(true);
@@ -634,8 +700,10 @@ class Skyline_Content {
                 continue;
             }
             // auto_spider() 返回 null = 锁被占（10 分钟内已有任务在跑），
-            // 按跳过记，不覆盖上次的 _sky_spider_last。
-            $res = $this->auto_spider($id);
+            // 按跳过记，不覆盖上次的 _sky_spider_last。批量是手动路径，
+            // 传 $manual=true：只查 spider_enable，不查 spider_auto
+            // （手动模式下批量本来就要能跑）。
+            $res = $this->auto_spider($id, true);
             if ($res === null) {
                 $results[] = ['id' => $id, 'status' => 'skipped', 'title' => $post->post_title, 'reason' => '正在同步中，稍后再试'];
                 continue;
@@ -660,7 +728,20 @@ class Skyline_Content {
         return ['results' => $results, 'stopped_early' => $stopped_early];
     }
 
-    public function auto_spider($pid) {
+    // $manual=true 时是用户在后台点的批量同步（手动路径）：只查
+    // spider_enable，不查 spider_auto——手动模式（spider_auto 关）
+    // 下批量同步本来就要能跑（批量复用本方法；线上当前就是手动
+    // 模式）。cron/发布触发的自动路径默认 $manual=false，两个开关
+    // 任一关即不跑。
+    public function auto_spider($pid, $manual = false) {
+        // C-5/F-12：主开关语义——spider_enable 关，或自动路径下
+        // spider_auto 关，直接返回，不做任何事（不抢锁、不下载、
+        // 不写 meta）、不重排续跑。已排期的事件在管理员关开关后
+        // 触发时也到此为止。
+        $core = Skyline_Core::instance();
+        if (!$core->get_opt('spider_enable', true)) return null;
+        if (!$manual && !$core->get_opt('spider_auto', true)) return null;
+
         $post = get_post($pid);
         if (!$post) return null;
 
@@ -699,7 +780,6 @@ class Skyline_Content {
         // 供 batch_spider_posts 在“全部失败”时展示。
         $first_error = '';
 
-        $core = Skyline_Core::instance();
         $max_img = intval($core->get_opt('spider_max_img', 20));
         $processed_count = 0;
 
@@ -746,6 +826,8 @@ class Skyline_Content {
             }
             $wpdb->update($wpdb->posts, ['post_content'=>$content], ['ID'=>(int)$pid]);
             clean_post_cache($pid);
+            // F-11(b)：直接写库后显式清一次本篇页面缓存（见 flush_page_cache_for_post）。
+            $this->flush_page_cache_for_post($pid);
             add_action('save_post', [$this, 'trigger_async_tasks'], 20, 2);
         }
 
@@ -905,11 +987,14 @@ class Skyline_Content {
         if ($do_excerpt && ($only === null || in_array('excerpt', $only, true)) && empty($post->post_excerpt)) {
             $attempted[] = 'excerpt';
             $text = isset($updates['post_content']) ? $updates['post_content'] : $post->post_content;
-            $prompt = "Generate a 120-word SEO summary for this content (in Chinese): \n\n" . mb_substr(strip_tags($text), 0, 1500);
+            $prompt = "请为以下内容生成一段 120 字左右的中文 SEO 摘要，直接输出摘要，不要其他文字：\n\n" . mb_substr(strip_tags($text), 0, 1500);
             $any_attempted = true;
             $excerpt = $core->call_api([['role'=>'user', 'content'=>$prompt]]);
            if ($excerpt && !is_wp_error($excerpt)) {
-                $updates['post_excerpt'] = trim(mb_substr(wp_strip_all_tags($excerpt), 0, 260));
+                // F-11(c)：提示词“120 字左右”与截断上限一致（150 字，
+                // 允许模型略超；旧写法提示词按英文词数、截断按字符数，
+                // 中英文单位混用）。
+                $updates['post_excerpt'] = trim(mb_substr(wp_strip_all_tags($excerpt), 0, 150));
                 $any_success = true;
                 $succeeded[] = 'excerpt';
             } else {
@@ -920,15 +1005,23 @@ class Skyline_Content {
         if (!empty($updates)) {
             $wpdb->update($wpdb->posts, $updates, ['ID' => (int)$pid]);
             clean_post_cache($pid);
+            // F-11(b)：直接写库后显式清一次本篇页面缓存（见 flush_page_cache_for_post）。
+            $this->flush_page_cache_for_post($pid);
         }
 
-        // R5：只有至少一项成功才标记 _sky_seo_done；全部失败时不标记，
-        // 允许下次保存时重试。连续失败满 3 次才标记完成、停止重试，
-        // 避免 API 长期故障时每次保存都重复触发失败任务。无任何尝试
-        // （如只要摘要但摘要已存在）时直接标记完成，不算失败。
-        if ($any_success || !$any_attempted) {
+        // R5（v2.2.3 F-11）：只有本次请求的所有尝试项都成功才标记
+        // _sky_seo_done；部分成功时不置——失败项留待下次保存重试
+        // （旧写法任一项成功即置完成，失败项永久不再重试）。全部失败
+        // 时沿用旧规则：失败计数 +1，满 3 次标记完成、停止重试，否
+        // 则 1 小时后重排。无任何尝试（如只要摘要但摘要已存在）时直
+        // 接标记完成，不算失败。
+        $all_succeeded = $any_attempted && empty($failed);
+        if ($all_succeeded || !$any_attempted) {
             update_post_meta($pid, '_sky_seo_done', 1);
             delete_post_meta($pid, '_sky_seo_fail_count');
+        } elseif (!empty($succeeded)) {
+            // 部分成功：不标记完成、不计失败次数，失败项下次保存重试。
+            $core->log("自动 SEO 部分成功 [$pid]（成功：" . implode('、', $succeeded) . "；失败：" . implode('、', array_keys($failed)) . "），未标记完成，下次保存时重试失败项", 'info', 'SEO');
         } else {
             $fails = (int)get_post_meta($pid, '_sky_seo_fail_count', true) + 1;
             update_post_meta($pid, '_sky_seo_fail_count', $fails);
@@ -1230,6 +1323,8 @@ class Skyline_Content {
     public function ajax_spider_single() {
         check_ajax_referer('sky_ai_task_nonce');
         if(!current_user_can('edit_posts')) wp_send_json_error('权限不足');
+        // C-5：主开关关时编辑器单张同步也拒绝，并给明确原因。
+        if (!Skyline_Core::instance()->get_opt('spider_enable', true)) wp_send_json_error($this->spider_disabled_message('同步图片'));
         $url = isset($_POST['url']) ? esc_url_raw(wp_unslash($_POST['url'])) : '';
         $pid = isset($_POST['pid']) ? intval($_POST['pid']) : 0;
         if(!$url) wp_send_json_error('URL为空');

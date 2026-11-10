@@ -4,7 +4,7 @@ Tags: ai, deepseek, content-automation, seo, productivity
 Requires at least: 5.8
 Tested up to: 7.1
 Requires PHP: 7.4
-Stable tag: 2.2.2
+Stable tag: 2.2.3
 License: GPLv2 or later
 License URI: http://www.gnu.org/licenses/gpl-2.0.html
 
@@ -30,6 +30,14 @@ Skyline AI Pro 是一款为专业内容创作者设计的 WordPress 智能中台
 3. Go to the 'Skyline Pro' settings page to configure your API keys.
 
 == Changelog ==
+
+= 2.2.3 =
+* 修复：WebP 扫描必现 HTTP 524——扫描改分页（每页 2000 张）+ 20 秒墙钟预算 + 续扫，单次请求不再遍历全部约 53,000 个附件；进度条显示“正在扫描…已扫 X/Y 张”
+* 修复：模型厂商下拉是写而不读的空开关——删掉 api_vendor 配置键，改成不入库的厂商预设选择器（选中态仍由 API Endpoint 地址反推）
+* 新功能：Prompt 模板库每行加“填入系统人设”按钮（人设已有内容时先确认再覆盖）；性能体检页加“清空页面缓存 / 清空全部 Skyline 缓存”按钮（只清 Redis 层，不碰 EdgeOne）；云端存储页加“上传失败清单”与待删队列的手动重试/取消登记/立即校验
+* 新功能：文章页 SEO Meta 输出（默认关闭，仅主题不输出 description/OG 时开启）；对话端点归一化补 /v4 与 /v1/chat，空端点直接报“未配置”不再发空请求
+* 修复：内容同步主开关真正生效——关闭后发布自动同步、批量同步、编辑器单张同步全部停止，已排期的自动任务入口再查一次开关；部分成功的 SEO 不再整篇标完成、失败项下次保存重试；直接写库后显式清理该篇页面缓存
+* 修复：定时任务回调改到插件主文件加载期直接注册（不再依赖模块实例化），停用插件时清理已排期的单次事件；文案与实现不符处按实现改写（去水印、图片压缩、SVG 开关）
 
 = 2.2.2 =
 * 修复：批量卡片全瘫——admin.js 改页头加载（$in_footer=false）。v2.2.1 把批量驱动抽进 admin.js（页脚加载），而三张卡片的内联脚本在正文里直接调 SkyBatchRunner.create()，执行时驱动尚不存在 → ReferenceError，整段内联脚本中断、点击静默失败；页头加载后内联脚本执行前驱动已定义

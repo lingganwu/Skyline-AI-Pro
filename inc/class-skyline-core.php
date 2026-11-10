@@ -228,15 +228,16 @@ class Skyline_Core {
 
     // v2.2.1：对话端点归一化。call_api() 直接拿 api_base 当 POST 目标，
     // 用户只填裸根地址（如 https://www.lgwu.de:3001/v1）时会 POST 到
-    // /v1 而失败（404/405）。根地址以 /v1 结尾时补 /chat/completions：
-    // 预设的 chat_endpoint 本就以该后缀结尾，OpenAI 兼容接口的对话
-    // 入口也都是这个形状。只认 /v1 结尾——已带其他路径的（如
-    // …/v1/chat）原样返回，不乱拼；已带后缀的原样返回。空值返回空。
+    // /v1 而失败（404/405）。v2.2.3 扩展：以版本号段结尾（如 /v1、/v4，
+    // 覆盖智谱裸根 https://open.bigmodel.cn/api/paas/v4）补
+    // /chat/completions；以 /chat 结尾（缺 completions）补 /completions；
+    // 已带后缀的原样返回；空值返回空。
     public function get_chat_endpoint() {
         $base = rtrim(trim((string)$this->get_opt('api_base', '')), '/');
         if ($base === '') return '';
         if (substr($base, -17) === '/chat/completions') return $base;
-        if (substr($base, -3) === '/v1') $base .= '/chat/completions';
+        if (substr($base, -5) === '/chat') return $base . '/completions';
+        if (preg_match('#/v\d+$#', $base)) return $base . '/chat/completions';
         return $base;
     }
 
@@ -263,12 +264,7 @@ class Skyline_Core {
     }
 
     public function get_config_schema() {
-        // v2.2.0：厂商下拉选项与厂商表同源（label 取自 get_api_vendors()），
-        // 顺序与厂商表一致：7 家预设在前，“自定义”最后一位。
-        $vendor_options = [];
-        foreach (self::get_api_vendors() as $k => $v) $vendor_options[$k] = $v['label'];
         return [
-            'api_vendor' => ['group'=>'ai', 'type'=>'select', 'label'=>'模型厂商', 'desc'=>'切换厂商后，下方 API Endpoint、生图根地址与两个模型下拉即时更新（要点“保存本页配置”才生效）；选“自定义”可自由填写任意地址与模型。', 'default'=>'siliconflow', 'options'=>$vendor_options],
             'api_base' => ['group'=>'ai', 'type'=>'url', 'label'=>'API Endpoint', 'default'=>'https://api.siliconflow.cn/v1/chat/completions'],
             // 生图端点根地址（L8）：handle_gen_img() 优先用这里拼 /images/generations；
             // 留空时回退到从 api_base 推导（/chat/completions → /images/generations）并记日志。
@@ -292,7 +288,7 @@ class Skyline_Core {
             // “回源配置 / 回源 IP 段”提供的列表，粘贴进来即可（每行一个 IP 或 CIDR）。
             'trusted_proxy_ips' => ['group'=>'ai', 'type'=>'textarea', 'label'=>'可信代理 IP（EdgeOne 回源段）', 'desc'=>'每行一个 IP 或 CIDR；仅当 REMOTE_ADDR 在此列表中时，才信任 X-Forwarded-For 首个 IP 作为访客真实 IP。留空则永不信任。警告：留空且站点接了 CDN/EdgeOne 时，全站访客共享一个限流桶，20 次/分钟后全站聊天会被限流，请填入回源 IP 段。'],
             
-            'spider_enable' => ['group'=>'spider', 'type'=>'bool', 'label'=>'启用内容同步', 'default'=>true],
+            'spider_enable' => ['group'=>'spider', 'type'=>'bool', 'label'=>'启用内容同步', 'desc'=>'主开关：关闭后发布时自动同步、批量同步与编辑器单张同步全部停止。', 'default'=>true],
             // 图片同步方式：用 spider_auto 这个已有键存值，不新增字段。
             // 存值语义与原来完全一致——true/'1'/1 = 自动，false/'0'/0 = 手动，
             // 线上数据库里现在存的是 b:0（手动）。类型从 bool 改成 spider_mode
@@ -306,7 +302,7 @@ class Skyline_Core {
             'spider_ssl_verify' => ['group'=>'spider', 'type'=>'bool', 'label'=>'验证 SSL 证书', 'default'=>true],
             'spider_domains' => ['group'=>'spider', 'type'=>'textarea', 'label'=>'排除域名 (一行一个)'],
             'spider_wm_enable' => ['group'=>'spider', 'type'=>'bool', 'label'=>'启用添加水印', 'default'=>false],
-            'spider_rm_wm' => ['group'=>'spider', 'type'=>'bool', 'label'=>'智能去除水印 (裁剪底部)', 'desc'=>'无条件裁掉图片底部 40px（矮于 150px 的图跳过），不是智能检测水印位置；没有水印的图片也会被裁掉底部内容。', 'default'=>false],
+            'spider_rm_wm' => ['group'=>'spider', 'type'=>'bool', 'label'=>'智能去除水印 (裁剪底部)', 'desc'=>'先检测图片底部 40px 是否为均匀色带（主导色占比 ≥85% 且与上方色带不同），检测到才裁掉该色带、检测不到不裁；矮于 150px 的图跳过。', 'default'=>false],
             'spider_wm_text' => ['group'=>'spider', 'type'=>'text', 'label'=>'文字水印内容', 'default'=>'@Skyline'],
             
             'oss_enable' => ['group'=>'oss', 'type'=>'bool', 'label'=>'启用 OSS 云存储', 'default'=>false],
@@ -328,6 +324,7 @@ class Skyline_Core {
             'auto_polish' => ['group'=>'seo', 'type'=>'bool', 'label'=>'发布前 AI 智能润色', 'desc'=>'含 Gutenberg 区块标记的文章会跳过润色；长文分段润色后拼接，段落边界处可能有轻微不连贯。', 'default'=>false],
             'link_enable' => ['group'=>'seo', 'type'=>'bool', 'label'=>'自动内链', 'default'=>false],
             'link_pairs' => ['group'=>'seo', 'type'=>'textarea', 'label'=>'内链关键词 (词|链接)'],
+            'seo_output_meta' => ['group'=>'seo', 'type'=>'bool', 'label'=>'输出 SEO Meta（description 与 OG）', 'desc'=>'仅当主题不输出 description/OG 时开启；主题已输出时开启会造成重复 meta。默认关闭。', 'default'=>false],
             
             'redis_enable' => ['group'=>'speed', 'type'=>'bool', 'label'=>'启用 Redis 缓存', 'default'=>false],
             'redis_smart_purge' => ['group'=>'speed', 'type'=>'bool', 'label'=>'智能脏数据清理', 'default'=>true],
@@ -347,7 +344,7 @@ class Skyline_Core {
             'turbo_disable_xmlrpc' => ['group'=>'speed', 'type'=>'bool', 'label'=>'禁用 XML-RPC', 'default'=>false],
             'turbo_sanitize_names' => ['group'=>'speed', 'type'=>'bool', 'label'=>'文件名哈希化', 'default'=>false],
             'turbo_lazy_load' => ['group'=>'speed', 'type'=>'bool', 'label'=>'强制图片懒加载', 'desc'=>'开启后首屏大图也会被加 loading="lazy"，可能拖慢 LCP；默认关闭，需要时手动开启。', 'default'=>false],
-            'turbo_enable_image_opt' => ['group'=>'speed', 'type'=>'bool', 'label'=>'上传图片压缩', 'desc'=>'>10MB 的文件整个跳过不压缩；原图与缩略图分别压缩。', 'default'=>false],
+            'turbo_enable_image_opt' => ['group'=>'speed', 'type'=>'bool', 'label'=>'上传图片压缩', 'desc'=>'>10MB 的文件只跳过原图压缩，缩略图仍压缩。', 'default'=>false],
             // WebP 转换开关组：默认关闭（opt-in）。理由：① 转格式会改变新上传
             // 图片的文件扩展名与前台 URL，升级后静默开启等于改全站媒体管线
             // （P12 的教训：turbo_lazy_load 默认 true 曾在升级后强制生效）；
@@ -368,7 +365,7 @@ class Skyline_Core {
             // 永久丢失高清原图，故默认关闭、改尺寸前记日志。
             'turbo_max_width' => ['group'=>'speed', 'type'=>'number', 'label'=>'原图最大宽度（px，0 表示不改尺寸）', 'desc'=>'仅在“上传图片压缩”开启时生效；0 表示只压质量、不改尺寸。', 'default'=>0],
             'turbo_limit_5m' => ['group'=>'speed', 'type'=>'bool', 'label'=>'限制上传 5MB', 'default'=>false],
-            'turbo_allow_svg' => ['group'=>'speed', 'type'=>'bool', 'label'=>'允许 SVG/WebP', 'default'=>false],
+            'turbo_allow_svg' => ['group'=>'speed', 'type'=>'bool', 'label'=>'允许 SVG', 'desc'=>'只门控 SVG 上传；WebP 上传无需此开关。', 'default'=>false],
         ];
     }
 
@@ -518,6 +515,10 @@ class Skyline_Core {
         $k = $this->get_opt('api_key'); 
         if(!$k) return new WP_Error('sky_api_key_missing', 'Error: API Key missing');
 
+        // v2.2.3：空端点直接返回，不走到 wp_remote_post('') 才报网络错。
+        $endpoint = $this->get_chat_endpoint();
+        if ($endpoint === '') return new WP_Error('sky_api_endpoint_missing', 'API Endpoint 未配置，请先在“智能核心”页填写 API Endpoint');
+
         // M1：system_prompt 填了就作为 system 角色消息拼到最前面再发。
         // 注意：schema 默认值本身就是一句非空人设（见 system_prompt 的 default），
         // 所以默认情况下每次调用都会带上这句 system 消息；管理员清空该项后不拼。
@@ -549,7 +550,7 @@ class Skyline_Core {
             'sslverify' => true
         ];
 
-        $r = wp_remote_post($this->get_chat_endpoint(), $args);
+        $r = wp_remote_post($endpoint, $args);
         
         if(is_wp_error($r)) {
             $err = $r->get_error_message();
