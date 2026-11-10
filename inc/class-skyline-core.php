@@ -1034,8 +1034,8 @@ class Skyline_Core {
         if(!$this->get_opt('robot_enable')) return;
         // 补上缺失的登录可见逻辑！
         if ($this->get_opt('robot_only_logged') && !is_user_logged_in()) return;
-        // 注意：插件自带的 assets/images/robot.png 本身就是坏文件（从 v2.0.1
-        // 起 PNG 头就损坏，getimagesize() 失败），绝不能把它当头像 fallback。
+        // 注意：插件自带的默认头像文件已在 v2.2.5 移除，不要再把任何内置
+        // 图片当头像 fallback——坏图一旦被引用，前台就会出现破图图标。
         // robot_img 没设置时，浮动入口与标题栏都不输出 <img>，改用 emoji
         // 入口，避免前台出现破图图标。
         $img_url = $this->get_opt('robot_img');
@@ -1048,7 +1048,7 @@ class Skyline_Core {
             . ($has_img
                 ? '<img src="' . esc_url($img_url) . '" alt="AI Assistant">'
                 : '<span class="sky-waifu-fallback" role="img" aria-label="AI Assistant">💬</span>')
-            . '<div id="sky-waifu-tips" class="show">你好！我是灵感屋 AI 助手，有什么可以帮您？</div>
+            . '<div id="sky-waifu-tips" class="show">你好！我是本站的 AI 助手，有什么可以帮您？</div>
         </div>
         <div id="sky-chat-box">
             <div class="sky-head">'

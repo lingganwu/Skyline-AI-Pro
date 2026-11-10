@@ -370,8 +370,8 @@ class Skyline_Admin {
                     </button>
                     <?php endif; ?>
                     <div class="sky-brand-box">
-                        <span class="logo">灵感屋 LgWu</span>
-                        <span class="url">www.lgwu.net</span>
+                        <span class="logo">Skyline AI Pro</span>
+                        <span class="url">AI 智能运营中台</span>
                     </div>
                 </div>
             </div>
@@ -783,6 +783,7 @@ class Skyline_Admin {
             <div class="sky-card">
                 <div class="sky-card-title">📜 更新历史</div>
                 <div style="font-size: 13px; color: var(--sky-text-muted); line-height: 1.8;">
+                    <b>v2.2.5</b> - 单站硬编码通用化（前台欢迎语/推荐问题、气泡提示、后台品牌不再写本站名称）；删除损坏的默认头像 robot.png；插件头补齐 WordPress.org 要求字段；COS SDK 缺失时友好提示不致命；卸载时清理插件数据<br>
                     <b>v2.2.4</b> - AI 回复 Markdown 渲染（小标题、列表、代码块、链接）；系统人设改访客视角（接待来访的设计师、学生和景观爱好者，帮访客找站内资源，不提写文章/SEO/内容创作）<br>
                     <b>v2.2.3</b> - 修复 WebP 扫描 HTTP 524（分页 + 20 秒预算 + 续扫）；模型厂商下拉改不入库的预设选择器；模板库可一键填入系统人设；手动清缓存与 OSS 失败重试/待删队列操作入口；SEO Meta 输出（默认关）；对话端点补 /v4 与 /v1/chat；蜘蛛主开关三路生效；定时任务回调提到主文件注册<br>
                     <b>v2.2.2</b> - 修复批量卡片全瘫：admin.js 改页头加载（内联脚本调 SkyBatchRunner.create() 时驱动已定义）；批量/扫描失败文案带 HTTP 状态（403/504/500/断网可区分）；数据看板概览改成功能介绍，不再写当前厂商/模型名<br>

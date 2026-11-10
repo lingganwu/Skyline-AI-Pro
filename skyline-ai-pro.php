@@ -1,15 +1,19 @@
 <?php
 /*
 Plugin Name: Skyline AI Pro
-Description: 灵感屋(lgwu.net) 专属智能运营中台。集成主流 AI 模型、可视化无感同步系统、智能去水印、AI 润色与 Redis 智能缓存。[V2.2.4 AI 回复 Markdown 渲染 + 系统人设改访客视角]
-Version: 2.2.4
+Description: AI 运营中台：集成主流 AI 模型，提供访客聊天助手、AI 绘图、SEO 自动补全、图片同步与缓存优化。
+Version: 2.2.5
+Requires at least: 5.8
+Requires PHP: 7.4
 Author:      LingGanWu
+License: GPL-2.0-or-later
+License URI: https://www.gnu.org/licenses/gpl-2.0.html
 Text Domain: skyline-ai-pro
 */
 
 if (!defined('ABSPATH')) exit;
 
-define('SKY_VERSION', '2.2.4');
+define('SKY_VERSION', '2.2.5');
 
 define('SKY_PATH', plugin_dir_path(__FILE__));
 define('SKY_URL', plugin_dir_url(__FILE__));

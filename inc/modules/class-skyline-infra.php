@@ -1268,6 +1268,14 @@ if (!class_exists('Skyline_OSS_Mod')) {
         private function make_cos_client() {
             $core = Skyline_Core::instance();
             try {
+                // v2.2.5（COS SDK Fatal 防护）：目录版 zip 可能不带 vendor/，
+                // 此时不要走到 new Client 去撞 “Class 'Qcloud\Cos\Client'
+                // not found” 的 Fatal——先查 SDK 是否可用，缺失就返回 null
+                // 走调用方已有的容错分支（重试/保留清单/原样返回）。
+                if (!Sky_Official_COS_Client::sdk_available()) {
+                    $core->log('❌ [OSS] COS SDK 未安装：请通过 Composer 安装 qcloud/cos-sdk-v5（composer require qcloud/cos-sdk-v5），或在插件设置中关闭 OSS 功能；本次 OSS 同步已跳过', 'error', 'OSS');
+                    return null;
+                }
                 return new Sky_Official_COS_Client(
                     $core->get_opt('oss_ak'),
                     $core->get_opt('oss_sk'),
@@ -1868,6 +1876,16 @@ if (!class_exists('Sky_Official_COS_Client')) {
         private $client;
         private $bucket;
 
+        // v2.2.5（COS SDK Fatal 防护）：SDK 是否可用。先看类是否已加载
+        // （Composer autoload 已注册时直接命中），否则尝试加载插件自带
+        // 的 vendor/autoload.php 再查一次；两处都不行即 SDK 缺失。
+        public static function sdk_available() {
+            if (class_exists('\Qcloud\Cos\Client')) return true;
+            $autoload = SKY_PATH . 'vendor/autoload.php';
+            if (file_exists($autoload)) require_once $autoload;
+            return class_exists('\Qcloud\Cos\Client');
+        }
+
         public function __construct($ak, $sk, $bucket, $endpoint) {
             $this->bucket = trim($bucket);
             $region = 'ap-beijing';
@@ -1882,6 +1900,16 @@ if (!class_exists('Sky_Official_COS_Client')) {
 
             $autoload = SKY_PATH . 'vendor/autoload.php';
             if (file_exists($autoload)) require_once $autoload;
+
+            // v2.2.5（COS SDK Fatal 防护）：autoload 不存在或加载后类仍不
+            // 在——不要直接 new \Qcloud\Cos\Client（会 Fatal）。抛一个文
+            // 案明确的异常，由调用方接住：make_cos_client() 的
+            // catch (Throwable) 会记日志并返回 null；后台 OSS 测试按钮
+            // handle_test_oss() 的 catch (Throwable) 会把它转成 JSON 错误
+            // “无法创建 COS 客户端：COS SDK 未安装：……”，都不 Fatal。
+            if (!class_exists('\Qcloud\Cos\Client')) {
+                throw new \RuntimeException('COS SDK 未安装：请通过 Composer 安装 qcloud/cos-sdk-v5（composer require qcloud/cos-sdk-v5），或在插件设置中关闭 OSS 功能');
+            }
 
             $this->client = new \Qcloud\Cos\Client([
                 'region'          => $region,

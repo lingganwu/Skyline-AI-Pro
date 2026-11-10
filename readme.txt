@@ -4,7 +4,7 @@ Tags: ai, deepseek, content-automation, seo, productivity
 Requires at least: 5.8
 Tested up to: 7.1
 Requires PHP: 7.4
-Stable tag: 2.2.4
+Stable tag: 2.2.5
 License: GPLv2 or later
 License URI: http://www.gnu.org/licenses/gpl-2.0.html
 
@@ -30,6 +30,13 @@ Skyline AI Pro 是一款为专业内容创作者设计的 WordPress 智能中台
 3. Go to the 'Skyline Pro' settings page to configure your API keys.
 
 == Changelog ==
+
+= 2.2.5 =
+* 修复：删除损坏的占位图 assets/images/robot.png（缺 PNG 签名首字节的坏文件，前台已改用动态看板娘入口）
+* 合规：插件头补齐 Requires at least / Requires PHP / License 字段，描述改为通用文案，不再出现站点品牌名与版本号后缀
+* 修复：COS SDK 缺失时不再致命错误，云端存储给出明确提示并安全降级
+* 新功能：卸载插件时清理残留配置与定时任务
+* 优化：后台与说明文案通用化，去掉站点专属表述
 
 = 2.2.4 =
 * 新功能：AI 回复 Markdown 渲染——前台聊天回复按 Markdown 排版呈现（小标题、列表、代码块、链接）
