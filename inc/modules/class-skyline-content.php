@@ -11,12 +11,18 @@ class Skyline_Content {
     // WebP 单张转换长）；S1 每篇最多 3 次 AI 调用，默认每批 5 篇、上限
     // 20 篇（由批量卡片上的输入框调，服务端 clamp）。
     public const SPIDER_BATCH_SIZE = 5;
-    public const SPIDER_BATCH_TIME_BUDGET = 25;
+    public const SPIDER_BATCH_TIME_BUDGET = 20;
     public const SEO_BATCH_SIZE_DEFAULT = 5;
     public const SEO_BATCH_SIZE_MAX = 20;
-    public const SEO_BATCH_TIME_BUDGET = 25;
+    public const SEO_BATCH_TIME_BUDGET = 20;
     public const SEO_TRIAL_COUNT = 20; // S1 扫描后默认勾选前 20 篇试跑
     public const SCAN_MAX_ITEMS = 1000; // C1/S1 扫描清单最多列出的篇数
+    // v2.2.8：C1/S1 扫描分页（WebP scanPaged 同款）：每页篇数与单次
+    // 扫描请求的墙钟预算；页内超时即停，返回 done=false、offset=下一
+    // 未处理位置，客户端按 offset 续扫。预算 20 秒，留足余量不撞
+    // EdgeOne 60 秒回源超时。
+    public const SCAN_PAGE_SIZE = 500;
+    public const SCAN_TIME_BUDGET = 20;
 
     // 后台批量入口（admin.php 的 AJAX 处理）要调本类的引擎方法：经此
     // 取单例，不直接 new（构造器会重复注册钩子）。与 Skyline_OSS_Mod::
@@ -419,11 +425,11 @@ class Skyline_Content {
             } else {
                 $res = wp_remote_get($current_url, $args);
             }
-            if(is_wp_error($res)) { if ($tmp) @unlink($tmp); return ['error' => '网络错误: ' . $res->get_error_message()]; }
+            if(is_wp_error($res)) { if ($tmp) wp_delete_file($tmp); return ['error' => '网络错误: ' . $res->get_error_message()]; }
             $code = wp_remote_retrieve_response_code($res);
             if ($code >= 300 && $code < 400) {
                 $location = trim((string)wp_remote_retrieve_header($res, 'location'));
-                if ($tmp) @unlink($tmp);
+                if ($tmp) wp_delete_file($tmp);
                 if ($location === '' || $hop === 3) return ['error' => "HTTP状态 $code"];
                 $resolved = $this->resolve_redirect_url($current_url, $location);
                 if ($resolved === null) return ['error' => '重定向目标不是 http(s) 地址'];
@@ -432,13 +438,13 @@ class Skyline_Content {
                 $current_url = $resolved;
                 continue;
             }
-            if ($code != 200) { if ($tmp) @unlink($tmp); return ['error' => "HTTP状态 $code"]; }
+            if ($code != 200) { if ($tmp) wp_delete_file($tmp); return ['error' => "HTTP状态 $code"]; }
             if ($is_stream && $tmp && file_exists($tmp)) {
                 $sz = filesize($tmp);
-                if ($sz !== false && $sz > self::SPIDER_MAX_IMAGE_BYTES) { @unlink($tmp); return ['error' => '文件过大(>10MB)']; }
-                if ($sz !== false && $sz < 500) { @unlink($tmp); return ['error' => '文件太小(<500B)']; }
+                if ($sz !== false && $sz > self::SPIDER_MAX_IMAGE_BYTES) { wp_delete_file($tmp); return ['error' => '文件过大(>10MB)']; }
+                if ($sz !== false && $sz < 500) { wp_delete_file($tmp); return ['error' => '文件太小(<500B)']; }
                 $file_data = file_get_contents($tmp);
-                @unlink($tmp);
+                wp_delete_file($tmp);
                 if ($file_data === false) return ['error' => '读取下载文件失败'];
             }
             break;
@@ -458,7 +464,7 @@ class Skyline_Content {
         }
         if(strlen($file_data) < 500) return ['error' => '文件太小(<500B)'];
 
-        $filename = 'sp_' . date('YmdHis') . '_' . substr($img_hash, 0, 6) . '.jpg'; 
+        $filename = 'sp_' . wp_date('YmdHis') . '_' . substr($img_hash, 0, 6) . '.jpg'; 
         $content_type = wp_remote_retrieve_header($res, 'content-type');
         
         if($content_type) {
@@ -502,7 +508,7 @@ class Skyline_Content {
             foreach (explode("\n", $domains_raw) as $line) {
                 $d = strtolower(trim($line));
                 if ($d === '') continue;
-                if (strpos($d, '://') !== false) $d = (string)parse_url($d, PHP_URL_HOST);
+                if (strpos($d, '://') !== false) $d = (string)wp_parse_url($d, PHP_URL_HOST);
                 $d = strtolower(trim(explode('/', $d)[0]));
                 $d = ltrim($d, '*.');
                 $d = ltrim($d, '.');
@@ -524,7 +530,7 @@ class Skyline_Content {
 
     // 手动单张同步的入口检查：URL 的 host 精确命中或为排除域名的子域名时跳过。
     public function is_spider_excluded_url($url) {
-        $host = strtolower((string)(parse_url((string)$url, PHP_URL_HOST) ?: ''));
+        $host = strtolower((string)(wp_parse_url((string)$url, PHP_URL_HOST) ?: ''));
         return $this->is_host_spider_excluded($host, $this->get_spider_excluded_domains());
     }
 
@@ -557,7 +563,7 @@ class Skyline_Content {
         if ($core->get_opt('oss_enable')) {
             $oss_domain = trim((string)$core->get_opt('oss_domain'));
             if ($oss_domain !== '') {
-                $h = parse_url($oss_domain, PHP_URL_HOST);
+                $h = wp_parse_url($oss_domain, PHP_URL_HOST);
                 if (!$h) $h = preg_replace('#^https?://#i', '', $oss_domain);
                 $h = strtolower(trim(explode('/', $h)[0]));
                 if ($h !== '') $oss_hosts[] = $h;
@@ -574,7 +580,7 @@ class Skyline_Content {
     // 名），不另写一套 host 判断——扫描与自动同步的口径必须一致。
     private function is_external_image_url($url, $site_domain, $oss_hosts, $excluded_domains) {
         if (strpos($url, $site_domain) !== false || strpos($url, 'data:image') !== false) return false;
-        $url_host = strtolower(parse_url($url, PHP_URL_HOST) ?: '');
+        $url_host = strtolower(wp_parse_url($url, PHP_URL_HOST) ?: '');
         if ($url_host !== '' && in_array($url_host, $oss_hosts, true)) return false;
         if ($this->is_host_spider_excluded($url_host, $excluded_domains)) return false;
         return true;
@@ -585,7 +591,7 @@ class Skyline_Content {
     public function find_external_images($content) {
         $candidates = $this->collect_image_candidates($content);
         if (empty($candidates)) return [];
-        $site_domain = parse_url(get_site_url(), PHP_URL_HOST);
+        $site_domain = wp_parse_url(get_site_url(), PHP_URL_HOST);
         $oss_hosts = $this->get_oss_hosts();
         $excluded_domains = $this->get_spider_excluded_domains();
         $out = [];
@@ -601,11 +607,33 @@ class Skyline_Content {
     // 数、涉及域名）。只读：不下载、不改正文、不写任何 meta。清单最多
     // 列 SCAN_MAX_ITEMS 篇，超出时 truncated=true（先处理完这批再重扫，
     // 已同步的文章下次扫描即掉出清单）。
-    public function scan_external_images() {
+    // C1：只读扫描全站已发布文章，列出含外链图的文章（标题、外链图张
+    // 数、涉及域名）。只读：不下载、不改正文、不写任何 meta。清单最多
+    // 列 SCAN_MAX_ITEMS 篇，超出时 truncated=true（先处理完这批再重扫，
+    // 已同步的文章下次扫描即掉出清单）。
+    // v2.2.8：分页扫描（WebP scanPaged 同款）：每次只取一页
+    // （offset/page_size），页内超 SCAN_TIME_BUDGET（20 秒）即停，返回
+    // done=false、offset=下一未处理位置，客户端按 offset 续扫。旧单次
+    // 扫描全站 3640 篇、无预算，超 EdgeOne 60 秒回源超时即“网络错误”。
+    // $already 是客户端已累积的清单篇数，本页只补足 SCAN_MAX_ITEMS 的
+    // 剩余名额（计数仍全量，清单封顶）。
+    public function scan_external_images($offset = 0, $page_size = self::SCAN_PAGE_SIZE, $already = 0) {
+        $offset = max(0, (int)$offset);
+        $page_size = min(2000, max(1, (int)$page_size));
+        $already = max(0, (int)$already);
+        // total：一次廉价 COUNT，不拉全表（WebP 扫描同款），供客户端
+        // 显示“已扫 X/Y 篇”与判断 done。
+        global $wpdb;
+        $total_known = isset($wpdb) && method_exists($wpdb, 'get_var');
+        $total = 0;
+        if ($total_known) {
+            $total = (int)$wpdb->get_var("SELECT COUNT(*) FROM {$wpdb->posts} WHERE post_type = 'post' AND post_status = 'publish'");
+        }
         $ids = get_posts([
             'post_type' => 'post',
             'post_status' => 'publish',
-            'posts_per_page' => -1,
+            'posts_per_page' => $page_size,
+            'offset' => $offset,
             'fields' => 'ids',
             'orderby' => 'ID',
             'order' => 'ASC',
@@ -615,17 +643,23 @@ class Skyline_Content {
         $affected = 0;
         $total_images = 0;
         $truncated = false;
+        $start = microtime(true);
+        $scanned = 0;
+        $room = max(0, self::SCAN_MAX_ITEMS - $already);
         foreach ($ids as $id) {
+            // 墙钟预算：超时前停下，剩下的文章客户端按 offset 续扫，不丢。
+            if (microtime(true) - $start > self::SCAN_TIME_BUDGET) break;
+            $scanned++;
             $post = get_post((int)$id);
             if (!$post) continue;
             $urls = $this->find_external_images($post->post_content ?? '');
             if (empty($urls)) continue;
             $affected++;
             $total_images += count($urls);
-            if (count($items) >= self::SCAN_MAX_ITEMS) { $truncated = true; continue; }
+            if (count($items) >= $room) { $truncated = true; continue; }
             $domains = [];
             foreach ($urls as $u) {
-                $h = strtolower(parse_url($u, PHP_URL_HOST) ?: '');
+                $h = strtolower(wp_parse_url($u, PHP_URL_HOST) ?: '');
                 if ($h !== '') $domains[] = $h;
             }
             $items[] = [
@@ -635,12 +669,28 @@ class Skyline_Content {
                 'domains' => array_values(array_unique($domains)),
             ];
         }
+        $next_offset = $offset + $scanned;
+        if ($scanned < count($ids)) {
+            // 页内超时：本页没扫完，一定还有下一页。
+            $done = false;
+        } elseif ($total_known) {
+            $done = $next_offset >= $total;
+        } else {
+            // 无 COUNT 可用（仅测试替身会出现）：页未满即最后一页；页满
+            // 则假设还有下一页，客户端下次拿到空页即结束。total 取下界。
+            $done = count($ids) < $page_size;
+            $total = $next_offset;
+        }
         return [
-            'total_scanned' => count($ids),
+            'total' => $total,
+            'total_scanned' => $next_offset,
+            'scanned' => $scanned,
             'total_posts' => $affected,
             'total_images' => $total_images,
             'truncated' => $truncated,
             'items' => $items,
+            'done' => $done,
+            'offset' => $next_offset,
         ];
     }
 
@@ -689,6 +739,10 @@ class Skyline_Content {
         $results = [];
         $stopped_early = false;
         $start = microtime(true);
+        // v2.2.8：单篇截止点 = 本批开始时间 + 预算；传给 auto_spider，
+        // 单篇下载超时前停下（见 auto_spider 的 $deadline），避免单篇
+        // 慢图把整批拖过 EdgeOne 60 秒回源超时。
+        $deadline = $start + self::SPIDER_BATCH_TIME_BUDGET;
         foreach ($ids as $id) {
             // 墙钟预算：超时前停下，剩下的 ID 客户端下一批重发（与 WebP
             // 批量同款）。
@@ -702,10 +756,17 @@ class Skyline_Content {
             // 按跳过记，不覆盖上次的 _sky_spider_last。批量是手动路径，
             // 传 $manual=true：只查 spider_enable，不查 spider_auto
             // （手动模式下批量本来就要能跑）。
-            $res = $this->auto_spider($id, true);
+            $res = $this->auto_spider($id, true, $deadline);
             if ($res === null) {
                 $results[] = ['id' => $id, 'status' => 'skipped', 'title' => $post->post_title, 'reason' => '正在同步中，稍后再试'];
                 continue;
+            }
+            // v2.2.8：单篇撞到截止点（partial）：已同步的部分已写库，
+            // 但本篇不算做完——不放进 results，客户端下一批重发本篇
+            // 续跑（results 长度即客户端前进的步数，见 admin.js）。
+            if (!empty($res['partial'])) {
+                $stopped_early = true;
+                break;
             }
             // v2.2.1：一张都没同步成功时记 failed 而不是 done，并带首个
             // 失败原因（如“HTTP状态 404”）；否则失败的篇在界面上看不出。
@@ -732,7 +793,11 @@ class Skyline_Content {
     // 下批量同步本来就要能跑（批量复用本方法；线上当前就是手动
     // 模式）。cron/发布触发的自动路径默认 $manual=false，两个开关
     // 任一关即不跑。
-    public function auto_spider($pid, $manual = false) {
+    // v2.2.8：$deadline（批量路径传入，微秒时间戳）：单篇下载的墙钟
+    // 截止点。到点即停，剩下的图由批量客户端重发本篇续跑，返回
+    // partial=true；到点前已同步的图照常写库。自动路径（cron/发布）
+    // 不传 deadline，不受影响。
+    public function auto_spider($pid, $manual = false, $deadline = null) {
         // C-5/F-12：主开关语义——spider_enable 关，或自动路径下
         // spider_auto 关，直接返回，不做任何事（不抢锁、不下载、
         // 不写 meta）、不重排续跑。已排期的事件在管理员关开关后
@@ -766,10 +831,10 @@ class Skyline_Content {
         // 永远显示“未同步”，分不清“没跑过”和“跑过但无图可同步”。
         if(empty($candidates)) {
             update_post_meta($pid, '_sky_spider_last', ['success' => 0, 'failed' => 0, 'skipped' => 0, 'time' => time()]);
-            return ['success' => 0, 'failed' => 0, 'skipped' => 0, 'first_error' => ''];
+            return ['success' => 0, 'failed' => 0, 'skipped' => 0, 'first_error' => '', 'partial' => false];
         }
 
-        $site_domain = parse_url(get_site_url(), PHP_URL_HOST);
+        $site_domain = wp_parse_url(get_site_url(), PHP_URL_HOST);
         $success = 0;
         // D2：失败/跳过计数，与 $success 一起写进 _sky_spider_last，
         // 供看板最近文章处理状态表直接读。
@@ -787,6 +852,8 @@ class Skyline_Content {
         $oss_hosts = $this->get_oss_hosts();
 
         $has_more = false;
+        // v2.2.8：批量路径的墙钟截止点是否撞到（见下面循环内的检查）。
+        $deadline_hit = false;
         // M1：spider_domains（排除域名，一行一个）真正生效：按行解析，
         // 图片 URL 的 host 精确命中或为其子域名时跳过、不同步。
         // 解析与匹配见 get_spider_excluded_domains() / is_host_spider_excluded()，
@@ -794,6 +861,10 @@ class Skyline_Content {
         $excluded_domains = $this->get_spider_excluded_domains();
         foreach($candidates as $url_raw) {
             if ($processed_count >= $max_img) { $has_more = true; break; }
+            // v2.2.8：批量路径的墙钟截止点：到点即停，剩下的图由批量
+            // 客户端重发本篇续跑（返回 partial，见 batch_spider_posts）。
+            // 这里不置 $has_more，避免同时重排异步任务导致重复跑。
+            if ($deadline !== null && microtime(true) > $deadline) { $deadline_hit = true; break; }
 
             $url_real = html_entity_decode($url_raw);
             // D2：本站图/data URI、COS 图、排除域名的图都不用同步，记跳过
@@ -841,7 +912,7 @@ class Skyline_Content {
         // 最近文章处理状态表直接读，不再翻日志核对。超上限续跑时本次
         // 只记已跑完的部分，下次跑完会覆盖成本次完整结果。
         update_post_meta($pid, '_sky_spider_last', ['success' => $success, 'failed' => $failed, 'skipped' => $skipped, 'time' => time()]);
-        return ['success' => $success, 'failed' => $failed, 'skipped' => $skipped, 'first_error' => $first_error];
+        return ['success' => $success, 'failed' => $failed, 'skipped' => $skipped, 'first_error' => $first_error, 'partial' => $deadline_hit];
         } finally {
             delete_post_meta($pid, '_sky_spider_processing');
         }
@@ -962,7 +1033,7 @@ class Skyline_Content {
         if ($do_tags && ($only === null || in_array('tags', $only, true))) {
             $attempted[] = 'tags';
             $text = isset($updates['post_content']) ? $updates['post_content'] : $post->post_content;
-            $prompt = "请基于以下内容提取5个核心SEO标签，用逗号分隔，不要其他文字和编号：\n\n" . mb_substr(strip_tags($text), 0, 1500);
+            $prompt = "请基于以下内容提取5个核心SEO标签，用逗号分隔，不要其他文字和编号：\n\n" . mb_substr(wp_strip_all_tags($text), 0, 1500);
             $any_attempted = true;
             $tags = $core->call_api([['role'=>'user', 'content'=>$prompt]]);
             if ($tags && !is_wp_error($tags)) { wp_set_post_tags($pid, str_replace(['，', '、'], ',', $tags), true); $any_success = true; $succeeded[] = 'tags'; }
@@ -976,7 +1047,7 @@ class Skyline_Content {
             // 冲突——这类纯英文输出任务不拼 system 消息（call_api 第 3 参数）。
             $slug = $core->call_api([['role'=>'user', 'content'=>$prompt]], 0.7, false);
             if ($slug && !is_wp_error($slug)) {
-                $slug = sanitize_title(strip_tags(preg_replace('/^(Here.*?:\s*)/i', '', $slug)));
+                $slug = sanitize_title(wp_strip_all_tags(preg_replace('/^(Here.*?:\s*)/i', '', $slug)));
                 if ($slug) { $updates['post_name'] = substr(trim(preg_replace('/-+/', '-', $slug), '-'), 0, 60); $any_success = true; $succeeded[] = 'slug'; }
                 else { $failed['slug'] = 'AI 返回的 Slug 为空或无效'; }
             } else {
@@ -986,7 +1057,7 @@ class Skyline_Content {
         if ($do_excerpt && ($only === null || in_array('excerpt', $only, true)) && empty($post->post_excerpt)) {
             $attempted[] = 'excerpt';
             $text = isset($updates['post_content']) ? $updates['post_content'] : $post->post_content;
-            $prompt = "请为以下内容生成一段 120 字左右的中文 SEO 摘要，直接输出摘要，不要其他文字：\n\n" . mb_substr(strip_tags($text), 0, 1500);
+            $prompt = "请为以下内容生成一段 120 字左右的中文 SEO 摘要，直接输出摘要，不要其他文字：\n\n" . mb_substr(wp_strip_all_tags($text), 0, 1500);
             $any_attempted = true;
             $excerpt = $core->call_api([['role'=>'user', 'content'=>$prompt]]);
            if ($excerpt && !is_wp_error($excerpt)) {
@@ -1102,11 +1173,28 @@ class Skyline_Content {
     // S1：只读扫描全站已发布文章，列出缺英文 slug / 缺摘要 / 缺标签的
     // 文章，清单上标清每篇缺哪几项。只读：不调 API、不改文章、不写 meta。
     // 清单最多列 SCAN_MAX_ITEMS 篇，超出时 truncated=true。
-    public function scan_seo_missing() {
+    // S1：只读扫描全站已发布文章，列出缺英文 slug / 缺摘要 / 缺标签的
+    // 文章，清单上标清每篇缺哪几项。只读：不调 API、不改文章、不写 meta。
+    // 清单最多列 SCAN_MAX_ITEMS 篇，超出时 truncated=true。
+    // v2.2.8：分页扫描（与 scan_external_images 同款）：每次只取一页，
+    // 页内超 SCAN_TIME_BUDGET（20 秒）即停，返回 done=false、offset=
+    // 下一未处理位置，客户端按 offset 续扫。旧单次扫描全站 3640 篇、
+    // 无预算，超 EdgeOne 60 秒回源超时即“网络错误”。
+    public function scan_seo_missing($offset = 0, $page_size = self::SCAN_PAGE_SIZE, $already = 0) {
+        $offset = max(0, (int)$offset);
+        $page_size = min(2000, max(1, (int)$page_size));
+        $already = max(0, (int)$already);
+        global $wpdb;
+        $total_known = isset($wpdb) && method_exists($wpdb, 'get_var');
+        $total = 0;
+        if ($total_known) {
+            $total = (int)$wpdb->get_var("SELECT COUNT(*) FROM {$wpdb->posts} WHERE post_type = 'post' AND post_status = 'publish'");
+        }
         $ids = get_posts([
             'post_type' => 'post',
             'post_status' => 'publish',
-            'posts_per_page' => -1,
+            'posts_per_page' => $page_size,
+            'offset' => $offset,
             'fields' => 'ids',
             'orderby' => 'ID',
             'order' => 'ASC',
@@ -1118,24 +1206,43 @@ class Skyline_Content {
         $items = [];
         $affected = 0;
         $truncated = false;
+        $start = microtime(true);
+        $scanned = 0;
+        $room = max(0, self::SCAN_MAX_ITEMS - $already);
         foreach ($ids as $id) {
+            // 墙钟预算：超时前停下，剩下的文章客户端按 offset 续扫，不丢。
+            if (microtime(true) - $start > self::SCAN_TIME_BUDGET) break;
+            $scanned++;
             $post = get_post((int)$id);
             if (!$post) continue;
             $missing = $this->seo_missing_items($post);
             if (empty($missing)) continue;
             $affected++;
-            if (count($items) >= self::SCAN_MAX_ITEMS) { $truncated = true; continue; }
+            if (count($items) >= $room) { $truncated = true; continue; }
             $items[] = [
                 'id' => (int)$id,
                 'title' => $post->post_title,
                 'missing' => $missing,
             ];
         }
+        $next_offset = $offset + $scanned;
+        if ($scanned < count($ids)) {
+            $done = false;
+        } elseif ($total_known) {
+            $done = $next_offset >= $total;
+        } else {
+            $done = count($ids) < $page_size;
+            $total = $next_offset;
+        }
         return [
-            'total_scanned' => count($ids),
+            'total' => $total,
+            'total_scanned' => $next_offset,
+            'scanned' => $scanned,
             'total_posts' => $affected,
             'truncated' => $truncated,
             'items' => $items,
+            'done' => $done,
+            'offset' => $next_offset,
         ];
     }
 
@@ -1283,7 +1390,7 @@ class Skyline_Content {
         $title = sanitize_text_field( wp_unslash( $_POST['title'] ?? '' ) );
         $content = wp_kses_post( wp_unslash( $_POST['content'] ?? '' ) );
         if(mb_strlen($title)<10) { $score-=10; $advice[]='❌ 标题过短'; }
-        if(mb_strlen(strip_tags($content))<300) { $score-=20; $advice[]='❌ 内容稀薄'; }
+        if(mb_strlen(wp_strip_all_tags($content))<300) { $score-=20; $advice[]='❌ 内容稀薄'; }
         if($score>=90) $advice[]='🎉 完美！';
         Skyline_Core::instance()->log("SEO 诊断得分: $score", 'info', 'SEO');
         wp_send_json_success(['score'=>$score, 'advice'=>$advice]);
@@ -1471,7 +1578,7 @@ class Skyline_Content {
                         $('#sp-msg').text('第 ' + (idx+1) + ' 张: ' + label);
                         
                         $.post(skyAjaxUrl, {
-                            action: 'sky_spider_single', url: item.real, pid: pid, _ajax_nonce: '<?php echo $esc_nonce; ?>'
+                            action: 'sky_spider_single', url: item.real, pid: pid, _ajax_nonce: '<?php echo esc_attr($esc_nonce); ?>'
                         }).done(function(res) {
                             if(res.success) {
                                 var localUrl = res.data.url;
@@ -1549,7 +1656,7 @@ class Skyline_Content {
                     linkNow: function() {
                         var i = this.getContent(); if(!i) return alert('请先输入或粘贴内容');
                         $('#sky-loading').show();
-                        $.post(skyAjaxUrl, { action: 'sky_link_now', content: i, _ajax_nonce: '<?php echo $esc_nonce; ?>' }, function(r){
+                        $.post(skyAjaxUrl, { action: 'sky_link_now', content: i, _ajax_nonce: '<?php echo esc_attr($esc_nonce); ?>' }, function(r){
                             $('#sky-loading').hide();
                             if(r.success) { SkylineEditor.setContent(r.data.content); alert(r.data.msg); } 
                             else { alert(r.data); }
@@ -1566,7 +1673,7 @@ class Skyline_Content {
                             $('#sky-loading').show();
                             $.ajax({
                                 url: skyAjaxUrl, type: 'POST',
-                                data: { action: 'sky_ai_task', task: t, input: i, _ajax_nonce: '<?php echo $esc_nonce; ?>' },
+                                data: { action: 'sky_ai_task', task: t, input: i, _ajax_nonce: '<?php echo esc_attr($esc_nonce); ?>' },
                                 success: function(r) {
                                     $('#sky-loading').hide();
                                     if(r.success) { 
@@ -1623,7 +1730,7 @@ class Skyline_Content {
                     genImg: function() {
                         var p = prompt("请输入图片描述:"); if(!p) return;
                         $('#sky-loading').show();
-                        $.post(skyAjaxUrl, { action: 'sky_gen_img', prompt: p, _ajax_nonce: '<?php echo $esc_nonce; ?>' }, function(r){
+                        $.post(skyAjaxUrl, { action: 'sky_gen_img', prompt: p, _ajax_nonce: '<?php echo esc_attr($esc_nonce); ?>' }, function(r){
                             $('#sky-loading').hide();
                             // M8：返回 URL 先校验为 http(s) 且不含引号/尖括号/
                             // 空白，再用 DOM 建 <img>（.attr('src', …)），不拼
@@ -1660,7 +1767,7 @@ class Skyline_Content {
                         var t = $('#title').val(); 
                         if(this.isGutenberg()) t = wp.data.select("core/editor").getEditedPostAttribute("title");
                         var c = this.getContent();
-                        $.post(skyAjaxUrl, { action:'sky_seo_score', title:t, content:c, _ajax_nonce:'<?php echo $esc_seo_nonce; ?>' }, function(r){
+                        $.post(skyAjaxUrl, { action:'sky_seo_score', title:t, content:c, _ajax_nonce:'<?php echo esc_attr($esc_seo_nonce); ?>' }, function(r){
                              if(r.success) SkylineEditor.showResult('<b>SEO 得分: '+r.data.score+'</b><br>'+r.data.advice.join('<br>'));
                         });
                     },

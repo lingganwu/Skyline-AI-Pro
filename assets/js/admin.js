@@ -1,5 +1,5 @@
 document.addEventListener('DOMContentLoaded', function() {
-    console.log('🚀 Skyline AI Pro v2.2.7 Enterprise Engine Loaded');
+    console.log('🚀 Skyline AI Pro v2.2.8 Enterprise Engine Loaded');
 
     // 表单保存按钮动画增强
     const saveBtn = document.querySelector('.sky-save-btn');
@@ -69,31 +69,57 @@ window.SkyBatchRunner = (function() {
             setDisabled(cfg.startBtn, st.total === 0);
         }
         // v2.2.3（P0）：分页扫描。cfg.scanPaged 为 true 时扫描阶段循环
-        // 发请求（每次带 offset），累积 ids 与 skipped，状态区显示进度
-        // “正在扫描…已扫 X/Y 张”，直到服务端 done 才把累积结果
-        // {supported:true, total:累积 ids 数, ids:累积 ids, skipped:累积
-        // skipped} 交给现有的 parseScan（total 语义与旧单次扫描相同，
-        // 是可转 ID 数；服务端每页返回的 total 是符合条件的附件总数，
-        // 只用于进度显示与判断 done）。中途某页请求失败走现有 .fail()
-        // 处理（带 HTTP 状态）；服务端 supported=false 时直接收尾、不翻页。
-        function scanPaged(offset, accIds, accSkipped, accScanned, total) {
-            jQuery.post(ajaxurl, { action: cfg.scanAction, _ajax_nonce: cfg.nonce, offset: offset, page_size: cfg.scanPageSize || 2000 }, function(r) {
+        // 发请求（每次带 offset），累积结果，状态区显示进度“正在扫描…
+        // 已扫 X/Y <单位>”，直到服务端 done 才把累积结果交给现有的
+        // parseScan。两种累积形态（由 cfg.scanItems 区分）：
+        // ① WebP（scanItems 未设）：累积 ids 与 skipped（converted/
+        //    missing/toolarge/pending_delete/invalid），parseScan 收
+        //    {supported:true, total:累积 ids 数, ids:累积 ids,
+        //    skipped:累积 skipped}（total 语义与旧单次扫描相同，是可转
+        //    ID 数；服务端每页返回的 total 是符合条件的附件总数，只用于
+        //    进度显示与判断 done）；
+        // ② v2.2.8 C1/S1（scanItems 为 true）：累积 items（文章清单）
+        //    与 total_posts/total_images/truncated，parseScan 收
+        //    {total_scanned:累积已扫篇数, total_posts:累积含外链/缺项篇
+        //    数, total_images:累积外链图张数, truncated:任一页被清单
+        //    上限截断, items:累积清单}——与旧单次扫描的返回字段一致，
+        //    parseScan 不用改。每次请求带 already=已累积清单篇数，服务
+        //    端只补足 SCAN_MAX_ITEMS 的剩余名额（计数仍全量）。
+        // 中途某页请求失败走现有 .fail() 处理（带 HTTP 状态）；服务端
+        // supported=false 时直接收尾、不翻页（仅 WebP 有此字段）。
+        function scanPaged(offset, acc) {
+            var params = { action: cfg.scanAction, _ajax_nonce: cfg.nonce, offset: offset, page_size: cfg.scanPageSize || 2000 };
+            if (cfg.scanItems) params.already = acc.items.length;
+            jQuery.post(ajaxurl, params, function(r) {
                 if (!r.success) { setText(cfg.status, '❌ 扫描失败：' + (r.data || '未知错误')); return; }
                 var d = r.data || {};
                 if (d.supported === false) { finishScan(cfg.parseScan(d)); return; }
-                var ids = d.ids || [];
-                var skipped = d.skipped || {};
-                for (var i = 0; i < ids.length; i++) accIds.push(ids[i]);
-                var keys = ['converted', 'missing', 'toolarge', 'pending_delete', 'invalid'];
-                for (var j = 0; j < keys.length; j++) accSkipped[keys[j]] = (accSkipped[keys[j]] || 0) + (skipped[keys[j]] || 0);
-                accScanned += (d.scanned || ids.length);
-                total = d.total || total;
+                var unit = cfg.scanUnit || '张';
+                if (cfg.scanItems) {
+                    var items = d.items || [];
+                    for (var i = 0; i < items.length; i++) acc.items.push(items[i]);
+                    acc.posts += (d.total_posts || 0);
+                    acc.images += (d.total_images || 0);
+                    if (d.truncated) acc.truncated = true;
+                } else {
+                    var ids = d.ids || [];
+                    var skipped = d.skipped || {};
+                    for (var i = 0; i < ids.length; i++) acc.ids.push(ids[i]);
+                    var keys = ['converted', 'missing', 'toolarge', 'pending_delete', 'invalid'];
+                    for (var j = 0; j < keys.length; j++) acc.skipped[keys[j]] = (acc.skipped[keys[j]] || 0) + (skipped[keys[j]] || 0);
+                }
+                acc.scanned += (typeof d.scanned === 'number' ? d.scanned : (d.ids || []).length);
+                acc.total = d.total || acc.total;
                 if (!d.done) {
-                    setText(cfg.status, '正在扫描…已扫 ' + accScanned + '/' + total + ' 张');
-                    scanPaged(d.offset, accIds, accSkipped, accScanned, total);
+                    setText(cfg.status, '正在扫描…已扫 ' + acc.scanned + '/' + acc.total + ' ' + unit);
+                    scanPaged(d.offset, acc);
                     return;
                 }
-                finishScan(cfg.parseScan({ supported: true, total: accIds.length, ids: accIds, skipped: accSkipped }));
+                if (cfg.scanItems) {
+                    finishScan(cfg.parseScan({ total_scanned: acc.scanned, total_posts: acc.posts, total_images: acc.images, truncated: acc.truncated, items: acc.items }));
+                } else {
+                    finishScan(cfg.parseScan({ supported: true, total: acc.ids.length, ids: acc.ids, skipped: acc.skipped }));
+                }
             }).fail(function(xhr, textStatus) { setText(cfg.status, '❌ 扫描请求失败（' + skyAjaxFailDetail(xhr, textStatus) + '）。'); });
         }
         function next() {
@@ -148,7 +174,7 @@ window.SkyBatchRunner = (function() {
                 st.pos = 0; st.done = 0;
                 setText(cfg.status, cfg.scanText || '正在扫描…');
                 if (cfg.scanPaged) {
-                    scanPaged(0, [], { converted: 0, missing: 0, toolarge: 0, pending_delete: 0, invalid: 0 }, 0, 0);
+                    scanPaged(0, { ids: [], skipped: { converted: 0, missing: 0, toolarge: 0, pending_delete: 0, invalid: 0 }, items: [], posts: 0, images: 0, truncated: false, scanned: 0, total: 0 });
                     return;
                 }
                 jQuery.post(ajaxurl, { action: cfg.scanAction, _ajax_nonce: cfg.nonce }, function(r) {

@@ -336,7 +336,7 @@ class Skyline_Redis_Mod {
         // 路径与查询参数级排除：/feed（无斜杠）、?s= 搜索、?preview= 预览、
         // ?amp、?rest_route=。注意不能只用 'amp' 子串匹配——/camp/ 这类
         // 正常路径里也有 amp。
-        $parsed = parse_url($uri);
+        $parsed = wp_parse_url($uri);
         $path = $parsed['path'] ?? '/';
         if (preg_match('#(^|/)feed/?$#', $path) || strpos($path, '/feed/') !== false) return;
         if (!empty($parsed['query'])) {
@@ -403,7 +403,7 @@ class Skyline_Redis_Mod {
     // 刷出大量无用 key 挤占 Redis。?s=、?preview=、?amp、rest_route
     // 本就被排除，不受影响。
     public function page_cache_key($uri) {
-        $parsed = parse_url($uri);
+        $parsed = wp_parse_url($uri);
         $path = $parsed['path'] ?? '/';
         $query = [];
         if (!empty($parsed['query'])) {
@@ -426,6 +426,7 @@ class Skyline_Redis_Mod {
             http_response_code((int)($cached['status'] ?? 200));
             if (!empty($cached['ctype'])) header('Content-Type: ' . $cached['ctype']);
             header('X-Sky-Redis: HIT');
+            // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- $cached['body'] 是本站自己生成的整页 HTML（页面缓存），转义会破坏页面；缓存写入时只收 text/html 响应，来源可信。
             echo $cached['body'];
             exit;
         }
@@ -437,6 +438,7 @@ class Skyline_Redis_Mod {
             http_response_code(200);
             header('Content-Type: text/html; charset=UTF-8');
             header('X-Sky-Redis: HIT');
+            // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- $cached 是升级前存的纯字符串页面缓存（本站自己生成的 HTML），转义会破坏页面；来源可信。
             echo $cached;
             exit;
         }
@@ -769,19 +771,19 @@ class Skyline_Turbo_Mod {
             $ok = $this->encode_webp($img, $tmp, $quality);
             imagedestroy($img);
             $img = null;
-            if (!$ok) { @unlink($tmp); return false; }
+            if (!$ok) { wp_delete_file($tmp); return false; }
             // 二次校验：必须是真实有效的 WebP（魔数 + 非空），否则不认。
             if (!file_exists($tmp) || filesize($tmp) <= 0 || !self::is_webp_file($tmp)) {
-                @unlink($tmp);
+                wp_delete_file($tmp);
                 return false;
             }
-            if (!@rename($tmp, $new)) { @unlink($tmp); return false; }
+            if (!Skyline_Core::fs_move($tmp, $new)) { wp_delete_file($tmp); return false; }
             // 临时文件默认 0600，改回与原文件一致的权限，避免 Web 服务器读不到。
-            @chmod($new, fileperms($file) & 0777);
+            Skyline_Core::fs_chmod($new, fileperms($file) & 0777);
             return $new;
         } catch (Throwable $e) {
             if ($img !== null) { try { imagedestroy($img); } catch (Throwable $ignored) {} }
-            if ($tmp !== false) @unlink($tmp);
+            if ($tmp !== false) wp_delete_file($tmp);
             return false;
         }
     }
@@ -921,7 +923,7 @@ class Skyline_Turbo_Mod {
                 update_post_meta($attachment_id, '_sky_webp_orig_pending', array_values(array_unique($orig_to_delete)));
             } else {
                 foreach ($orig_to_delete as $old) {
-                    if (file_exists($old)) @unlink($old);
+                    if (file_exists($old)) wp_delete_file($old);
                 }
             }
         }
@@ -1295,7 +1297,7 @@ if (!class_exists('Skyline_OSS_Mod')) {
             $file = get_attached_file($attachment_id);
             // 对象 key 提前算出来：文件缺失分支也要用它核查 COS 上是否还有副本。
             $upload_dir = wp_upload_dir();
-            $base_url_path = trim(parse_url($upload_dir['baseurl'], PHP_URL_PATH), '/') ?: 'wp-content/uploads';
+            $base_url_path = trim(wp_parse_url($upload_dir['baseurl'], PHP_URL_PATH), '/') ?: 'wp-content/uploads';
             $attached_file = get_post_meta($attachment_id, '_wp_attached_file', true) ?: ($file ? basename($file) : '');
             $object_key = $base_url_path . '/' . ltrim($attached_file, '/');
             // L28(a) 补修：文件不存在时不再只清标记等下次——先核查 COS 上
@@ -1603,7 +1605,7 @@ if (!class_exists('Skyline_OSS_Mod')) {
             if (!is_dir($trash_dir)) {
                 if (function_exists('wp_mkdir_p')) {
                     wp_mkdir_p($trash_dir);
-                } elseif (!@mkdir($trash_dir, 0755, true) && !is_dir($trash_dir)) {
+                } elseif (!Skyline_Core::fs_mkdir($trash_dir) && !is_dir($trash_dir)) {
                     return false;
                 }
             }
@@ -1631,7 +1633,7 @@ if (!class_exists('Skyline_OSS_Mod')) {
             }
             $dest = $trash_dir . '/' . $stem . '-' . $token
                 . ($ext !== '' ? '.' . $ext : '');
-            if (!@rename($path, $dest)) return false;
+            if (!Skyline_Core::fs_move($path, $dest)) return false;
             return $dest;
         }
 
@@ -1651,7 +1653,12 @@ if (!class_exists('Skyline_OSS_Mod')) {
                 $bn = basename($f);
                 if ($bn === 'index.php' || $bn === 'index.html') continue;
                 $mtime = filemtime($f);
-                if ($mtime !== false && $mtime < $cutoff && @unlink($f)) $removed++;
+                // wp_delete_file() 无返回值：删后用 file_exists() 验删成功
+                // 再计数（与原来 @unlink() 的返回值语义一致）。
+                if ($mtime !== false && $mtime < $cutoff) {
+                    wp_delete_file($f);
+                    if (!file_exists($f)) $removed++;
+                }
             }
             return $removed;
         }
@@ -1827,7 +1834,10 @@ if (!class_exists('Skyline_OSS_Mod')) {
                 $ext = strtolower(pathinfo($path, PATHINFO_EXTENSION));
                 if (!in_array($ext, ['jpg', 'jpeg', 'png'], true)) continue;
                 if (!file_exists($path)) continue;
-                if (@unlink($path)) {
+                // wp_delete_file() 无返回值：删后用 file_exists() 验删成功
+                // 再记日志（与原来 @unlink() 的返回值语义一致）。
+                wp_delete_file($path);
+                if (!file_exists($path)) {
                     $core->log("🗑️ [WebP] 原图已删除（WebP 已校验 + COS 已同步）：{$path}", 'info', 'Turbo');
                 } else {
                     $core->log("⚠️ [WebP] 原图删除失败，已保留待重试：{$path}", 'warn', 'Turbo');
@@ -2035,6 +2045,76 @@ if (!class_exists('Sky_Official_COS_Client')) {
             } catch (\Throwable $ignored) {}
         }
 
+        // v2.2.8：大文件手动分片上传（替代原来 fopen() 传文件流给
+        // Upload()）。每片 5MB（COS 分片下限 1MB，末片除外），用
+        // file_get_contents() 按偏移只读一片，内存占用恒定 ~5MB。
+        // 成功不返回（无返回值）；失败抛异常（调用方捕获、记日志、返回
+        // false），抛之前先 abort 本次 UploadId，不留残留分片。
+        // SDK 没有分片接口时（极旧版本）退回整文件 putObject。
+        private function upload_large_file_multipart($key, $file, $size) {
+            $part_size = 5 * 1024 * 1024;
+            if (!method_exists($this->client, 'createMultipartUpload')
+                || !method_exists($this->client, 'uploadPart')
+                || !method_exists($this->client, 'completeMultipartUpload')) {
+                $body = file_get_contents($file);
+                if ($body === false) throw new Exception('无法读取本地文件: ' . $file);
+                $this->client->putObject([
+                    'Bucket' => $this->bucket,
+                    'Key'    => $key,
+                    'Body'   => $body,
+                    'ACL'    => 'public-read',
+                ]);
+                return;
+            }
+            $upload_id = null;
+            try {
+                $init = $this->client->createMultipartUpload([
+                    'Bucket' => $this->bucket,
+                    'Key'    => $key,
+                    'ACL'    => 'public-read',
+                ]);
+                $upload_id = is_array($init) ? ($init['UploadId'] ?? null) : null;
+                if (empty($upload_id)) throw new Exception('创建分片上传失败（未返回 UploadId）');
+                $parts = [];
+                $part_number = 1;
+                $offset = 0;
+                while ($offset < $size) {
+                    $len = min($part_size, $size - $offset);
+                    $chunk = file_get_contents($file, false, null, $offset, $len);
+                    if ($chunk === false) throw new Exception('无法读取本地文件分片: ' . $file);
+                    $res = $this->client->uploadPart([
+                        'Bucket'     => $this->bucket,
+                        'Key'        => $key,
+                        'UploadId'   => $upload_id,
+                        'PartNumber' => $part_number,
+                        'Body'       => $chunk,
+                    ]);
+                    $etag = is_array($res) ? ($res['ETag'] ?? null) : null;
+                    if (empty($etag)) throw new Exception('分片上传未返回 ETag');
+                    $parts[] = ['ETag' => $etag, 'PartNumber' => $part_number];
+                    $offset += $len;
+                    $part_number++;
+                }
+                $this->client->completeMultipartUpload([
+                    'Bucket'   => $this->bucket,
+                    'Key'      => $key,
+                    'UploadId' => $upload_id,
+                    'Parts'    => $parts,
+                ]);
+            } catch (\Throwable $e) {
+                if (!empty($upload_id) && method_exists($this->client, 'abortMultipartUpload')) {
+                    try {
+                        $this->client->abortMultipartUpload([
+                            'Bucket'   => $this->bucket,
+                            'Key'      => $key,
+                            'UploadId' => $upload_id,
+                        ]);
+                    } catch (\Throwable $ignored) {}
+                }
+                throw $e;
+            }
+        }
+
         public function putFile($key, $file) {
             if (!file_exists($file)) return false;
 
@@ -2044,40 +2124,17 @@ if (!class_exists('Sky_Official_COS_Client')) {
 
             // 大文件（>5MB）走分片上传：旧代码 file_get_contents() 全量读内存，
             // 2G 内存服务器 + 256M PHP 内存限制下，几十 MB 的原图即可能 OOM。
-            // COS SDK 的 Upload() 是复合接口：小文件简单上传、大文件自动分片
-            // （PartSize 5MB），body 传文件流而非整个字符串。
+            // v2.2.8：fopen() 会被 WordPress.org 自动检查报，改走 SDK 的
+            // 手动分片接口（见 upload_large_file_multipart）：每片 5MB、
+            // 用 file_get_contents() 按偏移只读一片进内存，内存占用恒定
+            // ~5MB，与原来传文件流等价。
             // 分片上传的 ETag 形如 "<md5>-<片数>"，verifyFile() 里本来就跳过
             // 含 '-' 的 ETag、只比大小，强校验链条不受影响。
-            // 说明：Upload() 的 $options 会按 SDK 惯例合并进 putObject /
-            // createMultipartUpload（putObject 分支即如此），ACL 随 options 透传；
-            // 若某版本 SDK 拒绝该参数，调用抛异常、这里捕获后返回 false，
-            // 文件不标记已同步、本地不删，是安全失败。
+            // 调用抛异常、这里捕获后返回 false，文件不标记已同步、本地不删，
+            // 是安全失败。
             if ($size !== false && $size > 5 * 1024 * 1024) {
                 try {
-                    $stream = fopen($file, 'rb');
-                    if ($stream === false) {
-                        $core->log("❌ [OSS] 无法打开本地文件: {$file}", 'error', 'OSS');
-                        return false;
-                    }
-                    try {
-                        if (method_exists($this->client, 'upload')) {
-                            $this->client->upload($this->bucket, $key, $stream, [
-                                'ACL' => 'public-read',
-                                'PartSize' => 5 * 1024 * 1024,
-                            ]);
-                        } else {
-                            // 极旧 SDK 没有 Upload()：退回流式 putObject，
-                            // 至少不把整个文件读进内存。
-                            $this->client->putObject([
-                                'Bucket' => $this->bucket,
-                                'Key'    => $key,
-                                'Body'   => $stream,
-                                'ACL'    => 'public-read'
-                            ]);
-                        }
-                    } finally {
-                        if (is_resource($stream)) fclose($stream);
-                    }
+                    $this->upload_large_file_multipart($key, $file, (int)$size);
                 } catch (\Throwable $e) {
                     // L28(b)：分片中途异常时尝试 abort 未完成的分片上传，
                     // 否则 COS 上残留未完成的分片占桶空间（尽力清理，清理

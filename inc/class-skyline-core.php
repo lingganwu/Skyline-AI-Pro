@@ -204,7 +204,7 @@ class Skyline_Core {
     public static function detect_api_vendor($api_base) {
         $raw = strtolower(trim((string)$api_base));
         if ($raw === '') return 'custom';
-        $host = parse_url($raw, PHP_URL_HOST);
+        $host = wp_parse_url($raw, PHP_URL_HOST);
         // 无 scheme 的裸地址 parse 不出 host，退回整串做子串匹配。
         if (!is_string($host) || $host === '') $host = $raw;
         $map = [
@@ -411,13 +411,64 @@ class Skyline_Core {
     // 同一请求内多次 log() 不重复扫目录；跨请求靠 transient 记当天日期）。
     private static $log_cleanup_day = null;
 
+    // v2.2.8（WordPress.org 合规）：文件操作统一走 WP_Filesystem，不用
+    // rename()/chmod()/mkdir()/fopen() 等原生函数（自动检查会报）。
+    // 只接受 direct 方式（本站文件属 www-data、可直接写）；非 direct
+    // 时返回 null，调用方按失败处理，不弹 FTP 凭证表单。
+    // 注意：WP_Filesystem_Direct::move() 内部就是 rename()，cosfs 挂载
+    // 上的行为与原来一致（.trash 移入、WebP 原子替换都不受影响）。
+    public static function wp_filesystem() {
+        global $wp_filesystem;
+        if (isset($wp_filesystem) && is_object($wp_filesystem)) return $wp_filesystem;
+        if (!function_exists('get_filesystem_method') || !function_exists('WP_Filesystem')) {
+            if (!defined('ABSPATH')) return null;
+            require_once ABSPATH . 'wp-admin/includes/file.php';
+        }
+        if (!function_exists('get_filesystem_method') || !function_exists('WP_Filesystem')) return null;
+        if (get_filesystem_method() !== 'direct') return null;
+        if (!WP_Filesystem()) return null;
+        global $wp_filesystem;
+        return (isset($wp_filesystem) && is_object($wp_filesystem)) ? $wp_filesystem : null;
+    }
+
+    // rename() 的替代：WP_Filesystem::move()，$overwrite=true 与 rename
+    // 覆盖目标的语义一致。失败返回 false。
+    public static function fs_move($from, $to) {
+        $fs = self::wp_filesystem();
+        if (!$fs || !method_exists($fs, 'move')) return false;
+        return (bool)$fs->move($from, $to, true);
+    }
+
+    // chmod() 的替代。失败返回 false（调用方原来用 @ 忽略失败）。
+    public static function fs_chmod($file, $mode) {
+        $fs = self::wp_filesystem();
+        if (!$fs || !method_exists($fs, 'chmod')) return false;
+        return (bool)$fs->chmod($file, $mode);
+    }
+
+    // mkdir() 的替代（递归建目录）。失败返回 false。
+    public static function fs_mkdir($dir) {
+        $fs = self::wp_filesystem();
+        if (!$fs || !method_exists($fs, 'mkdir')) return false;
+        return (bool)$fs->mkdir($dir, 0755, true);
+    }
+
+    // fopen()/fread()/fclose() 读文件的替代：整文件读进内存再处理。
+    // 只用于小文件（后台日志尾部读取）；大文件上传仍走分片流式。
+    // 读不到返回 false。
+    public static function fs_get_contents($file) {
+        $fs = self::wp_filesystem();
+        if (!$fs || !method_exists($fs, 'get_contents')) return false;
+        return $fs->get_contents($file);
+    }
+
     public function log($msg, $type = 'info', $context = 'System') {
         $timestamp = current_time('Y-m-d H:i:s');
         // 日志轮转：按天切分（skyline_ai-YYYYMMDD-<随机后缀>.log），只保留最近 7 天，防无限膨胀
         $dir = dirname($this->log_file);
         $today = $this->today_log_file();
         if (!file_exists($today) && file_exists($this->log_file)) {
-            @rename($this->log_file, $dir . '/skyline_ai-' . gmdate('Ymd', filemtime($this->log_file)) . '-' . $this->log_token() . '.log');
+            self::fs_move($this->log_file, $dir . '/skyline_ai-' . gmdate('Ymd', filemtime($this->log_file)) . '-' . $this->log_token() . '.log');
         }
         // 单日日志超 10MB 时轮转：把今天的日志改名保留一份（-rotated.log，
         // 仍命中 7 天清理的 glob），新写入从空文件开始，避免单文件无限膨胀。
@@ -425,7 +476,7 @@ class Skyline_Core {
         // 读到旧值，判断前先清掉该文件的缓存，否则阈值可能被漏过。
         clearstatcache(true, $today);
         if (file_exists($today) && filesize($today) > 10 * 1024 * 1024) {
-            @rename($today, $dir . '/skyline_ai-' . current_time('Ymd') . '-' . $this->log_token() . '-rotated.log');
+            self::fs_move($today, $dir . '/skyline_ai-' . current_time('Ymd') . '-' . $this->log_token() . '-rotated.log');
         }
         @file_put_contents($today, sprintf("[%s] [%s] [%s] %s\n", $timestamp, strtoupper($type), $context, $msg), FILE_APPEND | LOCK_EX);
 
@@ -437,7 +488,7 @@ class Skyline_Core {
                 set_transient('sky_log_cleanup_day', $today_key, 86400);
                 $cutoff = time() - 7 * 86400;
                 foreach (glob($dir . '/skyline_ai-*.log') ?: [] as $f) {
-                    if (filemtime($f) < $cutoff) @unlink($f);
+                    if (filemtime($f) < $cutoff) wp_delete_file($f);
                 }
             }
         }
@@ -1009,7 +1060,7 @@ class Skyline_Core {
         if(!current_user_can('manage_options')) wp_send_json_error('Unauthorized');
         $dir = dirname($this->log_file);
         foreach (glob($dir . '/skyline_ai*.log') ?: [] as $f) {
-            @unlink($f);
+            wp_delete_file($f);
         }
         // 重建空的今日日志文件（带随机后缀，与 log() 保持一致）
         @file_put_contents($this->today_log_file(), '');
@@ -1039,9 +1090,6 @@ class Skyline_Core {
         // 入口，避免前台出现破图图标。
         $img_url = $this->get_opt('robot_img');
         $has_img = is_string($img_url) && trim($img_url) !== '';
-        $head_avatar = $has_img
-            ? '<img class="sky-head-avatar" src="' . esc_url($img_url) . '" alt="">'
-            : '';
         echo '
         <div id="sky-waifu" onclick="toggleSkyChat()">'
             . ($has_img
@@ -1051,7 +1099,9 @@ class Skyline_Core {
         </div>
         <div id="sky-chat-box">
             <div class="sky-head">'
-                . $head_avatar .
+                . ($has_img
+                    ? '<img class="sky-head-avatar" src="' . esc_url($img_url) . '" alt="">'
+                    : '') .
                 '<span class="sky-head-title">✨ Skyline Copilot</span>
                 <span style="cursor:pointer;" onclick="toggleSkyChat()">✖</span>
             </div>

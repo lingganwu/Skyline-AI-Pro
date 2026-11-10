@@ -249,14 +249,8 @@ function skyline_ai_uninstall_cleanup_site() {
 // ---------------------------------------------------------------------------
 
 if (function_exists('is_multisite') && is_multisite()) {
-    // get_sites()（WP 4.6+）；老版本回退到 wp_get_sites()（返回数组形式）。
-    if (function_exists('get_sites')) {
-        $sites = get_sites(array('number' => 0));
-    } elseif (function_exists('wp_get_sites')) {
-        $sites = wp_get_sites();
-    } else {
-        $sites = array();
-    }
+    // get_sites()（WP 4.6+）；插件要求 WP 5.8+，老版本回退已无必要。
+    $sites = function_exists('get_sites') ? get_sites(array('number' => 0)) : array();
     if (!empty($sites)) {
         foreach ($sites as $site) {
             $blog_id = is_object($site) ? (int) $site->blog_id : (int) $site['blog_id'];
