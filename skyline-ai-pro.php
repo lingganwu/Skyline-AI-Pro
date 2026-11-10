@@ -1,15 +1,15 @@
 <?php
 /*
 Plugin Name: Skyline AI Pro
-Description: 灵感屋(lgwu.net) 专属智能运营中台。集成主流 AI 模型、可视化无感同步系统、智能去水印、AI 润色与 Redis 智能缓存。[V2.2.2 加载顺序回归修复 + 概览文案改成功能介绍]
-Version: 2.2.2
+Description: 灵感屋(lgwu.net) 专属智能运营中台。集成主流 AI 模型、可视化无感同步系统、智能去水印、AI 润色与 Redis 智能缓存。[V2.2.3 WebP 扫描分页 + P1/P2 审计项全修]
+Version: 2.2.3
 Author:      LingGanWu
 Text Domain: skyline-ai-pro
 */
 
 if (!defined('ABSPATH')) exit;
 
-define('SKY_VERSION', '2.2.2');
+define('SKY_VERSION', '2.2.3');
 
 define('SKY_PATH', plugin_dir_path(__FILE__));
 define('SKY_URL', plugin_dir_url(__FILE__));
@@ -24,6 +24,40 @@ spl_autoload_register(function ($class) {
     ];
     foreach ($paths as $file) {
         if (file_exists($file)) { require_once $file; return; }
+    }
+});
+
+// v2.2.3（X-3）：四个单次事件回调在加载期直接注册，与类实例化解耦。
+// 之前 purge/retry 的 add_action 在 Skyline_OSS_Mod::__construct 里，
+// spider/seo 的在 Skyline_Content::__construct 里，而两个类只在 Core
+// 的 load_modules() 里实例化；Infra 初始化若抛错被 try/catch 吞掉，
+// 对应的 cron 回调会全程不注册，已排期的事件会被 WP 静默消费。
+// 回调里再懒加载取单例（事件触发时类必然已加载，autoloader 已注册；
+// Skyline_Content::__construct 与 Skyline_OSS_Mod::__construct 里的
+// 旧注册由其他工人删除，集成时 grep 核对每个 hook 只注册一次）。
+// 四个回调签名均为单参（cron 事件带的参数）：auto_spider($pid)、
+// auto_seo_meta($pid, $only=null, $reschedule_on_fail=true)（只传 $pid，
+// 其余取默认）、purge_pending_deletes($attachment_id)、
+// retry_failed_sizes($attachment_id)。
+add_action('skyline_async_spider', function ($pid) {
+    if (class_exists('Skyline_Content')) Skyline_Content::instance()->auto_spider($pid);
+});
+add_action('skyline_async_seo', function ($pid) {
+    if (class_exists('Skyline_Content')) Skyline_Content::instance()->auto_seo_meta($pid);
+});
+add_action('skyline_oss_purge_pending', function ($attachment_id) {
+    if (class_exists('Skyline_OSS_Mod')) Skyline_OSS_Mod::instance()->purge_pending_deletes($attachment_id);
+});
+add_action('skyline_oss_retry_failed', function ($attachment_id) {
+    if (class_exists('Skyline_OSS_Mod')) Skyline_OSS_Mod::instance()->retry_failed_sizes($attachment_id);
+});
+
+// v2.2.3（X-3）：停用时清掉上述四个 hook 的已排期单次事件，残留事件
+// 不会在下次启用时对着已删附件触发。wp_clear_scheduled_hook() 不带
+// 参数即清掉该 hook 的全部实例（本站的单次事件都带文章/附件 id 参数）。
+register_deactivation_hook(__FILE__, function () {
+    foreach (['skyline_async_spider', 'skyline_async_seo', 'skyline_oss_purge_pending', 'skyline_oss_retry_failed'] as $hook) {
+        if (function_exists('wp_clear_scheduled_hook')) wp_clear_scheduled_hook($hook);
     }
 });
 

@@ -17,7 +17,7 @@ setTimeout(function(){
 var skySending = false;
 
 // 前台聊天请求客户端超时：60 秒。WP 端 wp_remote_post 是 30 秒、
-// EdgeOne 回源 12 秒，60 秒仍无响应基本是链路卡住，不再无限等下去。
+// EdgeOne 回源 60 秒，60 秒仍无响应基本是链路卡住，不再无限等下去。
 var SKY_CHAT_TIMEOUT_MS = 60000;
 
 // 聊天请求失败时显示独立错误气泡（.sky-msg.sky-error）：报错不再改写

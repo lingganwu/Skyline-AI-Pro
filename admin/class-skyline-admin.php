@@ -425,6 +425,70 @@ class Skyline_Admin {
             });
         }
 
+        // v2.2.3：OSS/缓存卡片共用的失败文案与单次操作助手。
+        // skyAjaxFailDetail 在 admin.js 的 SkyBatchRunner IIFE 内、不在
+        // 全局作用域，这里单写一份同款文案（带 HTTP 状态，403/504/500/
+        // 断网可区分）；nonce 取法与 WebP/蜘蛛/SEO 三张卡一致——内联
+        // wp_create_nonce('skyline_ajax_nonce')。
+        function skyFailText(xhr, textStatus) {
+            var status = (xhr && xhr.status) ? xhr.status : 0;
+            if (status === 403) return 'HTTP 403（可能是登录过期或 nonce 失效，请刷新页面重试）';
+            if (status === 504 || textStatus === 'timeout') return 'HTTP 504/超时（请求超时，请稍后重试）';
+            if (status === 500) return 'HTTP 500（服务端错误，请看服务器日志）';
+            if (status) return 'HTTP ' + status;
+            return '网络中断或超时（HTTP 0）';
+        }
+
+        // 单次操作：点后禁用给定按钮（可传一个元素或一组选择器）、请求
+        // 结束恢复；成功/失败文案写状态区；失败带 HTTP 状态。data 可能是
+        // 字符串或 {message, ...} 对象，两种都认。
+        function skyOssPost(action, extra, btns, statusId, workingText) {
+            var $btns = (typeof btns === 'string') ? jQuery(btns) : (btns ? jQuery(btns) : jQuery());
+            if ($btns.length && $btns.first().prop('disabled')) return;
+            $btns.prop('disabled', true);
+            var $st = statusId ? jQuery('#' + statusId) : jQuery();
+            if ($st.length) $st.text(workingText || '处理中…');
+            var params = { action: action, _ajax_nonce: '<?php echo wp_create_nonce('skyline_ajax_nonce'); ?>' };
+            if (extra) for (var k in extra) params[k] = extra[k];
+            jQuery.post(ajaxurl, params, function(r) {
+                var msg = '';
+                if (r.success) {
+                    var d = r.data;
+                    if (d && typeof d === 'object') msg = d.message || JSON.stringify(d);
+                    else msg = d || '操作成功';
+                    if ($st.length) $st.text('✅ ' + msg);
+                } else {
+                    if ($st.length) $st.text('❌ 操作失败：' + (r.data || '未知错误'));
+                }
+            }).fail(function(xhr, textStatus) {
+                if ($st.length) $st.text('❌ 操作失败（' + skyFailText(xhr, textStatus) + '）');
+            }).always(function() {
+                $btns.prop('disabled', false);
+            });
+        }
+
+        // P-6：缓存清理（只清 Redis 层，不碰 EdgeOne）。
+        function skyClearCache(scope, btn) {
+            skyOssPost('sky_clear_cache', { scope: scope }, '#sky-cache-clear-page-btn, #sky-cache-clear-all-btn', 'sky-cache-clear-status', '正在清理缓存…');
+        }
+
+        // O-7：手动重试全部上传失败尺寸。
+        function skyOssRetryFailed(btn) {
+            skyOssPost('sky_oss_retry_failed', null, btn, 'sky-oss-failed-status', '正在重试全部失败尺寸…');
+        }
+
+        // O-6/O-8：待删队列单行重试校验 / 取消登记 / 立即校验一次。
+        function skyPurgeRetry(id, btn) {
+            skyOssPost('sky_oss_purge_retry', { attachment_id: id }, btn, 'sky-purge-queue-status', '正在校验附件 #' + id + '…');
+        }
+        function skyPurgeCancel(id, btn) {
+            if (!confirm('确定取消该附件的待删登记吗？取消后本地文件将保留，不再删除。')) return;
+            skyOssPost('sky_oss_purge_cancel', { attachment_id: id }, btn, 'sky-purge-queue-status', '正在取消登记…');
+        }
+        function skyPurgeNow(btn) {
+            skyOssPost('sky_oss_purge_now', null, btn, 'sky-purge-queue-status', '正在校验待删队列…');
+        }
+
         function savePromptTemplate() {
             let name = jQuery('#new-prompt-name').val().trim();
             let template = jQuery('#new-prompt-template').val().trim();
@@ -452,24 +516,48 @@ class Skyline_Admin {
             });
         }
 
+        // v2.2.3：模板库缓存（供“填入系统人设”按 id 取全文，避免把
+        // 模板内容拼进 onclick 属性里转义）；模板只能存/看/删的断链
+        // 由此补上——点“填入系统人设”即把模板写进 system_prompt，
+        // 下一次 AI 调用（call_api 拼 system 消息）就会用上。
+        var skyPromptCache = {};
+
         function loadPrompts() {
             jQuery.post(ajaxurl, {
                 action: 'sky_get_prompts',
                 _ajax_nonce: '<?php echo wp_create_nonce('sky_prompt_nonce'); ?>'
             }, function(r) {
                 if (r.success) {
+                    skyPromptCache = r.data || {};
                     let html = '<table class="widefat"><thead><tr><th>名称</th><th style="width:60%">模板预览</th><th>操作</th></tr></thead><tbody>';
                     Object.keys(r.data || {}).forEach(id => {
                         let p = r.data[id];
                         let tpl = p.template || '';
                         let preview = tpl.length > 100 ? tpl.substring(0, 100) + '...' : tpl;
                         let safeId = skyEscapeHtml(id).replace(/'/g, "\\'");
-                        html += `<tr><td>${skyEscapeHtml(p.name)}</td><td style="max-width:400px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${skyEscapeHtml(preview)}</td><td><button class="button button-small" onclick="deletePrompt('${safeId}')">删除</button></td></tr>`;
+                        html += `<tr><td>${skyEscapeHtml(p.name)}</td><td style="max-width:400px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${skyEscapeHtml(preview)}</td><td><button class="button button-small" onclick="skyUsePrompt('${safeId}')">填入系统人设</button> <button class="button button-small" onclick="deletePrompt('${safeId}')">删除</button></td></tr>`;
                     });
                     html += '</tbody></table>';
                     jQuery('#sky-prompt-list').html(html);
                 }
             });
+        }
+
+        // v2.2.3：把模板全文填进系统人设 textarea（#sky-field-system_prompt，
+        // render_field 的 textarea 分支所给 id）。人设已有非空内容时先
+        // confirm，取消则不填；填入后滚动到该字段并短暂高亮。
+        function skyUsePrompt(id) {
+            var p = skyPromptCache[id];
+            if (!p || !p.template) { alert('模板内容为空，无法填入。'); return; }
+            var ta = document.getElementById('sky-field-system_prompt');
+            if (!ta) { alert('未找到系统人设字段，请先打开“智能核心”页再试。'); return; }
+            if (ta.value.trim() !== '' && !confirm('系统人设已有内容，确定要用模板覆盖吗？')) return;
+            ta.value = p.template;
+            if (ta.dispatchEvent) ta.dispatchEvent(new Event('input', { bubbles: true }));
+            ta.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            ta.style.backgroundColor = '#fef9c3';
+            ta.style.outline = '2px solid #6366f1';
+            setTimeout(function() { ta.style.backgroundColor = ''; ta.style.outline = ''; }, 2000);
         }
 
         function deletePrompt(id) {
@@ -695,6 +783,7 @@ class Skyline_Admin {
             <div class="sky-card">
                 <div class="sky-card-title">📜 更新历史</div>
                 <div style="font-size: 13px; color: var(--sky-text-muted); line-height: 1.8;">
+                    <b>v2.2.3</b> - 修复 WebP 扫描 HTTP 524（分页 + 20 秒预算 + 续扫）；模型厂商下拉改不入库的预设选择器；模板库可一键填入系统人设；手动清缓存与 OSS 失败重试/待删队列操作入口；SEO Meta 输出（默认关）；对话端点补 /v4 与 /v1/chat；蜘蛛主开关三路生效；定时任务回调提到主文件注册<br>
                     <b>v2.2.2</b> - 修复批量卡片全瘫：admin.js 改页头加载（内联脚本调 SkyBatchRunner.create() 时驱动已定义）；批量/扫描失败文案带 HTTP 状态（403/504/500/断网可区分）；数据看板概览改成功能介绍，不再写当前厂商/模型名<br>
                     <b>v2.2.1</b> - 批量进度实时显示（WebP/图片同步/SEO 共用组件，在途批次可见、停止立即生效）+ 失败/跳过逐篇给原因；敏感字段防浏览器自动填充（密码框默认禁用、生图密钥独立）；生图 API Key 独立（留空跟随主 Key）；Prompt 模板库移到聊天记录上方<br>
                     <b>v2.2.0</b> - API 厂商预设下拉 + 模型联动（7 家 + 自定义，已存配置自动反推厂商）；前台聊天报错按原因区分（504 超时/403/60 秒超时/断网）<br>
@@ -735,7 +824,7 @@ class Skyline_Admin {
         $defs = [];
         if ($current_tab === 'ai') {
             $defs = [
-                '🔌 接口配置' => ['api_vendor', 'api_base', 'api_img_base', 'api_key', 'api_img_key', 'chat_model', 'image_model', 'system_prompt'],
+                '🔌 接口配置' => ['api_base', 'api_img_base', 'api_key', 'api_img_key', 'chat_model', 'image_model', 'system_prompt'],
                 '🤖 悬浮助手' => ['robot_enable', 'robot_only_logged', 'robot_img'],
                 '🛡️ 可信代理' => ['trusted_proxy_ips'],
             ];
@@ -779,6 +868,28 @@ class Skyline_Admin {
         <?php // v2.2.1：Prompt 模板库已移到“最近聊天记录”卡片正上方
               // （见本函数后部）；只挪位置，结构、id 与 JS 一字不动。 ?>
 
+        <?php // v2.2.3：厂商预设选择器（A-1）：独立下拉，不入库——没有
+              // name 属性、不随表单提交；选中态由 API Endpoint 地址反推
+              // （$vendor_key），当前厂商不单独保存。切换时 admin.js 的
+              // skyApplyVendor 即时改写下方字段，点“保存本页配置”才生效。 ?>
+        <div class="sky-setting-block" style="margin-bottom: 16px;">
+            <div class="sky-field-row">
+                <div class="sky-field-info">
+                    <div class="sky-field-label">模型厂商</div>
+                    <div class="sky-field-desc">💡 切换厂商后，下方 API Endpoint、生图根地址与两个模型下拉即时更新（要点“保存本页配置”才生效）；选“自定义”可自由填写任意地址与模型。当前厂商由 API Endpoint 地址自动识别，不单独保存。</div>
+                </div>
+                <div class="sky-field-control">
+                    <div class="sky-field-input" style="width:100%;">
+                        <select id="sky-field-api_vendor">
+                            <?php foreach ($vendors as $vk => $v): ?>
+                                <option value="<?php echo esc_attr($vk); ?>" <?php selected($vendor_key, $vk); ?>><?php echo esc_html($v['label']); ?></option>
+                            <?php endforeach; ?>
+                        </select>
+                    </div>
+                </div>
+            </div>
+        </div>
+
         <div class="sky-settings-grid sky-tab-ai">
             <?php
             $current_group_items = [];
@@ -798,7 +909,6 @@ class Skyline_Admin {
                         $key = $item['key'];
                         $cfg = $item['cfg'];
                         $val = $this->core->get_opt($key);
-                        if ($key === 'api_vendor') $val = $vendor_key;
                         if ($key === 'chat_model') $cfg['options'] = $vendors[$vendor_key]['chat_models'];
                         if ($key === 'image_model') $cfg['options'] = $vendors[$vendor_key]['image_models'];
                     ?>
@@ -1007,6 +1117,7 @@ class Skyline_Admin {
         </div>
         <?php if ($current_tab === 'speed'): ?>
             <?php $this->render_webp_batch_card(); ?>
+            <?php $this->render_cache_clear_card(); ?>
         <?php endif; ?>
         <?php if ($current_tab === 'spider'): ?>
             <?php $this->render_spider_batch_card(); ?>
@@ -1015,14 +1126,22 @@ class Skyline_Admin {
             <?php $this->render_seo_batch_card(); ?>
         <?php endif; ?>
         <?php if ($current_tab === 'oss'): ?>
+            <?php $this->render_oss_failed_list(); ?>
             <?php $this->render_pending_delete_queue(); ?>
         <?php endif; ?>
         <?php
     }
 
-    // L20：Zero-Disk 待删队列只读展示。读 _sky_oss_pending_delete 元数据
-    // （上传成功后登记，24 小时后由 WP-Cron 二次校验才删），只列出附件、
-    // 登记时间、预计删除时间与待删文件，不提供任何删除按钮。
+    // L20/v2.2.3：Zero-Disk 待删队列。读 _sky_oss_pending_delete 元数据
+    // （上传成功后登记，24 小时后由 WP-Cron 二次校验才删），列附件、
+    // 登记时间、预计删除时间、待删文件、重试次数与操作。
+    // v2.2.3（O-6/O-8）：重试次数取登记数组里的 retries（infra.php 的
+    // reschedule_purge() 写的，满 3 次停）；满 3 次的标“已停止重试”，
+    // 队列里长期挂着已过期的条目从此有人工出口——每行“重试校验”
+    // （sky_oss_purge_retry）/“取消登记”（sky_oss_purge_cancel，
+    // 先 confirm），卡片上“立即校验一次”（sky_oss_purge_now，
+    // wp-cron 饿死时也能手动触发一次校验）。按钮点后禁用、结束恢复、
+    // 结果写 #sky-purge-queue-status、失败带 HTTP 状态（见 skyOssPost）。
     private function render_pending_delete_queue() {
         $zero_disk_on = (bool)$this->core->get_opt('oss_delete_local');
         $ids = function_exists('get_posts') ? get_posts([
@@ -1035,23 +1154,31 @@ class Skyline_Admin {
         if (!is_array($ids)) $ids = [];
         ?>
         <div class="sky-card" style="margin-top: 20px;">
-            <div class="sky-card-title">🗑️ Zero-Disk 待删队列（只读）</div>
+            <div class="sky-card-title">
+                🗑️ Zero-Disk 待删队列
+                <button type="button" class="button button-primary" id="sky-purge-now-btn" onclick="skyPurgeNow(this)">
+                    ⚡ 立即校验一次
+                </button>
+            </div>
             <p style="color: var(--sky-text-muted); line-height: 1.6; font-size: 13px;">
                 上传成功后登记，24 小时后由 WP-Cron 二次校验 COS 对象（大小/ETag）通过才删除本地文件。
                 <?php if (!$zero_disk_on): ?>
                     当前 Zero-Disk 开关已关闭：待删登记作废，不会执行删除；重新开启后新上传才会重新登记。
                 <?php endif; ?>
+                重试满 3 次后自动停止重试、清单保留待人工处理，可点“重试校验”再跑一次，或点“取消登记”放弃删除、保留本地文件。
             </p>
+            <div id="sky-purge-queue-status" style="margin: 8px 0; font-size: 13px;"></div>
             <?php if (empty($ids)): ?>
                 <p style="color: var(--sky-text-muted); font-size: 13px;">当前没有已登记待删的文件。</p>
             <?php else: ?>
                 <table class="widefat">
-                    <thead><tr><th>附件</th><th>登记时间</th><th>预计删除时间</th><th>待删文件</th></tr></thead>
+                    <thead><tr><th>附件</th><th>登记时间</th><th>预计删除时间</th><th>待删文件</th><th>重试次数</th><th>操作</th></tr></thead>
                     <tbody>
                     <?php foreach ($ids as $id):
                         $pending = get_post_meta($id, '_sky_oss_pending_delete', true);
                         if (!is_array($pending) || empty($pending['files'])) continue;
                         $reg_time = isset($pending['time']) ? (int)$pending['time'] : 0;
+                        $retries = isset($pending['retries']) ? (int)$pending['retries'] : 0;
                         $file_names = [];
                         foreach ((array)$pending['files'] as $entry) {
                             if (is_array($entry) && !empty($entry['path'])) $file_names[] = basename($entry['path']);
@@ -1062,6 +1189,72 @@ class Skyline_Admin {
                             <td><?php echo $reg_time ? esc_html(date('Y-m-d H:i:s', $reg_time)) : '—'; ?></td>
                             <td><?php echo $reg_time ? esc_html(date('Y-m-d H:i:s', $reg_time + DAY_IN_SECONDS)) : '—'; ?></td>
                             <td><?php echo esc_html(implode('、', $file_names)); ?></td>
+                            <td><?php echo esc_html('重试 ' . $retries . ' 次'); ?><?php if ($retries >= 3): ?> <span class="sky-status-error">已停止重试</span><?php endif; ?></td>
+                            <td style="white-space: nowrap;">
+                                <button type="button" class="button button-small" onclick="skyPurgeRetry(<?php echo (int)$id; ?>, this)">🔄 重试校验</button>
+                                <button type="button" class="button button-small" onclick="skyPurgeCancel(<?php echo (int)$id; ?>, this)">✖️ 取消登记</button>
+                            </td>
+                        </tr>
+                    <?php endforeach; ?>
+                    </tbody>
+                </table>
+            <?php endif; ?>
+        </div>
+        <?php
+    }
+
+    // v2.2.3（O-7）：OSS 上传失败清单。读 _sky_oss_failed_sizes 元数据
+    // （infra.php 的 upload_all_sizes() 写的，每项含 type/key/path；
+    // 重试次数是独立 meta _sky_oss_retry_attempts，上限 3 次），上限
+    // 100 条。“手动重试全部”调 sky_oss_retry_failed（后端重试全部
+    // 失败尺寸；另有约 1 小时后的自动重试兜底）。无失败时给空状态。
+    private function render_oss_failed_list() {
+        $ids = function_exists('get_posts') ? get_posts([
+            'post_type' => 'attachment',
+            'post_status' => 'inherit',
+            'meta_key' => '_sky_oss_failed_sizes',
+            'posts_per_page' => 100,
+            'fields' => 'ids',
+        ]) : [];
+        if (!is_array($ids)) $ids = [];
+        $truncated = count($ids) >= 100;
+        ?>
+        <div class="sky-card" style="margin-top: 20px;">
+            <div class="sky-card-title">
+                ⚠️ OSS 上传失败清单
+                <button type="button" class="button button-primary" id="sky-oss-retry-failed-btn" onclick="skyOssRetryFailed(this)">
+                    🔄 手动重试全部
+                </button>
+            </div>
+            <p style="color: var(--sky-text-muted); line-height: 1.6; font-size: 13px;">
+                某个尺寸上传 COS 失败时会记在这里（约 1 小时后自动重试，最多 3 次）；点“手动重试全部”可立即再跑一次，不必等自动重试。
+            </p>
+            <div id="sky-oss-failed-status" style="margin: 8px 0; font-size: 13px;"></div>
+            <?php if (empty($ids)): ?>
+                <p style="color: var(--sky-text-muted); font-size: 13px;">暂无上传失败的附件。</p>
+            <?php else: ?>
+                <?php if ($truncated): ?>
+                    <p style="color: var(--sky-text-muted); font-size: 13px;">仅显示前 100 条。</p>
+                <?php endif; ?>
+                <table class="widefat">
+                    <thead><tr><th>附件</th><th>失败尺寸</th><th>重试次数</th></tr></thead>
+                    <tbody>
+                    <?php foreach ($ids as $id):
+                        $failed = get_post_meta($id, '_sky_oss_failed_sizes', true);
+                        if (!is_array($failed) || empty($failed)) continue;
+                        $attempts = (int)get_post_meta($id, '_sky_oss_retry_attempts', true);
+                        $post = function_exists('get_post') ? get_post($id) : null;
+                        $title = ($post && !empty($post->post_title)) ? $post->post_title : '—';
+                        $failed_desc = [];
+                        foreach ((array)$failed as $entry) {
+                            if (!is_array($entry)) continue;
+                            $failed_desc[] = ($entry['type'] ?? '?') . '：' . basename($entry['key'] ?? '');
+                        }
+                    ?>
+                        <tr>
+                            <td>#<?php echo esc_html($id); ?> <?php echo esc_html($title); ?></td>
+                            <td><?php echo esc_html(implode('、', $failed_desc)); ?></td>
+                            <td><?php echo esc_html('重试 ' . $attempts . ' 次'); ?><?php if ($attempts >= 3): ?> <span class="sky-status-error">已停止重试</span><?php endif; ?></td>
                         </tr>
                     <?php endforeach; ?>
                     </tbody>
@@ -1117,6 +1310,10 @@ class Skyline_Admin {
             scanBtn: 'sky-webp-scan-btn', startBtn: 'sky-webp-start-btn', stopBtn: 'sky-webp-stop-btn',
             scanAction: 'sky_webp_scan', batchAction: 'sky_webp_batch', batchFailLabel: '批量转换',
             scanText: '正在扫描…',
+            // v2.2.3：扫描改分页循环（admin.js 的 SkyBatchRunner 实现）——
+            // 单请求遍历全部约 53,000 个附件会撞 EdgeOne 60 秒回源超时
+            // （HTTP 524），分页后每请求只扫一段、带 offset 直到 done。
+            scanPaged: true,
             nonce: '<?php echo wp_create_nonce('skyline_ajax_nonce'); ?>',
             batchSize: function() { return 20; },
             resetCounts: function(st) { skyWebpOk = 0; skyWebpFail = 0; skyWebpSkip = 0; },
@@ -1136,6 +1333,34 @@ class Skyline_Admin {
         function skyWebpStart() { skyWebpRunner.start(); }
         function skyWebpStop() { skyWebpRunner.stop(); }
         </script>
+        <?php
+    }
+
+    // v2.2.3（P-6）：手动清缓存卡片（性能体检页）。此前全仓只有自动
+    // 清理（文章状态变化时 smart_flush 按前缀清页面缓存），后台没有
+    // 任何手动入口，体检页发现缓存异常后无处操作。两个按钮都只调
+    // sky_clear_cache（后端由 infra.php 实现，只清 Redis 层）：
+    // scope=page 清页面缓存，scope=all 清全部 Skyline 缓存。文案写明
+    // 不碰 EdgeOne CDN 缓存、不要与 EdgeOne 同时清理（2026-11-09
+    // 三层同清曾拖垮 FPM）。按钮点后禁用、结束恢复、结果写状态区、
+    // 失败带 HTTP 状态（见全局 skyClearCache / skyOssPost）。
+    private function render_cache_clear_card() {
+        ?>
+        <div class="sky-card" style="margin-top: 20px;">
+            <div class="sky-card-title">🧹 缓存清理</div>
+            <p style="color: var(--sky-text-muted); line-height: 1.6; font-size: 13px;">
+                仅清理 Redis 缓存层，不会清理 EdgeOne CDN 缓存；请勿与 EdgeOne 缓存同时清理（2026-11-09 三层同清曾拖垮 FPM）。
+            </p>
+            <div style="display: flex; gap: 10px; flex-wrap: wrap;">
+                <button type="button" class="button button-primary" id="sky-cache-clear-page-btn" onclick="skyClearCache('page', this)">
+                    🧹 清空页面缓存
+                </button>
+                <button type="button" class="button button-primary" id="sky-cache-clear-all-btn" onclick="skyClearCache('all', this)">
+                    🧹 清空全部 Skyline 缓存
+                </button>
+            </div>
+            <div id="sky-cache-clear-status" style="margin-top: 12px; font-size: 13px;"></div>
+        </div>
         <?php
     }
 
@@ -1462,8 +1687,11 @@ class Skyline_Admin {
                 break;
                 
             case 'textarea':
+                // v2.2.3：textarea 补 id（与 url/select/datalist 等分支一致
+                // 的 sky-field-<key> 约定），供 Prompt 模板库的“填入系统
+                // 人设”按钮定位系统人设字段（sky-field-system_prompt）。
                 echo '<div class="sky-field-input" style="width:100%;">';
-                echo '<textarea name="skyline_settings[' . esc_attr($key) . ']" rows="3">' . esc_textarea($val) . '</textarea>';
+                echo '<textarea id="sky-field-' . esc_attr($key) . '" name="skyline_settings[' . esc_attr($key) . ']" rows="3">' . esc_textarea($val) . '</textarea>';
                 echo '</div>';
                 break;
                 
