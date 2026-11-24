@@ -806,3 +806,7 @@ input:checked + .sky-slider:before {
 #sky-log-content {
     overflow-wrap: anywhere;
 }
+
+/* v2.2.9（WP.org 审核）：原 admin/class-skylaipr-admin.php 里直接输出的
+   <style> 块（小屏下仪表盘改为单列）移入此文件，随 wp_enqueue_style 加载。 */
+@media (max-width: 480px) { .sky-dashboard-grid { grid-template-columns: 1fr !important; } }

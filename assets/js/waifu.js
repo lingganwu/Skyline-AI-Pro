@@ -1,9 +1,9 @@
 // 前台悬浮助手（Skyline Copilot）。
 // 欢迎语与推荐问题只在浏览器里显示，不发给 API、不计入聊天限流；
-// 点推荐问题才会走正常发送流程（skySend），与手动输入完全一致。
-var SKY_WELCOME_TEXT = '你好！我是本站的 AI 助手，可以帮你找文章、找资源，也可以聊聊相关问题。';
-var SKY_SUGGESTIONS = ['这个插件能帮我做什么？', '如何写一篇好文章？', '怎么生成文章配图？', '如何补全文章的 SEO 信息？'];
-var skyWelcomeShown = false;
+// 点推荐问题才会走正常发送流程（skylaiprSend），与手动输入完全一致。
+var SKYLAIPR_WELCOME_TEXT = '你好！我是本站的 AI 助手，可以帮你找文章、找资源，也可以聊聊相关问题。';
+var SKYLAIPR_SUGGESTIONS = ['这个插件能帮我做什么？', '如何写一篇好文章？', '怎么生成文章配图？', '如何补全文章的 SEO 信息？'];
+var skylaiprWelcomeShown = false;
 
 setTimeout(function(){
     var t = document.getElementById('sky-waifu-tips');
@@ -14,16 +14,16 @@ setTimeout(function(){
 }, 120000);
 
 // 发送中标志：连续点发送或连按回车不再并发多条请求；输入框在发送期间禁用。
-var skySending = false;
+var skylaiprSending = false;
 
 // 前台聊天请求客户端超时：60 秒。WP 端 wp_remote_post 是 30 秒、
 // EdgeOne 回源 60 秒，60 秒仍无响应基本是链路卡住，不再无限等下去。
-var SKY_CHAT_TIMEOUT_MS = 60000;
+var SKYLAIPR_CHAT_TIMEOUT_MS = 60000;
 
 // 聊天请求失败时显示独立错误气泡（.sky-msg.sky-error）：报错不再改写
 // loading 节点的文字，避免把错误伪装成 AI 回复（与 d.success=false
 // 的失败分支同一样式）。
-function skyShowChatError(text) {
+function skylaiprShowChatError(text) {
     var b = document.getElementById('sky-chat-msgs');
     if (!b) return;
     var loadingNode = document.getElementById('sky-loading');
@@ -37,40 +37,40 @@ function skyShowChatError(text) {
 
 // 首次打开面板时显示欢迎语 + 推荐问题（整个页面生命周期只显示一次）。
 // 打开面板本身不发任何请求；聊天区已有内容时不再重复插入。
-function showSkyWelcome() {
-    if (skyWelcomeShown) return;
+function skylaiprShowWelcome() {
+    if (skylaiprWelcomeShown) return;
     var b = document.getElementById('sky-chat-msgs');
-    if (!b) { skyWelcomeShown = true; return; }
-    if (b.childNodes.length > 0) { skyWelcomeShown = true; return; }
-    skyWelcomeShown = true;
+    if (!b) { skylaiprWelcomeShown = true; return; }
+    if (b.childNodes.length > 0) { skylaiprWelcomeShown = true; return; }
+    skylaiprWelcomeShown = true;
 
     var w = document.createElement('div');
     w.className = 'sky-msg ai';
-    w.textContent = SKY_WELCOME_TEXT;
+    w.textContent = SKYLAIPR_WELCOME_TEXT;
     b.appendChild(w);
 
     var sug = document.createElement('div');
     sug.className = 'sky-suggest';
-    SKY_SUGGESTIONS.forEach(function(q) {
+    SKYLAIPR_SUGGESTIONS.forEach(function(q) {
         var btn = document.createElement('button');
         btn.type = 'button';
         btn.className = 'sky-suggest-btn';
         btn.textContent = q;
-        btn.onclick = function() { skyAskSuggestion(q); };
+        btn.onclick = function() { skylaiprAskSuggestion(q); };
         sug.appendChild(btn);
     });
     b.appendChild(sug);
 }
 
-// 点推荐问题：填入输入框并直接发送（走正常 skySend 流程，计入限流）。
-function skyAskSuggestion(q) {
+// 点推荐问题：填入输入框并直接发送（走正常 skylaiprSend 流程，计入限流）。
+function skylaiprAskSuggestion(q) {
     var i = document.getElementById('sky-chat-in');
     if (!i) return;
     i.value = q;
-    skySend();
+    skylaiprSend();
 }
 
-function toggleSkyChat(){
+function skylaiprToggleChat(){
     var b = document.getElementById('sky-chat-box');
     var t = document.getElementById('sky-waifu-tips');
     if(b.style.display==='flex') {
@@ -82,16 +82,16 @@ function toggleSkyChat(){
     }
     if(t) t.style.display='none';
     b.style.display='flex';
-    showSkyWelcome();
+    skylaiprShowWelcome();
     document.getElementById('sky-chat-in').focus();
 }
 
 // AI 回复 Markdown 渲染（SkyMarkdown.render）。
 // 轻量手写、无第三方依赖：先转义 HTML 再转换 Markdown，AI 输出里的
-// <script>、<img onerror> 等只会原样显示成文本，绝不会执行。
+// script 标签、img 的 onerror 等只会原样显示成文本，绝不会执行。
 // 只用于 AI 回复气泡（.sky-msg.ai）：用户输入、欢迎语、报错文案仍用
 // textContent，绝不走这里。
-function skyMdEscape(s) {
+function skylaiprMdEscape(s) {
     return String(s)
         .replace(/&/g, '&amp;')
         .replace(/</g, '&lt;')
@@ -103,7 +103,7 @@ function skyMdEscape(s) {
 // 行内转换：行内代码 → Markdown 链接 → 裸网址 → 加粗 → 斜体。
 // 代码与链接先占位，避免里面的 *、[、] 被当成 Markdown 处理；
 // 链接只认 http(s)/相对路径，javascript:/data:/vbscript: 一律只留文字。
-function skyMdInline(s) {
+function skylaiprMdInline(s) {
     var codes = [], links = [];
     s = s.replace(/`([^`\n]+)`/g, function (m, c) {
         codes.push('<code>' + c + '</code>');
@@ -129,9 +129,9 @@ function skyMdInline(s) {
 
 // 块级转换：``` 代码块、##/### 标题、段落（空行分段）、-/ * 无序列表、
 // 1. 有序列表、--- 分隔线。代码块先占位，块内不做任何行内转换。
-function skyRenderMarkdown(md) {
+function skylaiprRenderMarkdown(md) {
     if (md == null) return '';
-    var text = skyMdEscape(String(md).replace(/\r\n?/g, '\n'));
+    var text = skylaiprMdEscape(String(md).replace(/\r\n?/g, '\n'));
     var codeBlocks = [];
     text = text.replace(/(^|\n)```[^\n]*\n([\s\S]*?)(?:```|$)/g, function (m, pre, code) {
         codeBlocks.push('<pre><code>' + code.replace(/\n+$/, '') + '</code></pre>');
@@ -140,12 +140,12 @@ function skyRenderMarkdown(md) {
     var out = [], buf = [], lines = text.split('\n'), i = 0;
     function flushPara() {
         if (!buf.length) return;
-        out.push('<p>' + buf.map(skyMdInline).join('<br>') + '</p>');
+        out.push('<p>' + buf.map(skylaiprMdInline).join('<br>') + '</p>');
         buf = [];
     }
     function flushList(tag, items) {
         out.push('<' + tag + '>' + items.map(function (it) {
-            return '<li>' + skyMdInline(it) + '</li>';
+            return '<li>' + skylaiprMdInline(it) + '</li>';
         }).join('') + '</' + tag + '>');
     }
     function trimLine(l) { return l.replace(/^\s+|\s+$/g, ''); }
@@ -157,7 +157,7 @@ function skyRenderMarkdown(md) {
         var mHead = line.match(/^(#{2,3})\s+(.*)$/);
         if (mHead) {
             flushPara();
-            out.push('<h' + mHead[1].length + '>' + skyMdInline(mHead[2]) + '</h' + mHead[1].length + '>');
+            out.push('<h' + mHead[1].length + '>' + skylaiprMdInline(mHead[2]) + '</h' + mHead[1].length + '>');
             i++; continue;
         }
         if (/^-{3,}$/.test(line)) { flushPara(); out.push('<hr>'); i++; continue; }
@@ -195,19 +195,19 @@ function skyRenderMarkdown(md) {
 // 导出给 Node 测试直接调用；浏览器里挂 window.SkyMarkdown。
 // 注意 waifu.js 是浏览器脚本：module 在浏览器里不存在，window 在
 // Node 里不存在，两边都做 typeof 守卫，别一加载就报错。
-var SkyMarkdown = { render: skyRenderMarkdown };
+var SkyMarkdown = { render: skylaiprRenderMarkdown };
 if (typeof window !== 'undefined') { window.SkyMarkdown = SkyMarkdown; }
 if (typeof module !== 'undefined' && module.exports) { module.exports = SkyMarkdown; }
 
-function skySend(){
+function skylaiprSend(){
     // 发送中直接返回：连续点发送、连按回车、点推荐问题都走这里，不再并发多条。
-    if (skySending) return;
+    if (skylaiprSending) return;
     var i = document.getElementById('sky-chat-in'),
         m = i.value.trim(),
         b = document.getElementById('sky-chat-msgs');
 
     if(!m) return;
-    skySending = true;
+    skylaiprSending = true;
     i.disabled = true;
 
     var userDiv = document.createElement('div');
@@ -218,9 +218,9 @@ function skySend(){
     b.scrollTop = b.scrollHeight;
 
     var fd = new FormData();
-    fd.append('action', 'sky_chat_front');
+    fd.append('action', 'skylaipr_chat_front');
     fd.append('msg', m);
-    fd.append('_ajax_nonce', sky_ajax.nonce);
+    fd.append('_ajax_nonce', skylaipr_ajax.nonce);
 
     // “正在输入…”三个点动画（纯 CSS，不发请求；收到回复后移除）。
     var ld = document.createElement('div');
@@ -232,18 +232,18 @@ function skySend(){
 
     // 客户端超时：60 秒仍无响应就 abort，不再无限等下去；超时后显示
     // “请求超时”，不再笼统报“网络错误”。
-    var skyController = (typeof AbortController !== 'undefined') ? new AbortController() : null;
-    var skyTimeoutId = null;
-    if (skyController) {
-        skyTimeoutId = setTimeout(function() { skyController.abort(); }, SKY_CHAT_TIMEOUT_MS);
+    var skylaiprController = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+    var skylaiprTimeoutId = null;
+    if (skylaiprController) {
+        skylaiprTimeoutId = setTimeout(function() { skylaiprController.abort(); }, SKYLAIPR_CHAT_TIMEOUT_MS);
     }
 
-    fetch(sky_ajax.ajax_url, {
+    fetch(skylaipr_ajax.ajax_url, {
         method: 'POST',
         body: fd,
-        signal: skyController ? skyController.signal : undefined
+        signal: skylaiprController ? skylaiprController.signal : undefined
     }).then(function(r) {
-        if (skyTimeoutId) clearTimeout(skyTimeoutId);
+        if (skylaiprTimeoutId) clearTimeout(skylaiprTimeoutId);
         // 先看 HTTP 状态再解析 JSON：EdgeOne 504/502、PHP Fatal 500、
         // nonce 校验失败的 403（响应体是纯文本 -1）都不是 JSON，
         // 旧代码直接 r.json()，解析抛错后一律显示“网络错误”，无法定位。
@@ -284,10 +284,10 @@ function skySend(){
             b.appendChild(aiDiv);
         }
         b.scrollTop = b.scrollHeight;
-        skySending = false;
+        skylaiprSending = false;
         i.disabled = false;
     }).catch(function(err) {
-        if (skyTimeoutId) clearTimeout(skyTimeoutId);
+        if (skylaiprTimeoutId) clearTimeout(skylaiprTimeoutId);
         var msg;
         if (err && err.name === 'AbortError') {
             msg = '请求超时（60 秒无响应），请稍后再试或换个简短的问题。';
@@ -298,8 +298,8 @@ function skySend(){
             // 只有这种情况才显示“网络错误”。
             msg = '网络错误，请检查网络连接后重试。';
         }
-        skyShowChatError(msg);
-        skySending = false;
+        skylaiprShowChatError(msg);
+        skylaiprSending = false;
         i.disabled = false;
     });
 }

@@ -4,11 +4,11 @@ Tags: ai, content-automation, seo, productivity, image-optimization
 Requires at least: 5.8
 Tested up to: 7.1
 Requires PHP: 7.4
-Stable tag: 2.2.8
+Stable tag: 2.2.10
 License: GPLv2 or later
 License URI: http://www.gnu.org/licenses/gpl-2.0.html
 
-An AI operations hub for WordPress: a visitor chat assistant, AI image generation, automatic SEO completion, image syncing, Redis caching, and cloud storage.
+An AI operations hub for WordPress: visitor chat, AI image generation, automatic SEO, image syncing, Redis caching, and cloud storage.
 
 == Description ==
 
@@ -97,15 +97,18 @@ Yes. Choose the Custom provider preset and enter any OpenAI-compatible API endpo
 
 This plugin does not collect, store, or transmit any telemetry, usage statistics, or personal data to the plugin author or to any third party on its own. Data leaves your site only where you configure it to do so, as described below.
 
-* **AI providers:** AI chat, image generation, and SEO requests are sent to the AI provider you choose in the settings, using the API key you enter. The plugin ships with no provider pre-selected and no built-in API key — you must choose a provider and supply your own key. What the provider does with your prompts and generated content is governed by that provider's own terms and privacy policy; please review them before use:
-  * OpenAI — Terms: https://openai.com/policies/terms-of-use — Privacy: https://openai.com/policies/privacy-policy
-  * OpenRouter — Terms: https://openrouter.ai/terms — Privacy: https://openrouter.ai/privacy
-  * SiliconFlow — https://siliconflow.cn/ (terms and privacy policy are linked from the provider's site)
-  * DeepSeek — https://www.deepseek.com/ (terms and privacy policy are linked from the provider's site)
-  * If you use a custom endpoint, the data goes to the endpoint you entered, under that service's terms.
+* **AI providers:** AI chat, image generation, and SEO requests are sent to the AI provider you choose in the settings, using the API key you enter. The plugin ships with no provider pre-selected and no built-in API key — you must choose a provider and supply your own key. Requests are made only when you (or a visitor using the chat panel, or an automatic task you enabled) trigger them: a chat message, an image-generation request, a post save that triggers automatic SEO, or a bulk SEO run you start. Each request sends only the data needed for that task — the chat history and system persona for chat, the image prompt for image generation, the post title/content for SEO — plus your API key for authentication. What the provider does with that data is governed by that provider's own terms and privacy policy; please review them before use:
+  * SiliconFlow — chat and image generation. Terms: https://docs.siliconflow.cn/docs/legals/terms-of-service — Privacy: https://docs.siliconflow.cn/docs/legals/privacy-policy
+  * OpenRouter — chat and image generation (routes requests to the model you select). Terms: https://openrouter.ai/terms — Privacy: https://openrouter.ai/privacy
+  * DeepSeek — chat. Terms: https://cdn.deepseek.com/policies/en-US/deepseek-terms-of-use.html — Privacy: https://cdn.deepseek.com/policies/en-US/deepseek-privacy-policy.html
+  * OpenAI — chat and image generation. Terms: https://openai.com/policies/terms-of-use — Privacy: https://openai.com/policies/privacy-policy
+  * Zhipu AI (Z.ai / BigModel) — chat and image generation. Terms: https://chat.z.ai/legal-agreement/terms-of-service — Privacy: https://chat.z.ai/legal-agreement/privacy-policy
+  * Moonshot AI (Kimi) — chat. Terms: https://platform.moonshot.cn/docs/agreement/modeluse — Privacy: https://platform.moonshot.cn/docs/agreement/privacy-policy
+  * Alibaba DashScope / Qwen (Model Studio) — chat. Terms: https://www.alibabacloud.com/help/en/legal/latest/alibaba-cloud-international-website-product-terms-of-service-v-3-8-0 — Privacy: https://www.alibabacloud.com/help/en/legal/latest/alibaba-cloud-privacy-policy
+  * If you use a custom endpoint, requests go to the endpoint you entered, under that service's terms.
 * **Chat history:** recent chat messages are stored in your own WordPress database so a conversation can continue across requests. At most 50 messages are kept per conversation. Visitor IP addresses are stored only as a SHA-256 hash, never in plain text. Chat data is sent to your configured AI provider as part of the chat request and nowhere else.
-* **Image sync:** when image sync runs, the plugin downloads images referenced in your own posts from their original URLs and uploads them to your media library. No image is downloaded or uploaded except as part of a sync you trigger or enable.
-* **Cloud storage (COS/OSS):** media files are uploaded to your Tencent Cloud COS (or S3-compatible) bucket only if you configure cloud storage credentials and enable it. Without configuration, no file is sent to any cloud storage.
+* **Image sync:** when image sync runs, the plugin downloads images referenced in your own posts from their original URLs and uploads them to your media library. No image is downloaded or uploaded except as part of a sync you trigger or enable. Each download is a plain HTTP image request to the image's original host (whatever domain the post links to); no data about your site is sent beyond that request.
+* **Cloud storage (COS/OSS):** media files are uploaded to your Tencent Cloud COS (or S3-compatible) bucket only if you configure cloud storage credentials and enable it. Without configuration, no file is sent to any cloud storage. Tencent Cloud's terms: https://intl.cloud.tencent.com/document/product/1255/70451 — Privacy: https://intl.cloud.tencent.com/document/product/1255/70452
 * **Caching:** Redis/Object Cache, transients, and local configuration caches live on your own server.
 * **No telemetry:** the plugin makes no requests to the plugin author's servers and collects no analytics.
 
@@ -116,6 +119,16 @@ For help, please use the WordPress.org plugin support forum for Skyline AI Pro �
 You can also contact the author by email at admin@lgwu.net. Please include your WordPress version, PHP version, the plugin version, and the steps to reproduce any problem.
 
 == Changelog ==
+
+= 2.2.10 =
+* WordPress.org review remediation (round 2): all plugin identifiers now use the unique `skylaipr_` prefix (longer than four characters) — PHP functions and classes, constants, AJAX actions, option and transient names, post meta keys, cron hooks, menu slug, script/style handles and JavaScript globals; existing sites keep their settings through a one-time upgrade migration that copies old option values to the new names, renames post meta keys, and clears pending events under the old cron hook names. The plugin slug, text domain (`skyline-ai-pro`) and log/Trash locations are unchanged.
+* Docs: Tencent Cloud terms and privacy links replaced with the publicly available documentation URLs (the previous tencentcloud.com short links serve a bot-challenge page to automated checks).
+* Fixed: the SVG upload validator's tag patterns are now built dynamically so no literal `<script>` / `<style>` string appears in the source (they were validator patterns, never tag output); the same cleanup was applied to comments mentioning those tags.
+
+= 2.2.9 =
+* WordPress.org review remediation: admin and editor pages no longer output inline `<script>` / `<style>` tags — all JavaScript and CSS now load via wp_enqueue_script / wp_enqueue_style, with nonces and preset data passed through wp_localize_script; plugin logs moved from the plugin directory to wp-content/uploads/skyline-ai-pro/logs/ and the deletion recycle bin moved to uploads/skyline-ai-pro/.trash; the page-cache output buffer is now explicitly closed on shutdown; the filename-hashing filter now applies only to the plugin's own image-localization uploads instead of every WordPress upload; removed the unnecessary media.php include and the load_plugin_textdomain() call (WordPress 4.6+ loads the text domain automatically).
+* Docs: readme now documents every third-party service (all seven AI provider presets, custom endpoints, and Tencent Cloud COS) with what it is used for, what data is sent and when, and links to its terms of service and privacy policy; short description shortened to under 150 characters.
+* Fixed: exception messages no longer include full server file paths (basename only).
 
 = 2.2.8 =
 * WordPress.org automated-check remediation: replaced parse_url with wp_parse_url, rename with WP_Filesystem::move, unlink with wp_delete_file, date with wp_date, strip_tags with wp_strip_all_tags, raw filesystem calls with WP_Filesystem methods, escaped all admin output, and removed the deprecated wp_get_sites fallback (87 ERROR + 1 WARNING fixed).
