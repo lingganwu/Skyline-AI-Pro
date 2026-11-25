@@ -2087,7 +2087,7 @@ if (!class_exists('Skylaipr_Official_COS_Client')) {
                 || !method_exists($this->client, 'uploadPart')
                 || !method_exists($this->client, 'completeMultipartUpload')) {
                 $body = file_get_contents($file);
-                if ($body === false) throw new Exception('无法读取本地文件: ' . basename($file));
+                if ($body === false) throw new Exception('无法读取本地文件: ' . esc_html(basename($file)));
                 $this->client->putObject([
                     'Bucket' => $this->bucket,
                     'Key'    => $key,
@@ -2111,7 +2111,7 @@ if (!class_exists('Skylaipr_Official_COS_Client')) {
                 while ($offset < $size) {
                     $len = min($part_size, $size - $offset);
                     $chunk = file_get_contents($file, false, null, $offset, $len);
-                    if ($chunk === false) throw new Exception('无法读取本地文件分片: ' . basename($file));
+                    if ($chunk === false) throw new Exception('无法读取本地文件分片: ' . esc_html(basename($file)));
                     $res = $this->client->uploadPart([
                         'Bucket'     => $this->bucket,
                         'Key'        => $key,
@@ -2188,7 +2188,7 @@ if (!class_exists('Skylaipr_Official_COS_Client')) {
             try {
                 $body = file_get_contents($file);
                 if ($body === false) {
-                    throw new Exception('无法读取本地文件: ' . basename($file));
+                    throw new Exception('无法读取本地文件: ' . esc_html(basename($file)));
                 }
 
                 $this->client->putObject([
