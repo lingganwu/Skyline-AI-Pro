@@ -1274,11 +1274,11 @@ if (!class_exists('Skyline_OSS_Mod')) {
                 // 此时不要走到 new Client 去撞 “Class 'Qcloud\Cos\Client'
                 // not found” 的 Fatal——先查 SDK 是否可用，缺失就返回 null
                 // 走调用方已有的容错分支（重试/保留清单/原样返回）。
-                if (!Sky_Official_COS_Client::sdk_available()) {
+                if (!Skylaipr_Official_COS_Client::sdk_available()) {
                     $core->log('❌ [OSS] COS SDK 未安装：请通过 Composer 安装 qcloud/cos-sdk-v5（composer require qcloud/cos-sdk-v5），或在插件设置中关闭 OSS 功能；本次 OSS 同步已跳过', 'error', 'OSS');
                     return null;
                 }
-                return new Sky_Official_COS_Client(
+                return new Skylaipr_Official_COS_Client(
                     $core->get_opt('oss_ak'),
                     $core->get_opt('oss_sk'),
                     $core->get_opt('oss_bucket'),
@@ -1881,8 +1881,8 @@ if (!class_exists('Skyline_OSS_Mod')) {
     }
 }
 
-if (!class_exists('Sky_Official_COS_Client')) {
-    class Sky_Official_COS_Client {
+if (!class_exists('Skylaipr_Official_COS_Client')) {
+    class Skylaipr_Official_COS_Client {
         private $client;
         private $bucket;
 

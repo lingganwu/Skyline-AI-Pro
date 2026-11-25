@@ -328,7 +328,8 @@ class Skylaipr_Redis_Mod {
 
         if(!$core->get_opt('redis_enable') || is_user_logged_in() || is_admin() || ($_SERVER['REQUEST_METHOD'] ?? 'GET') !== 'GET') return;
 
-        $uri = $_SERVER['REQUEST_URI'] ?? '/';
+        // v2.2.10（审核第 5 项）：REQUEST_URI 进缓存键前先清理（esc_url_raw），再进白名单过滤与 md5（见 page_cache_key）。
+        $uri = isset($_SERVER['REQUEST_URI']) ? esc_url_raw(wp_unslash($_SERVER['REQUEST_URI'])) : '/';
 
         // 内置排除（不受用户配置影响，防 REST/RSS/搜索/预览/AMP 被当 HTML 缓存）：
         // 即使用户在 redis_exclude 里清空了配置，这些也不会被缓存。
@@ -1311,11 +1312,11 @@ if (!class_exists('Skylaipr_OSS_Mod')) {
                 // 此时不要走到 new Client 去撞 “Class 'Qcloud\Cos\Client'
                 // not found” 的 Fatal——先查 SDK 是否可用，缺失就返回 null
                 // 走调用方已有的容错分支（重试/保留清单/原样返回）。
-                if (!Sky_Official_COS_Client::sdk_available()) {
+                if (!Skylaipr_Official_COS_Client::sdk_available()) {
                     $core->log('❌ [OSS] COS SDK 未安装：请通过 Composer 安装 qcloud/cos-sdk-v5（composer require qcloud/cos-sdk-v5），或在插件设置中关闭 OSS 功能；本次 OSS 同步已跳过', 'error', 'OSS');
                     return null;
                 }
-                return new Sky_Official_COS_Client(
+                return new Skylaipr_Official_COS_Client(
                     $core->get_opt('oss_ak'),
                     $core->get_opt('oss_sk'),
                     $core->get_opt('oss_bucket'),
@@ -1910,8 +1911,8 @@ if (!class_exists('Skylaipr_OSS_Mod')) {
     }
 }
 
-if (!class_exists('Sky_Official_COS_Client')) {
-    class Sky_Official_COS_Client {
+if (!class_exists('Skylaipr_Official_COS_Client')) {
+    class Skylaipr_Official_COS_Client {
         private $client;
         private $bucket;
 

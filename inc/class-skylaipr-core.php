@@ -21,9 +21,10 @@ class Skylaipr_Core {
 
     // v2.2.9（WP.org 审核）：日志目录——wp-content/uploads/skyline-ai-pro/logs/。
     // 运行时用 wp_upload_dir() 解析（多站点/自定义上传目录都对得上）；
-    // WP_CONTENT_DIR 兜底；仅 WP 未加载的测试环境才用系统临时目录。
-    // 任何分支都不再写插件目录。文件名里的 16 位随机后缀（log_token()）
-    // 本身已不可猜，故不再往目录写 .htaccess / index.php / index.html。
+    // 仅 WP 未加载的测试环境才用系统临时目录。任何分支都不再写插件
+    // 目录，也不再用内容目录常量硬拼 uploads 路径（v2.2.10 审核
+    // 修复第 4 项）。文件名里的 16 位随机后缀（log_token()）本身已
+    // 不可猜；目录另写 .htaccess 拒访（见 __construct，审核第 1 项）。
     public static function log_dir() {
         if (function_exists('wp_upload_dir')) {
             $u = wp_upload_dir();
@@ -31,22 +32,30 @@ class Skylaipr_Core {
                 return rtrim($u['basedir'], '/') . '/skyline-ai-pro/logs';
             }
         }
-        if (defined('WP_CONTENT_DIR')) {
-            return rtrim(WP_CONTENT_DIR, '/') . '/uploads/skyline-ai-pro/logs';
-        }
         return rtrim(sys_get_temp_dir(), '/') . '/skyline-ai-pro/logs';
     }
 
     public function __construct() {
         // v2.2.9（WP.org 审核）：日志不再写插件目录，改存 log_dir()
-        // （uploads/skyline-ai-pro/logs/）；不再写 .htaccess / index.php /
-        // index.html 三件套（随机后缀本身已防猜）。旧插件目录 logs/ 下的
-        // 旧日志升级后不再被轮转清理（WP 更新插件时会整个替换插件目录）。
+        // （uploads/skyline-ai-pro/logs/）。旧插件目录 logs/ 下的旧日志
+        // 升级后不再被轮转清理（WP 更新插件时会整个替换插件目录）。
+        // v2.2.10（审核第 1 项）：日志目录写 .htaccess 拒访（Apache 2.4
+        // Require all denied，兼容 2.2 Deny from all）+ index.php 静默
+        // 文件，与 16 位随机后缀文件名形成双层防护；缺失时补写，已存
+        // 在的文件不覆盖（站长可自行加严）。
         $this->log_file = self::log_dir() . '/skylaipr_ai.log';
 
         $log_dir = dirname($this->log_file);
         if (!file_exists($log_dir)) {
             wp_mkdir_p($log_dir);
+        }
+        $htaccess = $log_dir . '/.htaccess';
+        if (!file_exists($htaccess)) {
+            @file_put_contents($htaccess, "# Deny direct web access to log files.\n<IfModule mod_authz_core.c>\n    Require all denied\n</IfModule>\n<IfModule !mod_authz_core.c>\n    Deny from all\n</IfModule>\n");
+        }
+        $index_php = $log_dir . '/index.php';
+        if (!file_exists($index_php)) {
+            @file_put_contents($index_php, "<?php // Silence is golden.\n");
         }
         // L33：已装站点的 skylaipr_ai_settings 行仍是 autoload=yes——
         // admin.php 的 update_option(..., false) 只对新建行生效，已有行
@@ -760,11 +769,11 @@ class Skylaipr_Core {
         // 也是正常 HTTP 响应，之前一律报成功。改成真正写一次 + 读一次 +
         // 删一次测试对象，bucket 不存在、AK/SK 错误、权限不足时都会报真实
         // 失败原因；测试对象用完即删，不留垃圾。
-        if (!class_exists('Sky_Official_COS_Client')) {
+        if (!class_exists('Skylaipr_Official_COS_Client')) {
             wp_send_json_error('COS 客户端类不可用');
         }
         try {
-            $client = new Sky_Official_COS_Client(
+            $client = new Skylaipr_Official_COS_Client(
                 $this->get_opt('oss_ak'),
                 $this->get_opt('oss_sk'),
                 $this->get_opt('oss_bucket'),

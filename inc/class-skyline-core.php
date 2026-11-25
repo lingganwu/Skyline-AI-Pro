@@ -684,11 +684,11 @@ class Skyline_Core {
         // 也是正常 HTTP 响应，之前一律报成功。改成真正写一次 + 读一次 +
         // 删一次测试对象，bucket 不存在、AK/SK 错误、权限不足时都会报真实
         // 失败原因；测试对象用完即删，不留垃圾。
-        if (!class_exists('Sky_Official_COS_Client')) {
+        if (!class_exists('Skylaipr_Official_COS_Client')) {
             wp_send_json_error('COS 客户端类不可用');
         }
         try {
-            $client = new Sky_Official_COS_Client(
+            $client = new Skylaipr_Official_COS_Client(
                 $this->get_opt('oss_ak'),
                 $this->get_opt('oss_sk'),
                 $this->get_opt('oss_bucket'),
