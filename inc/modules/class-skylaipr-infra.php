@@ -408,13 +408,15 @@ class Skylaipr_Redis_Mod {
     }
 
     // v2.2.9：闭合 page_cache() 开启的输出缓冲（与 ob_start 配对）。
-    // 只冲掉本插件开启的层（ob_get_level() > 记录值）；回调已写过缓存
-    // 或请求已正常结束时层级已回落，不会多冲；带 @ 与 break 保护。
+    // T2 复查收紧：只在当前层级恰好是本插件开启的那一层（记录值 + 1）
+    // 时显式 ob_end_flush() 一次，绝不循环冲掉更高层级——其他组件在
+    // 本插件之后开启的缓冲不归本插件关闭。回调已写过缓存或请求已正常
+    // 结束时层级已回落，不会多冲。
     public function page_cache_flush() {
         if (!isset($this->skylaipr_page_cache_ob_level)) return;
         $target = (int)$this->skylaipr_page_cache_ob_level;
-        while (ob_get_level() > $target) {
-            if (@ob_end_flush() === false) break;
+        if (ob_get_level() === $target + 1) {
+            @ob_end_flush();
         }
         unset($this->skylaipr_page_cache_ob_level);
     }
@@ -433,7 +435,11 @@ class Skylaipr_Redis_Mod {
             parse_str($parsed['query'], $query);
             $allowed = ['paged', 'page', 'p', 'cpage', 'post_type', 'cat', 'category_name', 'tag', 'author', 'year', 'monthnum', 'day'];
             foreach ($query as $k => $v) {
-                if (!in_array(strtolower($k), $allowed, true)) unset($query[$k]);
+                if (!in_array(strtolower($k), $allowed, true)) { unset($query[$k]); continue; }
+                // T2 复查：白名单内的值也逐个清理，非标量值直接丢弃，
+                // 未清理的查询值不进缓存键与 home_url()。
+                if (!is_scalar($v)) { unset($query[$k]); continue; }
+                $query[$k] = sanitize_text_field((string)$v);
             }
             ksort($query);
         }

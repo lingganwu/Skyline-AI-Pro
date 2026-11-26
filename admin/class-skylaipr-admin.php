@@ -54,6 +54,11 @@ class Skylaipr_Admin {
         
         $posted = wp_unslash( $_POST['skylaipr_settings'] ?? [] );
         $schema = $this->core->get_config_schema();
+        // T2 复查（输入清理）：提交的设置数组先按 schema 键白名单过滤，
+        // 用户自造的键一律丢弃、绝不存入；保留下来的值再在下面循环里
+        // 按字段类型逐项清理（url 走 esc_url_raw、number 走 absint 等）。
+        if (!is_array($posted)) $posted = [];
+        $posted = array_intersect_key($posted, $schema);
         $current_tab = sanitize_key( wp_unslash( $_GET['tab'] ?? 'dashboard' ) );
 
         $sanitized = get_option('skylaipr_ai_settings', []);
@@ -85,7 +90,14 @@ class Skylaipr_Admin {
                 $wrote++;
             } elseif (isset($posted[$key])) {
                 if (is_array($posted[$key])) {
-                    $sanitized[$key] = array_map('sanitize_text_field', $posted[$key]);
+                    // 数组值按字段类型逐元素清理，不再一律走通用文本清理。
+                    if ($type === 'url') {
+                        $sanitized[$key] = array_map('esc_url_raw', array_map('strval', $posted[$key]));
+                    } elseif ($type === 'number') {
+                        $sanitized[$key] = array_map('absint', $posted[$key]);
+                    } else {
+                        $sanitized[$key] = array_map('sanitize_text_field', array_map('strval', $posted[$key]));
+                    }
                     $wrote++;
                 } else {
                     switch ($type) {
